@@ -163,6 +163,20 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             extra_args: &[],
         },
         InteropCase {
+            name: "upstream-u8-sequential",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/sequential_u8.bin"),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-u8-repeated",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/repeated_u8.bin"),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
             name: "upstream-csv-experiments",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_experiments.csv"),
             profile: "csv",
@@ -241,20 +255,6 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
-        },
-        InteropCase {
-            name: "upstream-u8-sequential",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/sequential_u8.bin"),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-        },
-        InteropCase {
-            name: "upstream-u8-repeated",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/repeated_u8.bin"),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
         },
         InteropCase {
             name: "upstream-u16-zigzag",

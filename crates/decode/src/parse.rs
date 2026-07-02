@@ -957,6 +957,9 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
     match id {
         standard::DELTA_INT_ID
         | standard::ZIGZAG_ID
+        | standard::CONVERT_NUM_TO_STRUCT_LE_ID
+        | standard::CONVERT_SERIAL_TO_NUM_LE_ID
+        | standard::CONVERT_NUM_TO_SERIAL_LE_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZSTD_ID

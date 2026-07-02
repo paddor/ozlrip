@@ -392,6 +392,9 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::ZSTD_ID
         | standard::BITPACK_SERIAL_ID
         | standard::CONSTANT_SERIAL_ID
+        | standard::CONVERT_NUM_TO_STRUCT_LE_ID
+        | standard::CONVERT_SERIAL_TO_NUM_LE_ID
+        | standard::CONVERT_NUM_TO_SERIAL_LE_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
@@ -502,6 +505,15 @@ fn execute_standard_node(
         }
         standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID => {
             decode_byte_preserving_conversion_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
+            decode_num_to_struct_le_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::CONVERT_SERIAL_TO_NUM_LE_ID => {
+            decode_serial_to_num_le_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::CONVERT_NUM_TO_SERIAL_LE_ID => {
+            decode_num_to_serial_le_chunk(single_input(inputs)?, header, limits)
         }
         standard::ZIGZAG_ID => decode_zigzag_serial8_chunk(single_input(inputs)?, header, limits),
         standard::DELTA_INT_ID => decode_delta_serial8_chunk(single_input(inputs)?, header, limits),
@@ -902,6 +914,45 @@ fn decode_byte_preserving_conversion_chunk(
             Error::new(ErrorKind::Unsupported).with_detail("conversion headers are unsupported")
         );
     }
+    copy_byte_preserving_conversion(stored, limits)
+}
+
+fn decode_num_to_struct_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_num_to_struct_le headers are unsupported"));
+    }
+    copy_byte_preserving_conversion(stored, limits)
+}
+
+fn decode_serial_to_num_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_serial_to_num_le headers are unsupported"));
+    }
+    copy_byte_preserving_conversion(stored, limits)
+}
+
+fn decode_num_to_serial_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    let [int_log] = header else {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_num_to_serial_le header is malformed"));
+    };
+    if *int_log > 3 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_num_to_serial_le integer width is invalid"));
+    }
+    let int_size = 1usize
+        .checked_shl(u32::from(*int_log))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if !stored.len().is_multiple_of(int_size) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("numeric stream size is not a multiple of integer width"));
+    }
+    copy_byte_preserving_conversion(stored, limits)
+}
+
+fn copy_byte_preserving_conversion(stored: &[u8], limits: Limits) -> Result<Vec<u8>> {
     if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
@@ -1576,6 +1627,9 @@ mod tests {
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONSTANT_SERIAL_ID,
+            standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+            standard::CONVERT_NUM_TO_STRUCT_LE_ID,
+            standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
@@ -1597,6 +1651,9 @@ mod tests {
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONSTANT_SERIAL_ID,
+            standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+            standard::CONVERT_NUM_TO_STRUCT_LE_ID,
+            standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
@@ -2072,6 +2129,69 @@ mod tests {
 
         assert_eq!(written, expected.len());
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decodes_v21_convert_num_to_struct_le_chunk() {
+        let expected = [1, 0, 2, 0, 3, 0, 4, 0];
+        let input = standard_transform_serial_frame(21, 8, &expected, expected.len(), &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decodes_v21_convert_serial_to_num_le_chunk() {
+        let expected = [1, 0, 2, 0, 3, 0, 4, 0];
+        let input = standard_transform_serial_frame(21, 9, &expected, expected.len(), &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decodes_v21_convert_num_to_serial_le_chunk() {
+        let expected = [1, 0, 2, 0, 3, 0, 4, 0];
+        let input = standard_transform_serial_frame(21, 10, &expected, expected.len(), &[1]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn rejects_convert_num_to_serial_bad_header_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 10, b"bytes", 5, &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_convert_num_to_serial_unaligned_size_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 10, b"bytes", 5, &[2]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
     }
 
     #[test]
