@@ -348,11 +348,16 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             extra_args: &["--chunk-size", "1M"],
             relaxed_limits: true,
         },
-    ]
-}
-
-fn discovery_interop_cases() -> Vec<InteropCase> {
-    vec![
+        InteropCase {
+            name: "getting-started-era5-i32",
+            input: InteropInput::UpstreamFile(
+                "examples/getting_started/sample_inputs/era5_ints.bin",
+            ),
+            profile: "le-i32",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: true,
+        },
         InteropCase {
             name: "getting-started-lorem-ipsum",
             input: InteropInput::UpstreamFile(
@@ -363,17 +368,11 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             extra_args: &[],
             relaxed_limits: false,
         },
-        InteropCase {
-            name: "getting-started-era5-i32",
-            input: InteropInput::UpstreamFile(
-                "examples/getting_started/sample_inputs/era5_ints.bin",
-            ),
-            profile: "le-i32",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
     ]
+}
+
+fn discovery_interop_cases() -> Vec<InteropCase> {
+    Vec::new()
 }
 
 fn sao_synthetic() -> Vec<u8> {

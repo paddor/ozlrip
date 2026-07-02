@@ -1,6 +1,14 @@
 use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
+use zrip_core::{
+    bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
+    fse::{
+        FseDecodeEntry,
+        table_builder::{build_decode_table, parse_fse_table_description},
+    },
+    huffman::{HuffmanDecodeEntry, decode},
+};
 
 #[cfg(feature = "zstd")]
 use crate::parse::SingleZstdFrame;
@@ -400,11 +408,17 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
 
 fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
     let static_inputs: usize = match standard_id {
-        standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => 0,
+        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::TRANSPOSE_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
         | standard::FLATPACK_ID
         | standard::SENTINEL_ID
         | standard::SEPARATE_STRING_COMPONENTS_ID
+        | standard::FSE_V2_ID
+        | standard::HUFFMAN_V2_ID
+        | standard::QUANTIZE_OFFSETS_ID
+        | standard::QUANTIZE_LENGTHS_ID
+        | standard::PARTITION_ID
+        | standard::TOKENIZE_FIXED_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
@@ -416,6 +430,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::BITPACK_SERIAL_ID
         | standard::BITPACK_INT_ID
         | standard::CONSTANT_SERIAL_ID
+        | standard::CONVERT_STRUCT_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_SERIAL_LE_ID
@@ -425,7 +440,8 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::ZIGZAG_ID
         | standard::DELTA_INT_ID
         | standard::BITUNPACK_ID
-        | standard::RANGE_PACK_ID => 1,
+        | standard::RANGE_PACK_ID
+        | standard::FSE_NCOUNT_ID => 1,
         _ => {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("standard transform graph execution is not implemented yet"));
@@ -516,6 +532,12 @@ fn execute_standard_node(
         standard::SPLITN_ID => {
             one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
         }
+        standard::SPLITN_STRUCT_ID => one_typed(decode_splitn_typed_node(
+            inputs,
+            variable_inputs,
+            header,
+            limits,
+        )),
         standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, limits)),
         standard::SEPARATE_STRING_COMPONENTS_ID => one_typed(
             decode_separate_string_components_node(inputs, header, limits),
@@ -570,11 +592,9 @@ fn execute_standard_node(
             header,
             limits,
         )),
-        standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(decode_num_to_struct_le_chunk(
-            single_stream(inputs)?,
-            header,
-            limits,
-        )),
+        standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(
+            decode_num_to_struct_le_chunk(single_stream(inputs)?, header, limits),
+        ),
         standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_serial(decode_numeric_to_serial_le_chunk(
             single_stream(inputs)?,
             header,
@@ -588,8 +608,8 @@ fn execute_standard_node(
         standard::MUX_LENGTHS_ID => decode_mux_lengths_node(inputs, header, limits),
         standard::LZ_ID => one_serial(decode_lz_node(inputs, header, limits)),
         standard::FIELD_LZ_ID => one_typed(decode_field_lz_node(inputs, header, limits)),
-        standard::ZIGZAG_ID => one_serial(decode_zigzag_serial8_chunk(
-            single_input(inputs)?,
+        standard::ZIGZAG_ID => one_typed(decode_zigzag_numeric_chunk(
+            single_stream(inputs)?,
             header,
             limits,
         )),
@@ -608,6 +628,29 @@ fn execute_standard_node(
             header,
             limits,
         )),
+        standard::FSE_NCOUNT_ID => one_typed(decode_fse_ncount_node(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
+        standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, limits)),
+        standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, limits)),
+        standard::QUANTIZE_OFFSETS_ID => one_typed(decode_quantize_node(
+            inputs,
+            header,
+            limits,
+            &QUANTIZE_OFFSETS,
+        )),
+        standard::QUANTIZE_LENGTHS_ID => one_typed(decode_quantize_node(
+            inputs,
+            header,
+            limits,
+            &QUANTIZE_LENGTHS,
+        )),
+        standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, limits)),
+        standard::TOKENIZE_FIXED_ID => {
+            one_typed(decode_tokenize_fixed_node(inputs, header, limits))
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform graph execution is not implemented yet")),
     }
@@ -1244,6 +1287,15 @@ fn decode_splitn_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
+    Ok(decode_splitn_typed_node(inputs, variable_inputs, header, limits)?.bytes)
+}
+
+fn decode_splitn_typed_node(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
     let input_count = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("too many splitn inputs"))?;
     if inputs.len() != input_count {
@@ -1251,17 +1303,35 @@ fn decode_splitn_node(
             .with_detail("splitn input count does not match node shape"));
     }
     if input_count == 0 {
-        validate_splitn_empty_header(header)?;
-        return Ok(Vec::new());
+        let element_width = splitn_empty_element_width(header)?;
+        return Ok(OwnedStream {
+            bytes: Vec::new(),
+            element_width,
+            string_lengths: None,
+        });
     }
     if !header.is_empty() {
         return Err(
             Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
         );
     }
+    let element_width = inputs[0].element_width;
+    if element_width == 0 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("splitn element width is zero"));
+    }
 
     let mut total_len = 0usize;
     for input in inputs {
+        if input.element_width != element_width {
+            return Err(
+                Error::new(ErrorKind::InvalidType).with_detail("splitn input widths must match")
+            );
+        }
+        if !input.bytes.len().is_multiple_of(element_width) {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("splitn input has partial element")
+            );
+        }
         total_len = total_len.checked_add(input.bytes.len()).ok_or_else(|| {
             Error::new(ErrorKind::IntegerOverflow).with_detail("splitn size overflowed")
         })?;
@@ -1279,23 +1349,29 @@ fn decode_splitn_node(
     for input in inputs {
         output.extend_from_slice(input.bytes);
     }
-    Ok(output)
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+    })
 }
 
-fn validate_splitn_empty_header(header: &[u8]) -> Result<()> {
+fn splitn_empty_element_width(header: &[u8]) -> Result<usize> {
     if header.is_empty() {
-        return Ok(());
+        return Ok(1);
     }
     let mut offset = 0usize;
     let element_width = read_var_u64(header, &mut offset)?;
     if offset != header.len() {
         return Err(Error::new(ErrorKind::Malformed).with_detail("unexpected splitn header bytes"));
     }
-    if element_width != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only serial byte splitn output is implemented"));
+    if element_width == 0 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("splitn element width must be nonzero")
+        );
     }
-    Ok(())
+    usize::try_from(element_width)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("splitn width is too large"))
 }
 
 fn decode_mux_lengths_node(
@@ -1757,6 +1833,1038 @@ fn require_numeric_width(stream: &StreamInput<'_>, expected: usize, name: &str) 
     Ok(())
 }
 
+fn decode_fse_ncount_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("fse_ncount headers are unsupported")
+        );
+    }
+    if source.element_width != 1 {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("fse_ncount input must be serial")
+        );
+    }
+
+    let mut reader = BitReader::new(source.bytes);
+    let (mut distribution, _accuracy_log) = parse_fse_table_description(&mut reader, u8::MAX)
+        .map_err(|err| {
+            Error::new(ErrorKind::Malformed).with_detail(format!("invalid fse_ncount: {err}"))
+        })?;
+    if reader.bytes_consumed() != source.bytes.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("fse_ncount input has trailing bytes")
+        );
+    }
+    while distribution.last().copied() == Some(0) {
+        distribution.pop();
+    }
+
+    let output_len = distribution
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("fse_ncount allocation failed")
+    })?;
+    for count in distribution {
+        output.extend_from_slice(&count.to_le_bytes());
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 2,
+        string_lengths: None,
+    })
+}
+
+fn decode_fse_v2_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    let [norm, bits] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("fse_v2 input count does not match node shape"));
+    };
+    require_numeric_width(norm, 2, "fse_v2 normalized counts")?;
+    if bits.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("fse_v2 bits must be serial"));
+    }
+
+    let parsed = parse_fse_v2_header(header)?;
+    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut distribution = Vec::new();
+    distribution
+        .try_reserve_exact(numeric_element_count(norm.bytes, 2)?)
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("fse distribution allocation failed")
+        })?;
+    for count in norm.bytes.chunks_exact(2) {
+        distribution.push(i16::from_le_bytes(count.try_into().map_err(|_| {
+            Error::new(ErrorKind::Malformed).with_detail("invalid fse count")
+        })?));
+    }
+    let accuracy_log = validate_fse_distribution(&distribution)?;
+    let table = build_decode_table(&distribution, accuracy_log).map_err(|err| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("invalid fse_v2 table: {err}"))
+    })?;
+    decode_fse_symbols(
+        bits.bytes,
+        parsed.output_len,
+        parsed.nb_states,
+        &table,
+        accuracy_log,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct FseV2Header {
+    nb_states: usize,
+    output_len: usize,
+}
+
+fn parse_fse_v2_header(header: &[u8]) -> Result<FseV2Header> {
+    if !(2..=9).contains(&header.len()) {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("fse_v2 header is malformed"));
+    }
+    let nb_states = usize::from(header[0]);
+    if !matches!(nb_states, 2 | 4) {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("fse_v2 state count is unsupported")
+        );
+    }
+    let mut output_len = 0u64;
+    for (shift, &byte) in header[1..].iter().enumerate() {
+        let bit_shift = shift
+            .checked_mul(8)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output_len |= u64::from(byte) << bit_shift;
+    }
+    if output_len < 2 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fse_v2 output count must be at least two"));
+    }
+    let output_len = usize::try_from(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("fse_v2 output size is too large")
+    })?;
+    Ok(FseV2Header {
+        nb_states,
+        output_len,
+    })
+}
+
+fn validate_fse_distribution(distribution: &[i16]) -> Result<u8> {
+    if distribution.len() < 2 || distribution.len() > 256 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("fse_v2 normalized count size is invalid")
+        );
+    }
+    let mut sum = 0u32;
+    for &count in distribution {
+        if count < -1 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("fse_v2 normalized count is invalid")
+            );
+        }
+        if count == -1 {
+            sum = sum
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        } else {
+            sum = sum
+                .checked_add(u32::try_from(count).map_err(|_| {
+                    Error::new(ErrorKind::Malformed).with_detail("fse_v2 count is invalid")
+                })?)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+    }
+    if sum == 0 || !sum.is_power_of_two() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("fse_v2 normalized count sum is invalid")
+        );
+    }
+    let accuracy_log = u8::try_from(sum.ilog2()).map_err(|_| Error::new(ErrorKind::Malformed))?;
+    if !(zrip_core::fse::MIN_TABLE_LOG..=zrip_core::fse::MAX_TABLE_LOG).contains(&accuracy_log) {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("fse_v2 table log is unsupported"));
+    }
+    Ok(accuracy_log)
+}
+
+#[derive(Clone, Copy)]
+struct OpenZlFseState<'a> {
+    table: &'a [FseDecodeEntry],
+    state: u32,
+}
+
+impl<'a> OpenZlFseState<'a> {
+    fn new(
+        table: &'a [FseDecodeEntry],
+        accuracy_log: u8,
+        reader: &mut ReverseBitReader<'_>,
+    ) -> Result<Self> {
+        let state = reader
+            .read_bits(accuracy_log)
+            .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+        Ok(Self { table, state })
+    }
+
+    fn symbol(self) -> Result<u8> {
+        let index = usize::try_from(self.state).map_err(|_| Error::new(ErrorKind::Malformed))?;
+        Ok(self
+            .table
+            .get(index)
+            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("fse state is invalid"))?
+            .symbol)
+    }
+
+    fn update(&mut self, reader: &mut ReverseBitReader<'_>) -> Result<()> {
+        let index = usize::try_from(self.state).map_err(|_| Error::new(ErrorKind::Malformed))?;
+        let entry = self
+            .table
+            .get(index)
+            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("fse state is invalid"))?;
+        let bits = reader
+            .read_bits(entry.num_bits)
+            .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+        self.state = u32::from(entry.base_line)
+            .checked_add(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        Ok(())
+    }
+}
+
+fn decode_fse_symbols(
+    bits: &[u8],
+    output_len: usize,
+    nb_states: usize,
+    table: &[FseDecodeEntry],
+    accuracy_log: u8,
+) -> Result<Vec<u8>> {
+    let mut reader = ReverseBitReader::new(bits)
+        .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+    let mut states = Vec::new();
+    states.try_reserve_exact(nb_states).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("fse state allocation failed")
+    })?;
+    for _ in 0..nb_states {
+        states.push(OpenZlFseState::new(table, accuracy_log, &mut reader)?);
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("fse output allocation failed")
+    })?;
+    for index in 0..output_len {
+        let state_index = index % nb_states;
+        let state = states
+            .get_mut(state_index)
+            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("fse state is missing"))?;
+        output.push(state.symbol()?);
+        if index + nb_states < output_len {
+            state.update(&mut reader)?;
+        }
+    }
+    if reader.bits_remaining() != 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("fse_v2 input has trailing bits"));
+    }
+    Ok(output)
+}
+
+fn decode_huffman_v2_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    let [weights, bits] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("huffman_v2 input count does not match node shape"));
+    };
+    require_numeric_width(weights, 1, "huffman_v2 weights")?;
+    if bits.element_width != 1 {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("huffman_v2 bits must be serial")
+        );
+    }
+    let parsed = parse_huffman_v2_header(header)?;
+    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let (table, table_log) = build_complete_huffman_decode_table(weights.bytes)?;
+    let decoded = if parsed.x4 {
+        decode::decode_4_streams(&table, table_log, bits.bytes, parsed.output_len)
+    } else {
+        decode::decode_single_stream(&table, table_log, bits.bytes, parsed.output_len)
+    }
+    .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+    Ok(decoded)
+}
+
+#[derive(Clone, Copy)]
+struct HuffmanV2Header {
+    x4: bool,
+    output_len: usize,
+}
+
+fn parse_huffman_v2_header(header: &[u8]) -> Result<HuffmanV2Header> {
+    if !(2..=9).contains(&header.len()) {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("huffman_v2 header is malformed"));
+    }
+    let x4 = (header[0] & 1) != 0;
+    let mut output_len = 0u64;
+    for (shift, &byte) in header[1..].iter().enumerate() {
+        let bit_shift = shift
+            .checked_mul(8)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output_len |= u64::from(byte) << bit_shift;
+    }
+    if output_len < 2 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("huffman_v2 output count must be at least two"));
+    }
+    let output_len = usize::try_from(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("huffman_v2 output size is too large")
+    })?;
+    Ok(HuffmanV2Header { x4, output_len })
+}
+
+fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDecodeEntry>, u8)> {
+    if weights.len() < 2 || weights.len() > 256 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("huffman_v2 weight count is invalid")
+        );
+    }
+    let mut sum = 0u32;
+    let mut non_zero = 0usize;
+    for &weight in weights {
+        if weight > 12 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("huffman_v2 weight is invalid")
+            );
+        }
+        if weight != 0 {
+            non_zero = non_zero
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            sum = sum
+                .checked_add(1u32 << (u32::from(weight) - 1))
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+    }
+    if non_zero < 2 || sum == 0 || !sum.is_power_of_two() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("huffman_v2 weights are not normalized")
+        );
+    }
+    let table_log = u8::try_from(sum.ilog2()).map_err(|_| Error::new(ErrorKind::Malformed))?;
+    if table_log > 12 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("huffman_v2 table is too large"));
+    }
+    let table_size = 1usize
+        .checked_shl(u32::from(table_log))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut table = vec![HuffmanDecodeEntry::default(); table_size];
+    let max_weight = table_log
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut rank_count = vec![0u32; usize::from(max_weight) + 1];
+    for &weight in weights {
+        if weight != 0 {
+            let count = rank_count.get_mut(usize::from(weight)).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("huffman_v2 weight is out of range")
+            })?;
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+    }
+
+    let mut rank_start = vec![0u32; usize::from(max_weight) + 1];
+    let mut cumulative = 0u32;
+    for weight in 1..=max_weight {
+        rank_start[usize::from(weight)] = cumulative;
+        cumulative = cumulative
+            .checked_add(
+                rank_count[usize::from(weight)]
+                    .checked_mul(1u32 << (u32::from(weight) - 1))
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?,
+            )
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+
+    for (symbol, &weight) in weights.iter().enumerate() {
+        if weight == 0 {
+            continue;
+        }
+        let num_bits = max_weight - weight;
+        let entries = 1usize
+            .checked_shl(u32::from(weight) - 1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let start = usize::try_from(rank_start[usize::from(weight)])
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        let end = start
+            .checked_add(entries)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if end > table.len() {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("huffman_v2 decode table overflows")
+            );
+        }
+        rank_start[usize::from(weight)] =
+            u32::try_from(end).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        let symbol = u8::try_from(symbol).map_err(|_| Error::new(ErrorKind::Malformed))?;
+        table[start..end].fill(HuffmanDecodeEntry { symbol, num_bits });
+    }
+    Ok((table, table_log))
+}
+
+fn decode_tokenize_fixed_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("tokenize_fixed headers are unsupported"));
+    }
+    let [alphabet, indices] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("tokenize_fixed input count does not match node shape"));
+    };
+    let element_width = alphabet.element_width;
+    if element_width == 0 || !alphabet.bytes.len().is_multiple_of(element_width) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("tokenize_fixed alphabet has partial element"));
+    }
+    validate_numeric_stream_width(indices.element_width, "tokenize_fixed indices")?;
+    let alphabet_size = alphabet.bytes.len() / element_width;
+    let output_elements = numeric_element_count(indices.bytes, indices.element_width)?;
+    let output_len = output_elements
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    if alphabet_size == 0 && output_elements != 0 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed alphabet is empty")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize allocation failed")
+    })?;
+    for position in 0..output_elements {
+        let index = read_usize_numeric_element(indices.bytes, indices.element_width, position)?;
+        if index >= alphabet_size {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("tokenize_fixed index is out of bounds"));
+        }
+        let start = index
+            .checked_mul(element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let end = start
+            .checked_add(element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output.extend_from_slice(alphabet.bytes.get(start..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed alphabet is truncated")
+        })?);
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+    })
+}
+
+struct QuantizeParams {
+    bits: &'static [u8],
+    base: &'static [u32],
+}
+
+const QUANTIZE_OFFSETS_BITS: [u8; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+const QUANTIZE_OFFSETS_BASE: [u32; 32] = [
+    0x1,
+    0x2,
+    0x4,
+    0x8,
+    0x10,
+    0x20,
+    0x40,
+    0x80,
+    0x100,
+    0x200,
+    0x400,
+    0x800,
+    0x1000,
+    0x2000,
+    0x4000,
+    0x8000,
+    0x1_0000,
+    0x2_0000,
+    0x4_0000,
+    0x8_0000,
+    0x10_0000,
+    0x20_0000,
+    0x40_0000,
+    0x80_0000,
+    0x100_0000,
+    0x200_0000,
+    0x400_0000,
+    0x800_0000,
+    0x1000_0000,
+    0x2000_0000,
+    0x4000_0000,
+    0x8000_0000,
+];
+const QUANTIZE_LENGTHS_BITS: [u8; 44] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+];
+const QUANTIZE_LENGTHS_BASE: [u32; 44] = [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    0x10,
+    0x20,
+    0x40,
+    0x80,
+    0x100,
+    0x200,
+    0x400,
+    0x800,
+    0x1000,
+    0x2000,
+    0x4000,
+    0x8000,
+    0x1_0000,
+    0x2_0000,
+    0x4_0000,
+    0x8_0000,
+    0x10_0000,
+    0x20_0000,
+    0x40_0000,
+    0x80_0000,
+    0x100_0000,
+    0x200_0000,
+    0x400_0000,
+    0x800_0000,
+    0x1000_0000,
+    0x2000_0000,
+    0x4000_0000,
+    0x8000_0000,
+];
+const QUANTIZE_OFFSETS: QuantizeParams = QuantizeParams {
+    bits: &QUANTIZE_OFFSETS_BITS,
+    base: &QUANTIZE_OFFSETS_BASE,
+};
+const QUANTIZE_LENGTHS: QuantizeParams = QuantizeParams {
+    bits: &QUANTIZE_LENGTHS_BITS,
+    base: &QUANTIZE_LENGTHS_BASE,
+};
+
+fn decode_quantize_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+    params: &QuantizeParams,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("quantize headers are unsupported")
+        );
+    }
+    let [codes, extra_bits] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("quantize input count does not match node shape"));
+    };
+    require_numeric_width(codes, 1, "quantize codes")?;
+    if extra_bits.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("quantize bits must be serial"));
+    }
+    let output_len = codes
+        .bytes
+        .len()
+        .checked_mul(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut reader = ForwardBitReader::new(extra_bits.bytes);
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("quantize allocation failed")
+    })?;
+    for &code in codes.bytes {
+        let code_index = usize::from(code);
+        let bits = *params.bits.get(code_index).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("quantize code is out of range")
+        })?;
+        let base = *params.base.get(code_index).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("quantize code is out of range")
+        })?;
+        let extra = reader.read(u32::from(bits))?;
+        let value = base
+            .checked_add(extra)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    reader.finish_zero_padding()?;
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 4,
+        string_lengths: None,
+    })
+}
+
+const PARTITION_MAX_PARTITIONS: usize = 256;
+const PARTITION_HEADER_IS_PRESET_BIT: u8 = 0x04;
+const PARTITION_HEADER_IS_FIRST_VALUE_ZERO_BIT: u8 = 0x08;
+const PARTITION_HEADER_IS_POW2_BIT: u8 = 0x20;
+
+const PARTITION_QUANTIZE_OFFSETS_SIZES: [u64; 32] = [
+    0x1,
+    0x2,
+    0x4,
+    0x8,
+    0x10,
+    0x20,
+    0x40,
+    0x80,
+    0x100,
+    0x200,
+    0x400,
+    0x800,
+    0x1000,
+    0x2000,
+    0x4000,
+    0x8000,
+    0x1_0000,
+    0x2_0000,
+    0x4_0000,
+    0x8_0000,
+    0x10_0000,
+    0x20_0000,
+    0x40_0000,
+    0x80_0000,
+    0x100_0000,
+    0x200_0000,
+    0x400_0000,
+    0x800_0000,
+    0x1000_0000,
+    0x2000_0000,
+    0x4000_0000,
+    0x8000_0000,
+];
+const PARTITION_QUANTIZE_LENGTHS_SIZES: [u64; 44] = [
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x1,
+    0x10,
+    0x20,
+    0x40,
+    0x80,
+    0x100,
+    0x200,
+    0x400,
+    0x800,
+    0x1000,
+    0x2000,
+    0x4000,
+    0x8000,
+    0x10000,
+    0x20000,
+    0x4_0000,
+    0x8_0000,
+    0x10_0000,
+    0x20_0000,
+    0x40_0000,
+    0x80_0000,
+    0x100_0000,
+    0x200_0000,
+    0x400_0000,
+    0x800_0000,
+    0x1000_0000,
+    0x2000_0000,
+    0x4000_0000,
+    0x8000_0000,
+];
+const PARTITION_VARBYTE16_SIZES: [u64; 16] = [
+    0x2, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000,
+    0x8000,
+];
+
+struct PartitionParams {
+    start_value: u64,
+    sizes: Vec<u64>,
+}
+
+fn decode_partition_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let [buckets, offsets] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("partition input count does not match node shape"));
+    };
+    require_numeric_width(buckets, 1, "partition buckets")?;
+    if offsets.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("partition bits must be serial"));
+    }
+
+    let (params, element_width) = parse_partition_header(header)?;
+    let output_len = buckets
+        .bytes
+        .len()
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let bases = partition_bases(&params)?;
+    let bits = partition_bits(&params)?;
+    let max_value = max_numeric_value(element_width)?;
+    let mut reader = ForwardBitReader::new(offsets.bytes);
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+    })?;
+
+    for &bucket in buckets.bytes {
+        let bucket = usize::from(bucket);
+        let base = *bases.get(bucket).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+        })?;
+        let bit_width = *bits.get(bucket).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+        })?;
+        let offset = reader.read_u64(usize::from(bit_width))?;
+        let value = base
+            .checked_add(offset)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if value > max_value {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("partition value exceeds output element width"));
+        }
+        write_numeric_element_vec(&mut output, element_width, value);
+    }
+
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+    })
+}
+
+fn parse_partition_header(header: &[u8]) -> Result<(PartitionParams, usize)> {
+    let (&flags, mut rest) = header
+        .split_first()
+        .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("partition header is empty"))?;
+    let element_width = 1usize
+        .checked_shl(u32::from(flags & 0x03))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+
+    let params = if (flags & PARTITION_HEADER_IS_PRESET_BIT) != 0 {
+        if !rest.is_empty() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("partition preset header has trailing bytes"));
+        }
+        partition_preset(flags >> 3)?
+    } else {
+        let start_value = if (flags & PARTITION_HEADER_IS_FIRST_VALUE_ZERO_BIT) != 0 {
+            0
+        } else {
+            read_var_u64_from_slice(&mut rest)?
+        };
+        let sizes = if (flags & PARTITION_HEADER_IS_POW2_BIT) != 0 {
+            parse_partition_pow2_sizes(flags, rest)?
+        } else {
+            parse_partition_varint_sizes(rest)?
+        };
+        PartitionParams { start_value, sizes }
+    };
+
+    validate_partition_params(&params)?;
+    Ok((params, element_width))
+}
+
+fn partition_preset(preset: u8) -> Result<PartitionParams> {
+    let (start_value, sizes): (u64, &[u64]) = match preset {
+        0 => (1, &PARTITION_QUANTIZE_OFFSETS_SIZES),
+        1 => (0, &PARTITION_QUANTIZE_LENGTHS_SIZES),
+        2 => (0, &PARTITION_VARBYTE16_SIZES),
+        _ => {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("partition preset is unknown"));
+        }
+    };
+    Ok(PartitionParams {
+        start_value,
+        sizes: sizes.to_vec(),
+    })
+}
+
+fn parse_partition_pow2_sizes(flags: u8, bytes: &[u8]) -> Result<Vec<u64>> {
+    if bytes.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("partition sizes are missing"));
+    }
+    let last = *bytes.last().unwrap_or(&0);
+    if last == 0 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("partition sizes bitstream is corrupt")
+        );
+    }
+    let num_bits = usize::from(flags >> 6) + 3;
+    let high_bit = usize::try_from(u8::BITS - 1 - last.leading_zeros())
+        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+    let unused_bits = 8usize
+        .checked_sub(high_bit)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let total_bits = bytes
+        .len()
+        .checked_mul(8)
+        .and_then(|bits| bits.checked_sub(unused_bits))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if total_bits % num_bits != 0 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("partition size bitstream is misaligned")
+        );
+    }
+    let count = total_bits / num_bits;
+    if count > PARTITION_MAX_PARTITIONS {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("partition count exceeds maximum"));
+    }
+    let mut reader = ForwardBitReader::new(bytes);
+    let mut sizes = Vec::new();
+    sizes.try_reserve_exact(count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition sizes allocation failed")
+    })?;
+    for _ in 0..count {
+        let log2_size = reader.read_u64(num_bits)?;
+        if log2_size >= u64::BITS.into() {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("partition size shift is invalid")
+            );
+        }
+        sizes.push(1u64 << log2_size);
+    }
+    Ok(sizes)
+}
+
+fn parse_partition_varint_sizes(mut bytes: &[u8]) -> Result<Vec<u64>> {
+    let mut sizes = Vec::new();
+    while !bytes.is_empty() {
+        if sizes.len() >= PARTITION_MAX_PARTITIONS {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("partition count exceeds maximum")
+            );
+        }
+        sizes.push(read_var_u64_from_slice(&mut bytes)?);
+    }
+    Ok(sizes)
+}
+
+fn validate_partition_params(params: &PartitionParams) -> Result<()> {
+    if params.sizes.is_empty()
+        || params.sizes.len() > PARTITION_MAX_PARTITIONS
+        || (params.sizes.len() == 1 && params.start_value == 0)
+    {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("partition parameters are invalid")
+        );
+    }
+    let mut sum = params.start_value;
+    for (index, &size) in params.sizes.iter().enumerate() {
+        if size == 0 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("partition size must be nonzero")
+            );
+        }
+        match sum.checked_add(size) {
+            Some(next) => sum = next,
+            None if index + 1 == params.sizes.len() => sum = sum.wrapping_add(size),
+            None => {
+                return Err(Error::new(ErrorKind::IntegerOverflow)
+                    .with_detail("partition size sum overflowed"));
+            }
+        }
+    }
+    let _ = sum;
+    Ok(())
+}
+
+fn partition_bases(params: &PartitionParams) -> Result<Vec<u64>> {
+    let mut bases = Vec::new();
+    bases.try_reserve_exact(params.sizes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition bases allocation failed")
+    })?;
+    let mut base = params.start_value;
+    for &size in &params.sizes {
+        bases.push(base);
+        base = base.wrapping_add(size);
+    }
+    Ok(bases)
+}
+
+fn partition_bits(params: &PartitionParams) -> Result<Vec<u8>> {
+    let mut bits = Vec::new();
+    bits.try_reserve_exact(params.sizes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition bits allocation failed")
+    })?;
+    for &size in &params.sizes {
+        let bit_width = if size <= 1 {
+            0
+        } else {
+            u8::try_from(u64::BITS - (size - 1).leading_zeros())
+                .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?
+        };
+        bits.push(bit_width);
+    }
+    Ok(bits)
+}
+
+fn read_var_u64_from_slice(bytes: &mut &[u8]) -> Result<u64> {
+    let mut offset = 0usize;
+    let value = read_var_u64(bytes, &mut offset)?;
+    *bytes = bytes
+        .get(offset..)
+        .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("varint offset is invalid"))?;
+    Ok(value)
+}
+
+fn write_numeric_element_vec(output: &mut Vec<u8>, element_width: usize, value: u64) {
+    output.extend_from_slice(&value.to_le_bytes()[..element_width]);
+}
+
+struct ForwardBitReader<'a> {
+    bytes: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> ForwardBitReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, bit_pos: 0 }
+    }
+
+    fn read(&mut self, bits: u32) -> Result<u32> {
+        if bits > 31 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("forward bit width is unsupported")
+            );
+        }
+        u32::try_from(
+            self.read_u64(
+                usize::try_from(bits).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?,
+            )?,
+        )
+        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))
+    }
+
+    fn read_u64(&mut self, bits: usize) -> Result<u64> {
+        if bits > 64 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("forward bit width is unsupported")
+            );
+        }
+        let end = self
+            .bit_pos
+            .checked_add(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let total_bits = self
+            .bytes
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if end > total_bits {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
+            );
+        }
+        let mut value = 0u64;
+        for bit in 0..bits {
+            let absolute = self
+                .bit_pos
+                .checked_add(bit)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let byte = self.bytes[absolute / 8];
+            let set = (byte >> (absolute % 8)) & 1;
+            value |= u64::from(set) << bit;
+        }
+        self.bit_pos = end;
+        Ok(value)
+    }
+
+    fn finish_zero_padding(&self) -> Result<()> {
+        let total_bits = self
+            .bytes
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        for absolute in self.bit_pos..total_bits {
+            let byte = self.bytes[absolute / 8];
+            if ((byte >> (absolute % 8)) & 1) != 0 {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("forward bitstream has nonzero padding"));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn checked_next_numeric_pos(position: usize, count: usize) -> Result<usize> {
     if position >= count {
         return Err(Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted"));
@@ -2067,25 +3175,69 @@ fn copy_byte_preserving_conversion(
     })
 }
 
-fn decode_zigzag_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_zigzag_numeric_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("zigzag transform headers are unsupported"));
     }
-    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
+    validate_numeric_stream_width(stored.element_width, "zigzag")?;
+    if !stored.bytes.len().is_multiple_of(stored.element_width) {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("zigzag input has partial element")
+        );
+    }
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
     let mut output = Vec::new();
-    output.try_reserve_exact(stored.len()).map_err(|_| {
+    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("zigzag allocation failed")
     })?;
-    for &encoded in stored {
-        let mask = 0u8.wrapping_sub(encoded & 1);
-        output.push((encoded >> 1) ^ mask);
+    match stored.element_width {
+        1 => {
+            for &encoded in stored.bytes {
+                let mask = 0u8.wrapping_sub(encoded & 1);
+                output.push((encoded >> 1) ^ mask);
+            }
+        }
+        2 => {
+            for encoded in stored.bytes.chunks_exact(2) {
+                let value = u16::from_le_bytes([encoded[0], encoded[1]]);
+                let mask = 0u16.wrapping_sub(value & 1);
+                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
+            }
+        }
+        4 => {
+            for encoded in stored.bytes.chunks_exact(4) {
+                let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+                let mask = 0u32.wrapping_sub(value & 1);
+                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
+            }
+        }
+        8 => {
+            for encoded in stored.bytes.chunks_exact(8) {
+                let value = u64::from_le_bytes([
+                    encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5],
+                    encoded[6], encoded[7],
+                ]);
+                let mask = 0u64.wrapping_sub(value & 1);
+                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
+            }
+        }
+        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
     }
-    Ok(output)
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: stored.element_width,
+        string_lengths: None,
+    })
 }
 
 fn decode_delta_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -2795,17 +3947,26 @@ mod tests {
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRING_TO_SERIAL_ID,
+            standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
+            standard::FSE_V2_ID,
+            standard::FSE_NCOUNT_ID,
+            standard::HUFFMAN_V2_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
+            standard::PARTITION_ID,
+            standard::QUANTIZE_LENGTHS_ID,
+            standard::QUANTIZE_OFFSETS_ID,
             standard::RANGE_PACK_ID,
             standard::SENTINEL_ID,
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
+            standard::SPLITN_STRUCT_ID,
+            standard::TOKENIZE_FIXED_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
@@ -2828,17 +3989,26 @@ mod tests {
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRING_TO_SERIAL_ID,
+            standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
+            standard::FSE_V2_ID,
+            standard::FSE_NCOUNT_ID,
+            standard::HUFFMAN_V2_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
+            standard::PARTITION_ID,
+            standard::QUANTIZE_LENGTHS_ID,
+            standard::QUANTIZE_OFFSETS_ID,
             standard::RANGE_PACK_ID,
             standard::SENTINEL_ID,
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
+            standard::SPLITN_STRUCT_ID,
+            standard::TOKENIZE_FIXED_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
@@ -3626,6 +4796,35 @@ mod tests {
     }
 
     #[test]
+    fn decodes_zigzag_numeric_i32_chunk() {
+        let values = [0u32, 1, 2, 21, 244, 245, u32::MAX];
+        let mut input = Vec::new();
+        for value in values {
+            input.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let output = decode_zigzag_numeric_chunk(
+            StreamInput {
+                bytes: &input,
+                element_width: 4,
+                string_lengths: None,
+            },
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 4);
+        assert_eq!(
+            output.bytes,
+            [0i32, -1, 1, -11, 122, -123, i32::MIN,]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn rejects_zigzag_header_without_mutating_destination() {
         let input = standard_transform_serial_frame(21, 3, b"bytes", 5, &[0]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
@@ -3955,6 +5154,36 @@ mod tests {
         assert_eq!(output, [1, 2]);
     }
 
+    #[test]
+    fn decodes_partition_preset_varbyte16_node() {
+        let output = decode_partition_node(
+            &[
+                StreamInput {
+                    bytes: &[0, 1, 2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[0x0d],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            &[0x15],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 2);
+        assert_eq!(
+            output.bytes,
+            [1u16, 2, 7]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[cfg(feature = "lz4")]
     #[test]
     fn decodes_v23_lz4_serial_chunk() {
@@ -4260,5 +5489,50 @@ mod tests {
         let err = parse_frame_plan(&input, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
+    }
+
+    #[test]
+    fn decodes_fse_ncount_node() {
+        let distribution = [15, 8, 4, 3, 1, 1];
+        let encoded =
+            zrip_core::fse::table_builder::serialize_fse_table_description(&distribution, 5);
+        let output = decode_fse_ncount_node(
+            StreamInput {
+                bytes: &encoded,
+                element_width: 1,
+                string_lengths: None,
+            },
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        let decoded = output
+            .bytes
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(output.element_width, 2);
+        assert_eq!(decoded, distribution);
+    }
+
+    #[test]
+    fn rejects_fse_ncount_trailing_bytes() {
+        let distribution = [15, 8, 4, 3, 1, 1];
+        let mut encoded =
+            zrip_core::fse::table_builder::serialize_fse_table_description(&distribution, 5);
+        encoded.push(0);
+        let err = decode_fse_ncount_node(
+            StreamInput {
+                bytes: &encoded,
+                element_width: 1,
+                string_lengths: None,
+            },
+            &[],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 }

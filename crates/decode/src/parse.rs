@@ -957,6 +957,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
     match id {
         standard::DELTA_INT_ID
         | standard::ZIGZAG_ID
+        | standard::CONVERT_STRUCT_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_SERIAL_LE_ID
@@ -969,8 +970,15 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
         | standard::CONSTANT_SERIAL_ID
+        | standard::FSE_NCOUNT_ID
         | standard::LZ4_ID => Some(fixed_shape(1, 1)),
         standard::FLATPACK_ID
+        | standard::FSE_V2_ID
+        | standard::HUFFMAN_V2_ID
+        | standard::QUANTIZE_OFFSETS_ID
+        | standard::QUANTIZE_LENGTHS_ID
+        | standard::PARTITION_ID
+        | standard::TOKENIZE_FIXED_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::SPARSE_NUM_ID
@@ -985,12 +993,14 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
             min_outputs: 1,
             max_outputs: Some(1),
         }),
-        standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => Some(StandardNodeShape {
-            static_inputs: 0,
-            allows_variable_inputs: true,
-            min_outputs: 1,
-            max_outputs: Some(1),
-        }),
+        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::TRANSPOSE_SPLIT_ID => {
+            Some(StandardNodeShape {
+                static_inputs: 0,
+                allows_variable_inputs: true,
+                min_outputs: 1,
+                max_outputs: Some(1),
+            })
+        }
         standard::CONCAT_SERIAL_ID => Some(StandardNodeShape {
             static_inputs: 2,
             allows_variable_inputs: false,
