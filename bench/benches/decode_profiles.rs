@@ -67,12 +67,14 @@ fn main() {
 fn generated_cases() -> Vec<BenchCase> {
     let mut cases = Vec::new();
     for (name, input) in [
-        ("serial-4k", high_entropy_bytes(4 * 1024)),
-        ("serial-1m", high_entropy_bytes(1024 * 1024)),
+        ("serial-random-4k", high_entropy_bytes(4 * 1024)),
+        ("serial-random-1m", high_entropy_bytes(1024 * 1024)),
+        ("serial-repeated-4k", repeated_bytes(4 * 1024)),
+        ("serial-sequential-1m", sequential_bytes(1024 * 1024)),
     ] {
         let frame = rust_openzl::compress_serial(&input).expect("openzl-c-ffi compress_serial");
         assert_eq!(
-            ozlrip::decode(&frame).expect("ozlrip decode generated frame"),
+            decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
             input
         );
         assert_eq!(
@@ -101,8 +103,23 @@ fn high_entropy_bytes(len: usize) -> Vec<u8> {
     out
 }
 
+fn repeated_bytes(len: usize) -> Vec<u8> {
+    b"openzl-rust-decode-benchmark\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(len)
+        .collect()
+}
+
+fn sequential_bytes(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| u8::try_from(index & 0xff).expect("masked to byte"))
+        .collect()
+}
+
 fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
-    let mut decoder = ozlrip::Decoder::default();
+    let mut decoder = ozlrip::Decoder::new(bench_limits());
     let mut dst = Vec::new();
     let decode_ns = bench_loop(target, || {
         dst.clear();
@@ -112,6 +129,19 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
         black_box(&dst);
     });
     BenchResult::new(OZLRIP_IMPL, case, decode_ns)
+}
+
+fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
+    let mut output = Vec::new();
+    ozlrip::decode_into(frame, &mut output, bench_limits())?;
+    Ok(output)
+}
+
+fn bench_limits() -> ozlrip::Limits {
+    ozlrip::Limits {
+        max_expansion_ratio: usize::MAX,
+        ..ozlrip::Limits::default()
+    }
 }
 
 fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
@@ -215,6 +245,7 @@ struct BenchResult {
     frame_size: usize,
     decode_ns: f64,
     decode_mbps: f64,
+    frame_ratio: f64,
     timestamp_unix: u64,
     git_rev: String,
 }
@@ -222,6 +253,7 @@ struct BenchResult {
 impl BenchResult {
     fn new(impl_name: &'static str, case: &BenchCase, decode_ns: f64) -> Self {
         let decode_mbps = case.input_size as f64 / decode_ns * 1_000.0;
+        let frame_ratio = case.frame.len() as f64 / case.input_size as f64;
         Self {
             impl_name,
             input_name: case.name,
@@ -230,6 +262,7 @@ impl BenchResult {
             frame_size: case.frame.len(),
             decode_ns,
             decode_mbps,
+            frame_ratio,
             timestamp_unix: timestamp_unix(),
             git_rev: git_rev(),
         }
@@ -240,7 +273,7 @@ impl BenchResult {
             concat!(
                 r#"{{"impl": "{}", "input": "{}", "profile": "{}", "#,
                 r#""input_size": {}, "frame_size": {}, "#,
-                r#""decode_ns": {:.1}, "decode_mbps": {:.1}, "#,
+                r#""frame_ratio": {:.4}, "decode_ns": {:.1}, "decode_mbps": {:.1}, "#,
                 r#""timestamp_unix": {}, "git_rev": "{}"}}"#
             ),
             self.impl_name,
@@ -248,6 +281,7 @@ impl BenchResult {
             self.profile,
             self.input_size,
             self.frame_size,
+            self.frame_ratio,
             self.decode_ns,
             self.decode_mbps,
             self.timestamp_unix,
@@ -259,18 +293,25 @@ impl BenchResult {
 fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
     if let Some(relative) = relative_to_c {
         println!(
-            "{:<12} {:<25} {:>9.1} MB/s {:>10.1} ns/decode {}/{}={relative:.2}x",
+            "{:<20} {:<25} {:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.3} {}/{}={relative:.2}x",
             result.input_name,
             result.impl_name,
             result.decode_mbps,
             result.decode_ns,
+            result.frame_size,
+            result.frame_ratio,
             OZLRIP_IMPL,
             OPENZL_C_IMPL
         );
     } else {
         println!(
-            "{:<12} {:<25} {:>9.1} MB/s {:>10.1} ns/decode",
-            result.input_name, result.impl_name, result.decode_mbps, result.decode_ns
+            "{:<20} {:<25} {:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.3}",
+            result.input_name,
+            result.impl_name,
+            result.decode_mbps,
+            result.decode_ns,
+            result.frame_size,
+            result.frame_ratio
         );
     }
 }

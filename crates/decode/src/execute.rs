@@ -1570,6 +1570,55 @@ mod tests {
     }
 
     #[test]
+    fn supported_standard_nodes_have_decode_coverage() {
+        let mut supported = vec![
+            standard::BITPACK_SERIAL_ID,
+            standard::BITUNPACK_ID,
+            standard::CONCAT_SERIAL_ID,
+            standard::CONSTANT_SERIAL_ID,
+            standard::CONVERT_SERIAL_TO_STRUCT_ID,
+            standard::CONVERT_STRUCT_TO_SERIAL_ID,
+            standard::DELTA_INT_ID,
+            standard::FLATPACK_ID,
+            standard::RANGE_PACK_ID,
+            standard::SPLITN_ID,
+            standard::TRANSPOSE_SPLIT2_ID,
+            standard::TRANSPOSE_SPLIT4_ID,
+            standard::TRANSPOSE_SPLIT8_ID,
+            standard::ZIGZAG_ID,
+        ];
+        #[cfg(feature = "lz4")]
+        supported.push(standard::LZ4_ID);
+        #[cfg(feature = "zstd")]
+        supported.push(standard::ZSTD_ID);
+
+        let mut covered = vec![
+            standard::BITPACK_SERIAL_ID,
+            standard::BITUNPACK_ID,
+            standard::CONCAT_SERIAL_ID,
+            standard::CONSTANT_SERIAL_ID,
+            standard::CONVERT_SERIAL_TO_STRUCT_ID,
+            standard::CONVERT_STRUCT_TO_SERIAL_ID,
+            standard::DELTA_INT_ID,
+            standard::FLATPACK_ID,
+            standard::RANGE_PACK_ID,
+            standard::SPLITN_ID,
+            standard::TRANSPOSE_SPLIT2_ID,
+            standard::TRANSPOSE_SPLIT4_ID,
+            standard::TRANSPOSE_SPLIT8_ID,
+            standard::ZIGZAG_ID,
+        ];
+        #[cfg(feature = "lz4")]
+        covered.push(standard::LZ4_ID);
+        #[cfg(feature = "zstd")]
+        covered.push(standard::ZSTD_ID);
+
+        supported.sort_unstable();
+        covered.sort_unstable();
+        assert_eq!(supported, covered);
+    }
+
+    #[test]
     fn decodes_v21_stored_serial_output() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));

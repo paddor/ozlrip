@@ -21,16 +21,22 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     let mut manifest = String::new();
     writeln!(manifest, "upstream_commit={upstream_commit}").unwrap();
 
-    for case in interop_cases() {
+    for case in supported_interop_cases() {
         let name = case.name;
-        let input = case.input.as_slice();
+        let input = case.load_input();
         let profile = case.profile;
         let input_path = work.path.join(format!("{name}.input"));
         let frame_path = work.path.join(format!("{name}.zl"));
         let zli_decoded_path = work.path.join(format!("{name}.zli.decoded"));
-        fs::write(&input_path, input).unwrap();
+        fs::write(&input_path, &input).unwrap();
 
-        let compress_args = compress_args(&input_path, profile, case.profile_arg, &frame_path);
+        let compress_args = compress_args(
+            &input_path,
+            profile,
+            case.profile_arg,
+            case.extra_args,
+            &frame_path,
+        );
         let decompress_args = decompress_args(&frame_path, &zli_decoded_path);
         run(&zli, compress_args.iter().copied());
         run(&zli, decompress_args.iter().copied());
@@ -53,7 +59,7 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
             frame_info.format_version,
             command_line(&zli, compress_args.iter().copied()),
             command_line(&zli, decompress_args.iter().copied()),
-            hash64(input),
+            hash64(&input),
             hash64(&frame),
             hash64(&zli_decoded),
         )
@@ -65,58 +71,211 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     fs::write(manifest_dir.join("last-run.manifest"), manifest).unwrap();
 }
 
-fn interop_cases() -> Vec<InteropCase> {
+#[test]
+fn upstream_profile_discovery_records_unsupported_frames() {
+    let Some(zli) = zli_path() else {
+        eprintln!("skipping interop discovery: set OZLRIP_ZLI to an upstream zli binary");
+        return;
+    };
+    let work = WorkDir::new("ozlrip-interop-discovery");
+    let mut manifest = String::new();
+
+    for case in discovery_interop_cases() {
+        let name = case.name;
+        let input = case.load_input();
+        let input_path = work.path.join(format!("{name}.input"));
+        let frame_path = work.path.join(format!("{name}.zl"));
+        fs::write(&input_path, &input).unwrap();
+
+        let compress_args = compress_args(
+            &input_path,
+            case.profile,
+            case.profile_arg,
+            case.extra_args,
+            &frame_path,
+        );
+        run(&zli, compress_args.iter().copied());
+        let frame = fs::read(&frame_path).unwrap();
+        let inspect = ozlrip::inspect(&frame);
+        let decode = ozlrip::decode(&frame);
+        writeln!(
+            manifest,
+            "fixture={name}\nprofile={}\ncompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ninspect={:?}\ndecode={:?}\n",
+            case.profile,
+            command_line(&zli, compress_args.iter().copied()),
+            hash64(&input),
+            hash64(&frame),
+            inspect.as_ref().map(|info| (
+                info.format_version,
+                info.chunks,
+                info.transforms,
+                info.stored_streams,
+                info.regenerated_streams,
+            )),
+            decode.as_ref().map(Vec::len).map_err(|err| (
+                err.kind(),
+                err.detail().map(str::to_owned),
+            )),
+        )
+        .unwrap();
+    }
+
+    let manifest_dir = Path::new("tmp").join("ozlrip-interop");
+    fs::create_dir_all(&manifest_dir).unwrap();
+    fs::write(manifest_dir.join("discovery.manifest"), manifest).unwrap();
+}
+
+fn supported_interop_cases() -> Vec<InteropCase> {
     vec![
         InteropCase {
             name: "serial-small",
-            input: b"openzl interop serial fixture\n".to_vec(),
+            input: InteropInput::Inline(b"openzl interop serial fixture\n".to_vec()),
             profile: "serial",
             profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-serial-quick-brown-fox",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/quick_brown_fox.txt"),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-serial-binary",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/binary_sample.bin"),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "u8-ramp",
-            input: (0..=31).collect(),
+            input: InteropInput::Inline((0..=31).collect()),
             profile: "u8",
             profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-u8-random",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/random_u8.bin"),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "i8-signed",
-            input: [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
-                .into_iter()
-                .map(i8::cast_unsigned)
-                .collect(),
+            input: InteropInput::Inline(
+                [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
+                    .into_iter()
+                    .map(i8::cast_unsigned)
+                    .collect(),
+            ),
             profile: "i8",
             profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "le-u16-ramp",
-            input: le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX]),
+            input: InteropInput::Inline(le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX])),
             profile: "le-u16",
             profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "le-u32-ramp",
-            input: le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX]),
+            input: InteropInput::Inline(le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX])),
             profile: "le-u32",
             profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "sao-synthetic",
-            input: sao_synthetic(),
+            input: InteropInput::Inline(sao_synthetic()),
             profile: "sao",
             profile_arg: None,
+            extra_args: &[],
         },
         InteropCase {
             name: "sao-sddl2-synthetic",
-            input: sao_synthetic(),
+            input: InteropInput::Inline(sao_synthetic()),
             profile: "sddl2",
             profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
+            extra_args: &[],
         },
         InteropCase {
             name: "sao-full-sddl2-synthetic",
-            input: sao_full_synthetic(),
+            input: InteropInput::Inline(sao_full_synthetic()),
             profile: "sddl2",
             profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_full.sddl"),
+            extra_args: &[],
+        },
+    ]
+}
+
+fn discovery_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase {
+            name: "upstream-csv-experiments",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_experiments.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-serial-repeated-string",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "serial-chunked-2m",
+            input: InteropInput::Inline(sequential_bytes(2_000_000)),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+        },
+        InteropCase {
+            name: "u8-chunked-2m",
+            input: InteropInput::Inline(sequential_bytes(2_000_000)),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+        },
+        InteropCase {
+            name: "upstream-u8-sequential",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/sequential_u8.bin"),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-u8-repeated",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/repeated_u8.bin"),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-u16-zigzag",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
+            profile: "le-u16",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
+            name: "upstream-csv-timeseries",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_timeseries.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+        },
+        InteropCase {
+            name: "upstream-tbl-supplier",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/tbl/supplier_trunc.tbl"),
+            profile: "csv",
+            profile_arg: Some("|"),
+            extra_args: &[],
         },
     ]
 }
@@ -155,6 +314,12 @@ fn le_bytes<const N: usize, T: LeBytes>(values: [T; N]) -> Vec<u8> {
     out
 }
 
+fn sequential_bytes(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| u8::try_from(index & 0xff).expect("masked to byte"))
+        .collect()
+}
+
 trait LeBytes {
     fn to_le_vec(self) -> Vec<u8>;
 }
@@ -173,15 +338,35 @@ impl LeBytes for u32 {
 
 struct InteropCase {
     name: &'static str,
-    input: Vec<u8>,
+    input: InteropInput,
     profile: &'static str,
     profile_arg: Option<&'static str>,
+    extra_args: &'static [&'static str],
+}
+
+impl InteropCase {
+    fn load_input(&self) -> Vec<u8> {
+        match &self.input {
+            InteropInput::Inline(bytes) => bytes.clone(),
+            InteropInput::UpstreamFile(path) => {
+                fs::read(Path::new("tmp/openzl-upstream").join(path)).unwrap_or_else(|err| {
+                    panic!("failed to read upstream sample {path}: {err}");
+                })
+            }
+        }
+    }
+}
+
+enum InteropInput {
+    Inline(Vec<u8>),
+    UpstreamFile(&'static str),
 }
 
 fn compress_args<'a>(
     input_path: &'a Path,
     profile: &'a str,
     profile_arg: Option<&'a str>,
+    extra_args: &'a [&'a str],
     frame_path: &'a Path,
 ) -> Vec<&'a OsStr> {
     let mut args = vec![
@@ -193,6 +378,9 @@ fn compress_args<'a>(
     if let Some(profile_arg) = profile_arg {
         args.push(OsStr::new("--profile-arg"));
         args.push(OsStr::new(profile_arg));
+    }
+    for arg in extra_args {
+        args.push(OsStr::new(arg));
     }
     args.extend([OsStr::new("-o"), frame_path.as_os_str(), OsStr::new("-f")]);
     args
