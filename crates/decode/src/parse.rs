@@ -320,6 +320,11 @@ fn read_output_sizes(
             let size = u64::from(reader.read_u32_le()?);
             let size_usize = usize::try_from(size)
                 .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+            check_limit(
+                size_usize,
+                limits.max_buffer_bytes,
+                ErrorKind::LimitExceeded,
+            )?;
             total = checked_add(total, size_usize)?;
             check_limit(total, limits.max_decoded_bytes, ErrorKind::LimitExceeded)?;
             sizes.push(Some(size));
@@ -359,6 +364,11 @@ fn read_output_sizes(
             .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
         let size_usize = usize::try_from(size)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+        check_limit(
+            size_usize,
+            limits.max_buffer_bytes,
+            ErrorKind::LimitExceeded,
+        )?;
         total = checked_add(total, size_usize)?;
         check_limit(total, limits.max_decoded_bytes, ErrorKind::LimitExceeded)?;
         sizes.push(Some(size));
@@ -652,7 +662,7 @@ fn read_chunk_header(
     let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
     let regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
 
-    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams)?;
+    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams, limits)?;
     let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
     let nodes = build_node_plans(
         &transform_types,
@@ -922,7 +932,11 @@ fn read_dict_indexes(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<O
     Ok(out)
 }
 
-fn read_stored_stream_sizes(reader: &mut Reader<'_>, streams: usize) -> Result<Vec<usize>> {
+fn read_stored_stream_sizes(
+    reader: &mut Reader<'_>,
+    streams: usize,
+    limits: Limits,
+) -> Result<Vec<usize>> {
     let mut sizes = Vec::new();
     sizes.try_reserve_exact(streams).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("stored stream size allocation failed")
@@ -931,6 +945,7 @@ fn read_stored_stream_sizes(reader: &mut Reader<'_>, streams: usize) -> Result<V
         let size = reader.read_var_u64()?;
         let size = usize::try_from(size)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+        check_limit(size, limits.max_buffer_bytes, ErrorKind::LimitExceeded)?;
         sizes.push(size);
     }
     Ok(sizes)
@@ -1433,6 +1448,23 @@ mod tests {
     }
 
     #[test]
+    fn enforces_output_buffer_limit() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        let limits = Limits {
+            max_buffer_bytes: 2,
+            ..Limits::default()
+        };
+
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    }
+
+    #[test]
     fn parses_v21_eof_marker() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));
@@ -1675,6 +1707,28 @@ mod tests {
         input.push(0);
         let limits = Limits {
             max_transform_header_bytes: 0,
+            ..Limits::default()
+        };
+
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    }
+
+    #[test]
+    fn enforces_stored_stream_buffer_limit() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+        let limits = Limits {
+            max_buffer_bytes: 2,
             ..Limits::default()
         };
 
