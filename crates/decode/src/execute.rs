@@ -151,8 +151,13 @@ fn decode_zstd_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec
         })?;
     frame.extend_from_slice(&0xfd2f_b528u32.to_le_bytes());
     frame.extend_from_slice(magicless);
-    let output = zrip::decompress_with_limit(&frame, limits.max_decoded_bytes)
-        .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed"))?;
+    let output = zrip::decompress_with_limit(&frame, limits.max_decoded_bytes).map_err(|err| {
+        if err == zrip::DecompressError::OutputTooSmall {
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        } else {
+            Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
+        }
+    })?;
     if output.len() > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
@@ -470,6 +475,29 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn enforces_zstd_output_limit_without_mutating_destination() {
+        let expected = b"zstd output larger than configured limits";
+        let compressed = zrip::compress(expected, 1).unwrap();
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 1);
+        stored.extend_from_slice(&compressed[4..]);
+        let input = zstd_serial_frame(&stored, expected.len());
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 8,
+            max_buffer_bytes: 8,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
         assert_eq!(output, [1, 2]);
     }
 
