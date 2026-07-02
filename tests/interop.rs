@@ -112,11 +112,31 @@ fn interop_cases() -> Vec<InteropCase> {
             profile: "sddl2",
             profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
         },
+        InteropCase {
+            name: "sao-full-sddl2-synthetic",
+            input: sao_full_synthetic(),
+            profile: "sddl2",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_full.sddl"),
+        },
     ]
 }
 
 fn sao_synthetic() -> Vec<u8> {
     let mut out = (0..28).collect::<Vec<u8>>();
+    push_sao_records(&mut out);
+    out
+}
+
+fn sao_full_synthetic() -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in [0i32, 1, 10, 0, 1, 1, 28] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    push_sao_records(&mut out);
+    out
+}
+
+fn push_sao_records(out: &mut Vec<u8>) {
     for index in 0i16..10 {
         out.extend_from_slice(&(0.1f64 + f64::from(index)).to_le_bytes());
         out.extend_from_slice(&(-0.2f64 - f64::from(index)).to_le_bytes());
@@ -125,7 +145,6 @@ fn sao_synthetic() -> Vec<u8> {
         out.extend_from_slice(&(0.01f32 * f32::from(index)).to_le_bytes());
         out.extend_from_slice(&(-0.02f32 * f32::from(index)).to_le_bytes());
     }
-    out
 }
 
 fn le_bytes<const N: usize, T: LeBytes>(values: [T; N]) -> Vec<u8> {
