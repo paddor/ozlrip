@@ -110,3 +110,10 @@ path = "fuzz_targets/decode_delta_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_bitunpack_node"
+path = "fuzz_targets/decode_bitunpack_node.rs"
+test = false
+doc = false
+bench = false

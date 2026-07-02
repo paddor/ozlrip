@@ -144,6 +144,9 @@ fn decode_simple_transform_chunk(
         Some(standard::DELTA_INT_ID) => {
             decode_delta_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::BITUNPACK_ID) => {
+            decode_bitunpack_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -653,6 +656,68 @@ fn decode_delta_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> R
     Ok(output)
 }
 
+fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if header.is_empty() || header.len() > 2 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitunpack header is malformed"));
+    }
+    let bits = usize::from(header[0]);
+    if bits == 0 || bits > 8 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only byte-width bitunpack input is implemented"));
+    }
+    let bit_count = stored.len().checked_mul(bits).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
+    })?;
+    let output_len = bit_count.checked_add(7).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
+    })? / 8;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    if bits < 8 {
+        let limit = 1u16 << bits;
+        if stored.iter().any(|&value| u16::from(value) >= limit) {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("bitunpack value exceeds bit width")
+            );
+        }
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitunpack allocation failed")
+    })?;
+    output.resize(output_len, 0);
+    let mut bit_pos = 0usize;
+    for &value in stored {
+        let byte_pos = bit_pos / 8;
+        let shift = bit_pos % 8;
+        output[byte_pos] |= value << shift;
+        if shift + bits > 8 {
+            output[byte_pos + 1] |= value >> (8 - shift);
+        }
+        bit_pos += bits;
+    }
+    if header.len() == 2 {
+        let rem_bits = output_len
+            .checked_mul(8)
+            .and_then(|bits_in_output| bits_in_output.checked_sub(bit_count))
+            .ok_or_else(|| {
+                Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
+            })?;
+        if rem_bits == 0 || output_len == 0 || usize::from(header[1]) >= (1usize << rem_bits) {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("bitunpack trailing bits are malformed"));
+        }
+        let last = output.last_mut().ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("missing bitunpack output")
+        })?;
+        *last |= header[1] << (8 - rem_bits);
+    }
+    Ok(output)
+}
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -980,6 +1045,15 @@ mod tests {
         standard_transform_serial_frame(21, 27, &stored, values.len(), &header)
     }
 
+    fn bitunpack_serial_frame(values: &[u8], bits: u8, trailing_bits: Option<u8>) -> Vec<u8> {
+        let mut header = vec![bits];
+        if let Some(trailing_bits) = trailing_bits {
+            header.push(trailing_bits);
+        }
+        let decoded_len = (values.len() * usize::from(bits)).div_ceil(8);
+        standard_transform_serial_frame(21, 34, values, decoded_len, &header)
+    }
+
     fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
         let mut header = Vec::new();
         push_var_u64(&mut header, u64::try_from(count).unwrap());
@@ -1270,6 +1344,59 @@ mod tests {
         let limits = Limits {
             max_decoded_bytes: 4,
             max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_bitunpack_serial8_chunk() {
+        let input = bitunpack_serial_frame(&[2, 7, 3, 4, 5, 1, 7, 6], 3, None);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [0xfa, 0xd8, 0xdc]);
+    }
+
+    #[test]
+    fn decodes_v21_bitunpack_serial8_trailing_bits() {
+        let input = bitunpack_serial_frame(&[1], 3, Some(0b1_1111));
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 1);
+        assert_eq!(output, [0b1111_1001]);
+    }
+
+    #[test]
+    fn rejects_bitunpack_value_overflow_without_mutating_destination() {
+        let input = bitunpack_serial_frame(&[8], 3, None);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_bitunpack_output_limit_without_mutating_destination() {
+        let input = bitunpack_serial_frame(&[2, 7, 3, 4, 5, 1, 7, 6], 3, None);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 2,
+            max_buffer_bytes: 2,
             ..Limits::default()
         };
 
