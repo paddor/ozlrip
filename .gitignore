@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+/info/
+target/
+corpus/
+/tmp/
+/bench/target/
+/fuzz/artifacts/
+/fuzz/target/
+Cargo.lock
+**/*.profraw
+**/*.profdata

@@ -1,0 +1,31 @@
+[package]
+name = "ozlrip-decode"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+description = "OpenZL decoder for ozlrip"
+license = "MIT"
+repository = "https://github.com/paddor/ozlrip"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc", "ozlrip-core/std"]
+alloc = ["ozlrip-core/alloc"]
+zstd = ["std", "dep:zrip"]
+lz4 = ["std", "dep:lz4rip"]
+checksum = ["ozlrip-core/checksum"]
+paranoid = ["ozlrip-core/paranoid"]
+dev-format = ["ozlrip-core/dev-format"]
+interop = ["std"]
+
+[dependencies]
+ozlrip-core = { version = "0.0.0", path = "../core", default-features = false }
+zrip = { version = "0.8.1", path = "../../../zrip", default-features = false, features = ["std", "frame"], optional = true }
+lz4rip = { version = "0.9.3", path = "../../../lz4rip", default-features = false, features = ["std", "frame"], optional = true }
+
+[dev-dependencies]
+ozlrip = { path = "../..", default-features = false, features = ["alloc"] }

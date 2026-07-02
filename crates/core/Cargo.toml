@@ -1,0 +1,23 @@
+[package]
+name = "ozlrip-core"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Shared types for ozlrip"
+license = "MIT"
+repository = "https://github.com/paddor/ozlrip"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+checksum = []
+paranoid = []
+dev-format = []
+
+[dependencies]
+
