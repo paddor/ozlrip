@@ -396,7 +396,7 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
 
 fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
     let static_inputs: usize = match standard_id {
-        standard::SPLITN_ID => 0,
+        standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
         | standard::FLATPACK_ID
         | standard::TRANSPOSE_SPLIT2_ID
@@ -507,9 +507,12 @@ fn execute_standard_node(
             one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
         }
         standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, limits)),
-        id if transpose_split_width(Some(id)).is_some() => {
-            one_serial(decode_transpose_split_node(inputs, header, limits))
-        }
+        id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
+            inputs,
+            variable_inputs,
+            header,
+            limits,
+        )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, limits)),
         standard::ZSTD_ID => one_serial(decode_zstd_chunk(
             single_input(inputs)?,
@@ -695,6 +698,10 @@ fn decode_concat_serial_node(
     Ok(output)
 }
 
+fn is_transpose_split(id: u32) -> bool {
+    id == standard::TRANSPOSE_SPLIT_ID || transpose_split_width(Some(id)).is_some()
+}
+
 fn transpose_split_width(id: Option<u32>) -> Option<usize> {
     match id {
         Some(standard::TRANSPOSE_SPLIT2_ID) => Some(2),
@@ -706,12 +713,21 @@ fn transpose_split_width(id: Option<u32>) -> Option<usize> {
 
 fn decode_transpose_split_node(
     inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
     header: &[u8],
     limits: Limits,
-) -> Result<Vec<u8>> {
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transpose_split transform headers are unsupported"));
+    }
+    if variable_inputs != 0
+        && usize::try_from(variable_inputs)
+            .ok()
+            .is_some_and(|count| count != inputs.len())
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("transpose_split variable input count does not match inputs"));
     }
     let Some(first) = inputs.first() else {
         return Err(Error::new(ErrorKind::InvalidGraph)
@@ -742,7 +758,10 @@ fn decode_transpose_split_node(
             output.push(lane.bytes[element]);
         }
     }
-    Ok(output)
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: width,
+    })
 }
 
 fn decode_flatpack_node(
@@ -2022,6 +2041,38 @@ mod tests {
         input
     }
 
+    fn dynamic_transpose_split_frame(lanes: &[&[u8]]) -> Vec<u8> {
+        let decoded_len = lanes.first().map_or(0, |lane| lane.len() * lanes.len());
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        push_var_u64(&mut input, u64::try_from(lanes.len()).unwrap());
+        input.push(0);
+        input.push(4);
+        input.push(0);
+        if lanes.is_empty() {
+            input.push(0);
+        } else {
+            input.push(1);
+            push_var_u64(&mut input, u64::try_from(lanes.len() - 1).unwrap());
+        }
+        input.push(0);
+        if !lanes.is_empty() {
+            input.push(0);
+        }
+        for lane in lanes.iter().rev() {
+            push_var_u64(&mut input, u64::try_from(lane.len()).unwrap());
+        }
+        for lane in lanes.iter().rev() {
+            input.extend_from_slice(lane);
+        }
+        input.push(0);
+        input
+    }
+
     fn pack_flatpack_indexes(alphabet_len: usize, indexes: &[u8]) -> Vec<u8> {
         if indexes.is_empty() || alphabet_len == 0 {
             return Vec::new();
@@ -2098,6 +2149,7 @@ mod tests {
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
+            standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
             standard::TRANSPOSE_SPLIT8_ID,
@@ -2125,6 +2177,7 @@ mod tests {
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
+            standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
             standard::TRANSPOSE_SPLIT8_ID,
@@ -2901,6 +2954,18 @@ mod tests {
     #[test]
     fn decodes_v21_transpose_split2_chunk() {
         let input = transpose_split_frame(2, &[b"ace", b"bdf"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 6);
+        assert_eq!(output, b"abcdef");
+    }
+
+    #[test]
+    fn decodes_v21_dynamic_transpose_split_chunk() {
+        let input = dynamic_transpose_split_frame(&[b"ace", b"bdf"]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = Vec::new();
 

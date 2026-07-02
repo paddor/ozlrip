@@ -18,6 +18,7 @@ pub(crate) const CONVERT_NUM_TO_SERIAL_LE_ID: u32 = 10;
 pub(crate) const LZ_ID: u32 = 19;
 pub(crate) const FLATPACK_ID: u32 = 29;
 pub(crate) const ZIGZAG_ID: u32 = 3;
+pub(crate) const TRANSPOSE_SPLIT_ID: u32 = 4;
 pub(crate) const TRANSPOSE_SPLIT2_ID: u32 = 30;
 pub(crate) const TRANSPOSE_SPLIT4_ID: u32 = 31;
 pub(crate) const TRANSPOSE_SPLIT8_ID: u32 = 32;
