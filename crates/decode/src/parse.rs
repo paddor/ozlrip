@@ -693,6 +693,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         standard::DELTA_INT_ID
         | standard::ZIGZAG_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
+        | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZSTD_ID
         | standard::BITPACK_SERIAL_ID
         | standard::BITUNPACK_ID

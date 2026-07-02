@@ -135,8 +135,8 @@ fn decode_simple_transform_chunk(
         Some(standard::CONSTANT_SERIAL_ID) => {
             decode_constant_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
-        Some(standard::CONVERT_SERIAL_TO_STRUCT_ID) => {
-            decode_convert_serial_to_struct_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        Some(standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID) => {
+            decode_byte_preserving_conversion_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
         Some(standard::ZIGZAG_ID) => {
             decode_zigzag_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
@@ -577,14 +577,15 @@ fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) ->
     Ok(output)
 }
 
-fn decode_convert_serial_to_struct_chunk(
+fn decode_byte_preserving_conversion_chunk(
     stored: &[u8],
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
     if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_serial_to_struct headers are unsupported"));
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("conversion headers are unsupported")
+        );
     }
     if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
         return Err(
@@ -1658,6 +1659,19 @@ mod tests {
     }
 
     #[test]
+    fn decodes_v21_convert_struct_to_serial_chunk() {
+        let expected = b"serial payload bytes";
+        let input = standard_transform_serial_frame(21, 6, expected, expected.len(), &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn rejects_convert_serial_to_struct_header_without_mutating_destination() {
         let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[0]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
@@ -1672,6 +1686,23 @@ mod tests {
     #[test]
     fn rejects_convert_serial_to_struct_output_limit_without_mutating_destination() {
         let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_convert_struct_to_serial_output_limit_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 6, b"bytes", 5, &[]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {
