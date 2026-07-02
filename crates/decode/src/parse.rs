@@ -68,6 +68,10 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         dictionary_bundle_id.is_some(),
         limits,
     )?;
+    if format_version >= CHUNK_VERSION_MIN && !reader.is_empty() {
+        return Err(Error::at(ErrorKind::Malformed, reader.offset())
+            .with_detail("trailing bytes after OpenZL frame EOF marker"));
+    }
 
     let info = FrameInfo {
         format_version,
@@ -1363,6 +1367,22 @@ mod tests {
 
         assert_eq!(info.header_bytes, 7);
         assert_eq!(info.chunks, 0);
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_v21_eof_marker() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(0);
+        input.push(99);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(err.offset(), Some(8));
     }
 
     #[test]
