@@ -244,13 +244,34 @@ mod tests {
         (MAGIC_BASE + version).to_le_bytes()
     }
 
-    #[cfg(feature = "lz4")]
     fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
             out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
             value >>= 7;
         }
         out.push(u8::try_from(value).unwrap());
+    }
+
+    fn lz4_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(23));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(62);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
+        push_var_u64(&mut input, u64::try_from(decoded_len).unwrap());
+        input.extend_from_slice(stored);
+        input.push(0);
+        input
     }
 
     #[test]
@@ -321,24 +342,7 @@ mod tests {
     fn decodes_v23_lz4_serial_chunk() {
         let expected = b"lz4-backed OpenZL serial chunk";
         let compressed = lz4rip::block::compress(expected);
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(23));
-        input.push(0);
-        input.push(1);
-        push_var_u64(&mut input, u64::try_from(expected.len() + 1).unwrap());
-        input.push(2);
-        input.push(1);
-        input.push(0);
-        input.push(62);
-        input.push(1);
-        input.push(0);
-        input.push(0);
-        input.push(0);
-        input.push(0);
-        push_var_u64(&mut input, u64::try_from(compressed.len()).unwrap());
-        push_var_u64(&mut input, u64::try_from(expected.len()).unwrap());
-        input.extend_from_slice(&compressed);
-        input.push(0);
+        let input = lz4_serial_frame(&compressed, expected.len());
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = Vec::new();
 
@@ -346,6 +350,32 @@ mod tests {
 
         assert_eq!(written, expected.len());
         assert_eq!(output, expected);
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn rejects_malformed_lz4_chunk_without_mutating_destination() {
+        let input = lz4_serial_frame(&[0], 8);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(not(feature = "lz4"))]
+    #[test]
+    fn rejects_lz4_chunk_when_feature_is_disabled() {
+        let input = lz4_serial_frame(&[0], 8);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
     }
 
     #[test]
