@@ -10,43 +10,61 @@ pub(crate) fn decode_plan(
     dst: &mut Vec<u8>,
     limits: Limits,
 ) -> Result<usize> {
-    let stored = stored_only_output(input, plan, limits)?;
-    dst.try_reserve_exact(stored.len()).map_err(|_| {
+    let stored = collect_stored_output(input, plan, limits)?;
+    dst.try_reserve_exact(stored.total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
     })?;
-    dst.extend_from_slice(stored);
-    Ok(stored.len())
+    for stream in stored.streams {
+        dst.extend_from_slice(stream);
+    }
+    Ok(stored.total_len)
 }
 
-fn stored_only_output<'a>(input: &'a [u8], plan: &FramePlan, limits: Limits) -> Result<&'a [u8]> {
+fn collect_stored_output<'a>(
+    input: &'a [u8],
+    plan: &FramePlan,
+    limits: Limits,
+) -> Result<StoredOutput<'a>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single serial stored-output frames are implemented"));
     }
-    if plan.info.chunks != 1 || plan.chunks.len() != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-chunk stored-output frames are implemented"));
+
+    let mut streams = Vec::new();
+    streams.try_reserve_exact(plan.chunks.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("stored output list allocation failed")
+    })?;
+    let mut total_len = 0usize;
+    for chunk in &plan.chunks {
+        if chunk.has_nodes() {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("transform graph execution is not implemented yet"));
+        }
+        let Some(range) = chunk.stored_stream_range(0) else {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("stored-output chunk does not contain one stored stream"));
+        };
+        if chunk.stored_stream_range(1).is_some() {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("stored-output chunk contains multiple stored streams"));
+        }
+        let stored = range.as_slice(input)?;
+        total_len = total_len
+            .checked_add(stored.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        #[cfg(not(feature = "checksum"))]
+        let _ = chunk.decoded_checksum;
+        #[cfg(feature = "checksum")]
+        verify_decoded_checksum(stored, chunk.decoded_checksum)?;
+        streams.push(stored);
     }
-    let chunk = &plan.chunks[0];
-    if chunk.has_nodes() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transform graph execution is not implemented yet"));
-    }
-    let Some(range) = chunk.stored_stream_range(0) else {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("stored-output frame does not contain one stored stream"));
-    };
-    if chunk.stored_stream_range(1).is_some() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("stored-output frame contains multiple stored streams"));
-    }
-    let stored = range.as_slice(input)?;
-    check_output_size(stored.len(), input.len(), plan, limits)?;
-    #[cfg(not(feature = "checksum"))]
-    let _ = chunk.decoded_checksum;
-    #[cfg(feature = "checksum")]
-    verify_decoded_checksum(stored, chunk.decoded_checksum)?;
-    Ok(stored)
+    check_output_size(total_len, input.len(), plan, limits)?;
+    Ok(StoredOutput { streams, total_len })
+}
+
+struct StoredOutput<'a> {
+    streams: Vec<&'a [u8]>,
+    total_len: usize,
 }
 
 fn check_output_size(
@@ -126,6 +144,48 @@ mod tests {
 
         assert_eq!(written, 3);
         assert_eq!(output, [7, 8, 9]);
+    }
+
+    #[test]
+    fn decodes_empty_v21_stored_serial_output() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(1);
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 0);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_stored_serial_chunks() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(8);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        input.push(1);
+        input.push(1);
+        input.push(4);
+        input.extend_from_slice(&[10, 11, 12, 13]);
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 7);
+        assert_eq!(output, [7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]
