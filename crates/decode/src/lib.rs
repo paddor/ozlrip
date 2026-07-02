@@ -8,6 +8,7 @@ use ozlrip_core::{FrameInfo, Limits, Result};
 
 mod execute;
 mod parse;
+mod standard;
 
 pub struct Decoder {
     limits: Limits,

@@ -2,6 +2,8 @@ use alloc::{vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameInfo, FrameValueType, Limits, Result};
 
+use crate::standard;
+
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const MIN_FORMAT_VERSION: u32 = 8;
 const MAX_FORMAT_VERSION: u32 = 26;
@@ -771,6 +773,7 @@ fn read_transform_ids(
                     return Err(Error::new(ErrorKind::Unsupported)
                         .with_detail("standard transform ID is outside the OpenZL range"));
                 }
+                standard::validate_transform_id(id, format_version)?;
                 ids.push(id);
                 standard_index = checked_add(standard_index, 1)?;
             }
@@ -1406,6 +1409,58 @@ mod tests {
         assert_eq!(info.transforms, 1);
         assert_eq!(info.stored_streams, 1);
         assert_eq!(info.regenerated_streams, 1);
+    }
+
+    #[test]
+    fn rejects_reserved_standard_transform_id() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn enforces_standard_transform_id_min_version() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(25));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(66);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+
+        input[..4].copy_from_slice(&magic(26));
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+        assert_eq!(info.transforms, 1);
     }
 
     #[test]
