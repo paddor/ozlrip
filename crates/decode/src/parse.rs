@@ -1110,7 +1110,7 @@ enum TransformType {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct NodePlan {
+pub(crate) struct NodePlan {
     transform_type: TransformType,
     transform_id: u32,
     transform_header_start: usize,
@@ -1154,12 +1154,23 @@ impl ChunkPlan {
         !self.nodes.is_empty()
     }
 
+    pub(crate) fn single_node(&self) -> Option<&NodePlan> {
+        match self.nodes.as_slice() {
+            [node] => Some(node),
+            _ => None,
+        }
+    }
+
     fn stored_streams(&self) -> usize {
         self.stored_stream_sizes.len()
     }
 
     pub(crate) fn stored_stream_range(&self, index: usize) -> Option<ByteRange> {
         self.stored_stream_ranges.get(index).copied()
+    }
+
+    pub(crate) const fn transform_header_range(&self) -> ByteRange {
+        self.transform_header_range
     }
 
     fn regenerated_streams(&self) -> usize {
@@ -1192,6 +1203,23 @@ impl ChunkPlan {
             offset = checked_add(offset, size)?;
         }
         Ok(())
+    }
+}
+
+impl NodePlan {
+    pub(crate) const fn standard_id(&self) -> Option<u32> {
+        match self.transform_type {
+            TransformType::Standard => Some(self.transform_id),
+            TransformType::Custom => None,
+        }
+    }
+
+    pub(crate) const fn variable_outputs(&self) -> u32 {
+        self.variable_outputs
+    }
+
+    pub(crate) fn regen_distances(&self) -> &[u32] {
+        &self.regen_distances
     }
 }
 
