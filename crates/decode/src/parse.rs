@@ -95,7 +95,7 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         info,
         chunks: chunk_scan.chunks,
     };
-    validate_frame_plan(&plan)?;
+    validate_frame_plan(&plan, limits)?;
     Ok(plan)
 }
 
@@ -489,7 +489,7 @@ fn read_chunks(
     }
 }
 
-fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
+fn validate_frame_plan(plan: &FramePlan, limits: Limits) -> Result<()> {
     if plan.info.chunks != plan.chunks.len() {
         return Err(Error::new(ErrorKind::InvalidGraph).with_detail("chunk count mismatch"));
     }
@@ -498,7 +498,7 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
     let mut stored_streams = 0usize;
     let mut regenerated_streams = 0usize;
     for chunk in &plan.chunks {
-        validate_chunk_plan(chunk, plan.info.output_types.len())?;
+        validate_chunk_plan(chunk, plan.info.output_types.len(), limits)?;
         transforms = checked_add(transforms, chunk.transforms())?;
         stored_streams = checked_add(stored_streams, chunk.stored_streams())?;
         regenerated_streams = checked_add(regenerated_streams, chunk.regenerated_streams())?;
@@ -514,7 +514,7 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
     Ok(())
 }
 
-fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize) -> Result<()> {
+fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize, limits: Limits) -> Result<()> {
     let stream_bound = checked_add(chunk.regenerated_streams(), chunk.stored_streams())?;
     if output_count > stream_bound {
         return Err(Error::new(ErrorKind::InvalidGraph)
@@ -530,6 +530,12 @@ fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize) -> Result<()> {
             .with_detail("regen target validation allocation failed")
     })?;
     regen_targets.resize(stream_bound, false);
+    let mut stream_depths = Vec::new();
+    stream_depths.try_reserve_exact(stream_bound).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("stream depth validation allocation failed")
+    })?;
+    stream_depths.resize(stream_bound, 0usize);
     for node in &chunk.nodes {
         if node.transform_type == TransformType::Standard && node.transform_id >= 128 {
             return Err(Error::new(ErrorKind::Unsupported)
@@ -552,6 +558,17 @@ fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize) -> Result<()> {
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("node input range reaches final output streams"));
         }
+        let input_depth = stream_depths[stream_cursor..input_end]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let output_depth = checked_add(input_depth, 1)?;
+        check_limit(
+            output_depth,
+            limits.max_graph_depth,
+            ErrorKind::LimitExceeded,
+        )?;
         validate_node_output_count(node, shape)?;
         if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
             return Err(Error::new(ErrorKind::Unsupported)
@@ -570,6 +587,7 @@ fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize) -> Result<()> {
                     .with_detail("duplicate regen stream distance"));
             }
             regen_targets[target] = true;
+            stream_depths[target] = output_depth;
             regenerated = checked_add(regenerated, 1)?;
         }
         stream_cursor = input_end;
@@ -1852,6 +1870,37 @@ mod tests {
         let err = inspect_frame(&input, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn enforces_graph_depth_limit() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(3);
+        input.push(1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[22, 22], 6);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 2);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+        assert_eq!(info.transforms, 2);
+
+        let limits = Limits {
+            max_graph_depth: 1,
+            ..Limits::default()
+        };
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     }
 
     #[test]
