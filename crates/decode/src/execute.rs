@@ -403,6 +403,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
         | standard::FLATPACK_ID
+        | standard::SENTINEL_ID
         | standard::SEPARATE_STRING_COMPONENTS_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
@@ -531,6 +532,7 @@ fn execute_standard_node(
             format_version,
             limits,
         )),
+        standard::SENTINEL_ID => one_typed(decode_sentinel_node(inputs, header, limits)),
         id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
             inputs,
             variable_inputs,
@@ -1056,6 +1058,103 @@ fn decode_string_to_serial_node(
     })?;
     output.extend_from_slice(input.bytes);
     Ok(output)
+}
+
+fn decode_sentinel_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let [values, exceptions] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("sentinel input count does not match node shape"));
+    };
+    validate_numeric_stream_width(values.element_width, "sentinel values")?;
+    validate_numeric_stream_width(exceptions.element_width, "sentinel exceptions")?;
+    if values.element_width > exceptions.element_width {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("sentinel values width exceeds output width"));
+    }
+    let max_value = max_numeric_value(values.element_width)?;
+    let sentinel =
+        if header.is_empty() {
+            max_value
+        } else {
+            let mut offset = 0usize;
+            let value = read_var_u64(header, &mut offset)?;
+            if offset != header.len() {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("sentinel header has trailing bytes"));
+            }
+            if value > max_value {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("sentinel value exceeds values width"));
+            }
+            value
+        };
+    let value_count = numeric_element_count(values.bytes, values.element_width)?;
+    let exception_count = numeric_element_count(exceptions.bytes, exceptions.element_width)?;
+    let output_len = value_count
+        .checked_mul(exceptions.element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("sentinel allocation failed")
+    })?;
+    output.resize(output_len, 0);
+    let mut exception_index = 0usize;
+    for value_index in 0..value_count {
+        let value = read_numeric_element(values.bytes, values.element_width, value_index)?;
+        let output_offset = value_index
+            .checked_mul(exceptions.element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if value == sentinel {
+            if exception_index >= exception_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("sentinel exception stream is exhausted"));
+            }
+            let exception =
+                read_numeric_element(exceptions.bytes, exceptions.element_width, exception_index)?;
+            write_numeric_element(
+                &mut output[output_offset..],
+                exceptions.element_width,
+                exception,
+            );
+            exception_index = exception_index
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        } else {
+            write_numeric_element(
+                &mut output[output_offset..],
+                exceptions.element_width,
+                value,
+            );
+        }
+    }
+    if exception_index != exception_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("sentinel exception stream was not fully consumed"));
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: exceptions.element_width,
+        string_lengths: None,
+    })
+}
+
+fn max_numeric_value(element_width: usize) -> Result<u64> {
+    match element_width {
+        1 => Ok(u64::from(u8::MAX)),
+        2 => Ok(u64::from(u16::MAX)),
+        4 => Ok(u64::from(u32::MAX)),
+        8 => Ok(u64::MAX),
+        _ => Err(Error::new(ErrorKind::InvalidType).with_detail("numeric width is unsupported")),
+    }
 }
 
 fn decode_flatpack_serial(alphabet: &[u8], packed: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -2704,6 +2803,7 @@ mod tests {
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
+            standard::SENTINEL_ID,
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT_ID,
@@ -2736,6 +2836,7 @@ mod tests {
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
+            standard::SENTINEL_ID,
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT_ID,
@@ -3296,6 +3397,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, b"abcd");
+    }
+
+    #[test]
+    fn decodes_sentinel_node_with_default_marker() {
+        let exceptions = 300u16.to_le_bytes();
+        let output = decode_sentinel_node(
+            &[
+                StreamInput {
+                    bytes: &[1, 255, 2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &exceptions,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 2);
+        assert_eq!(output.bytes, [1, 0, 44, 1, 2, 0]);
+    }
+
+    #[test]
+    fn rejects_sentinel_unconsumed_exception() {
+        let exceptions = [300u16.to_le_bytes(), 301u16.to_le_bytes()].concat();
+        let err = decode_sentinel_node(
+            &[
+                StreamInput {
+                    bytes: &[1, 255, 2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &exceptions,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 
     #[test]

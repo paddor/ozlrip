@@ -230,6 +230,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "le-i16-signed",
+            input: InteropInput::Inline(le_bytes([0i16, -1, 1, i16::MIN, i16::MAX, -1024, 1024])),
+            profile: "le-i16",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "upstream-u16-zigzag",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
             profile: "le-u16",
@@ -241,6 +249,53 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             name: "le-u32-ramp",
             input: InteropInput::Inline(le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX])),
             profile: "le-u32",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "le-i32-signed",
+            input: InteropInput::Inline(le_bytes([
+                0i32,
+                -1,
+                1,
+                i32::MIN,
+                i32::MAX,
+                -65_536,
+                65_536,
+            ])),
+            profile: "le-i32",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "le-u64-ramp",
+            input: InteropInput::Inline(le_bytes([
+                0u64,
+                1,
+                255,
+                65_536,
+                u64::from(u32::MAX),
+                u64::MAX,
+            ])),
+            profile: "le-u64",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "le-i64-signed",
+            input: InteropInput::Inline(le_bytes([
+                0i64,
+                -1,
+                1,
+                i64::MIN,
+                i64::MAX,
+                -4_294_967_296,
+                4_294_967_296,
+            ])),
+            profile: "le-i64",
             profile_arg: None,
             extra_args: &[],
             relaxed_limits: false,
@@ -297,7 +352,28 @@ fn supported_interop_cases() -> Vec<InteropCase> {
 }
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
-    vec![]
+    vec![
+        InteropCase {
+            name: "getting-started-lorem-ipsum",
+            input: InteropInput::UpstreamFile(
+                "examples/getting_started/sample_inputs/lorem_ipsum.txt",
+            ),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "getting-started-era5-i32",
+            input: InteropInput::UpstreamFile(
+                "examples/getting_started/sample_inputs/era5_ints.bin",
+            ),
+            profile: "le-i32",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+    ]
 }
 
 fn sao_synthetic() -> Vec<u8> {
@@ -350,7 +426,31 @@ impl LeBytes for u16 {
     }
 }
 
+impl LeBytes for i16 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
 impl LeBytes for u32 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl LeBytes for i32 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl LeBytes for u64 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl LeBytes for i64 {
     fn to_le_vec(self) -> Vec<u8> {
         self.to_le_bytes().to_vec()
     }
