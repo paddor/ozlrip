@@ -30,7 +30,7 @@ impl Decoder {
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
         let plan = parse::parse_frame_plan(input, self.limits)?;
         self.scratch.clear();
-        execute::decode_plan(input, &plan, dst, self.limits)
+        execute::decode_plan_with_scratch(input, &plan, dst, &mut self.scratch, self.limits)
     }
 
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {

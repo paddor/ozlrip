@@ -4,10 +4,22 @@ use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
 
 use crate::{parse::FramePlan, standard};
 
+#[cfg(test)]
 pub(crate) fn decode_plan(
     input: &[u8],
     plan: &FramePlan,
     dst: &mut Vec<u8>,
+    limits: Limits,
+) -> Result<usize> {
+    let mut scratch = Vec::new();
+    decode_plan_with_scratch(input, plan, dst, &mut scratch, limits)
+}
+
+pub(crate) fn decode_plan_with_scratch(
+    input: &[u8],
+    plan: &FramePlan,
+    dst: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
     limits: Limits,
 ) -> Result<usize> {
     if plan.info.dictionary_bundle_id.is_some() {
@@ -15,12 +27,17 @@ pub(crate) fn decode_plan(
             .with_detail("dictionary bundle materialization is not implemented"));
     }
     let decoded = collect_decoded_output(input, plan, limits)?;
-    dst.try_reserve_exact(decoded.total_len).map_err(|_| {
+    scratch.clear();
+    scratch.try_reserve_exact(decoded.total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
     })?;
     for chunk in decoded.chunks {
-        dst.extend_from_slice(chunk.as_slice());
+        scratch.extend_from_slice(chunk.as_slice());
     }
+    dst.try_reserve_exact(decoded.total_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+    })?;
+    dst.extend_from_slice(scratch);
     Ok(decoded.total_len)
 }
 

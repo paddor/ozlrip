@@ -120,6 +120,20 @@ fn decode_into_appends_stored_serial_output() {
 }
 
 #[test]
+fn reusable_decoder_appends_outputs() {
+    let frame = stored_serial_frame(&[7, 8, 9]);
+    let mut decoder = ozlrip::Decoder::new(Limits::default());
+    let mut dst = Vec::new();
+
+    let first = decoder.decode_into(&frame, &mut dst).unwrap();
+    let second = decoder.decode_into(&frame, &mut dst).unwrap();
+
+    assert_eq!(first, 3);
+    assert_eq!(second, 3);
+    assert_eq!(dst, [7, 8, 9, 7, 8, 9]);
+}
+
+#[test]
 fn inspect_reports_stored_serial_metadata() {
     let frame = stored_serial_frame(&[7, 8, 9]);
 
