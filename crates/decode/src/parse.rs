@@ -412,7 +412,7 @@ fn read_chunks(
             return Ok(ChunkScan { summary, chunks });
         }
 
-        let chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
+        let mut chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
         summary.chunks = checked_add(summary.chunks, 1)?;
         check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
         summary.transforms = checked_add(summary.transforms, chunk.transforms())?;
@@ -434,6 +434,8 @@ fn read_chunks(
             limits.max_streams,
             ErrorKind::LimitExceeded,
         )?;
+        let payload_start = reader.offset();
+        chunk.set_payload_start(payload_start)?;
         let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
         check_limit(
             chunk.transform_header_bytes,
@@ -532,6 +534,27 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
     if sum_usize(&chunk.stored_stream_sizes)? != chunk.stored_stream_bytes {
         return Err(Error::new(ErrorKind::InvalidGraph).with_detail("stored stream size mismatch"));
     }
+    if chunk.stored_stream_ranges.len() != chunk.stored_stream_sizes.len() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("stored stream range count mismatch")
+        );
+    }
+    let mut expected_start = checked_add(
+        chunk.transform_header_range.start,
+        chunk.transform_header_range.len,
+    )?;
+    for (range, &size) in chunk
+        .stored_stream_ranges
+        .iter()
+        .zip(chunk.stored_stream_sizes.iter())
+    {
+        if range.start != expected_start || range.len != size {
+            return Err(
+                Error::new(ErrorKind::InvalidGraph).with_detail("stored stream range mismatch")
+            );
+        }
+        expected_start = checked_add(range.start, range.len)?;
+    }
     Ok(())
 }
 
@@ -601,6 +624,8 @@ fn read_chunk_header(
         stored_stream_sizes,
         transform_header_bytes,
         stored_stream_bytes,
+        transform_header_range: ByteRange::default(),
+        stored_stream_ranges: Vec::new(),
     })
 }
 
@@ -1032,7 +1057,7 @@ struct OutputSizes {
 
 pub(crate) struct FramePlan {
     pub(crate) info: FrameInfo,
-    chunks: Vec<ChunkPlan>,
+    pub(crate) chunks: Vec<ChunkPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1066,11 +1091,13 @@ struct ChunkScan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ChunkPlan {
+pub(crate) struct ChunkPlan {
     nodes: Vec<NodePlan>,
     stored_stream_sizes: Vec<usize>,
     transform_header_bytes: usize,
     stored_stream_bytes: usize,
+    transform_header_range: ByteRange,
+    stored_stream_ranges: Vec<ByteRange>,
 }
 
 impl ChunkPlan {
@@ -1078,8 +1105,16 @@ impl ChunkPlan {
         self.nodes.len()
     }
 
+    pub(crate) fn has_nodes(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
     fn stored_streams(&self) -> usize {
         self.stored_stream_sizes.len()
+    }
+
+    pub(crate) fn stored_stream_range(&self, index: usize) -> Option<ByteRange> {
+        self.stored_stream_ranges.get(index).copied()
     }
 
     fn regenerated_streams(&self) -> usize {
@@ -1087,6 +1122,46 @@ impl ChunkPlan {
             .iter()
             .map(|node| node.regen_distances.len())
             .sum()
+    }
+
+    fn set_payload_start(&mut self, payload_start: usize) -> Result<()> {
+        let transform_header_end = checked_add(payload_start, self.transform_header_bytes)?;
+        self.transform_header_range = ByteRange {
+            start: payload_start,
+            len: self.transform_header_bytes,
+        };
+
+        let mut offset = transform_header_end;
+        self.stored_stream_ranges.clear();
+        self.stored_stream_ranges
+            .try_reserve_exact(self.stored_stream_sizes.len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("stored stream range allocation failed")
+            })?;
+        for &size in &self.stored_stream_sizes {
+            self.stored_stream_ranges.push(ByteRange {
+                start: offset,
+                len: size,
+            });
+            offset = checked_add(offset, size)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ByteRange {
+    start: usize,
+    len: usize,
+}
+
+impl ByteRange {
+    pub(crate) fn as_slice(self, input: &[u8]) -> Result<&[u8]> {
+        let end = checked_add(self.start, self.len)?;
+        input
+            .get(self.start..end)
+            .ok_or_else(|| Error::at(ErrorKind::Truncated, self.start))
     }
 }
 

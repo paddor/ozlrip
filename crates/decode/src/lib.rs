@@ -4,8 +4,9 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use ozlrip_core::{Error, ErrorKind, FrameInfo, Limits, Result};
+use ozlrip_core::{FrameInfo, Limits, Result};
 
+mod execute;
 mod parse;
 
 pub struct Decoder {
@@ -26,11 +27,9 @@ impl Decoder {
     }
 
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
-        let _plan = parse::parse_frame_plan(input, self.limits)?;
+        let plan = parse::parse_frame_plan(input, self.limits)?;
         self.scratch.clear();
-        let _ = dst;
-        Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("OpenZL graph execution is not implemented yet"))
+        execute::decode_plan(input, &plan, dst, self.limits)
     }
 
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {
