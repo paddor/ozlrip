@@ -141,6 +141,9 @@ fn decode_simple_transform_chunk(
         Some(standard::ZIGZAG_ID) => {
             decode_zigzag_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::DELTA_INT_ID) => {
+            decode_delta_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -611,6 +614,45 @@ fn decode_zigzag_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> 
     Ok(output)
 }
 
+fn decode_delta_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    let output_len = match header.len() {
+        0 if stored.is_empty() => 0,
+        0 => {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("delta stream has no first value")
+            );
+        }
+        1 => stored.len().checked_add(1).ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow).with_detail("delta size overflowed")
+        })?,
+        _ => {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("delta header must contain one byte")
+            );
+        }
+    };
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("delta allocation failed"))?;
+    if output_len == 0 {
+        return Ok(output);
+    }
+    output.push(header[0]);
+    for &delta in stored {
+        let previous = *output
+            .last()
+            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("missing delta base"))?;
+        output.push(previous.wrapping_add(delta));
+    }
+    Ok(output)
+}
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -946,6 +988,12 @@ mod tests {
 
     fn zigzag_serial_frame(stored: &[u8]) -> Vec<u8> {
         standard_transform_serial_frame(21, 3, stored, stored.len(), &[])
+    }
+
+    fn delta_serial_frame(first: Option<u8>, deltas: &[u8]) -> Vec<u8> {
+        let header = first.map_or_else(Vec::new, |value| vec![value]);
+        let decoded_len = deltas.len() + usize::from(first.is_some());
+        standard_transform_serial_frame(21, 1, deltas, decoded_len, &header)
     }
 
     fn flatpack_serial_frame(alphabet: &[u8], indexes: &[u8]) -> Vec<u8> {
@@ -1299,6 +1347,59 @@ mod tests {
     #[test]
     fn rejects_zigzag_output_limit_without_mutating_destination() {
         let input = zigzag_serial_frame(b"bytes");
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_delta_serial8_chunk() {
+        let input = delta_serial_frame(Some(2), &[1, 1, 2, 250]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 5);
+        assert_eq!(output, [2, 3, 4, 6, 0]);
+    }
+
+    #[test]
+    fn decodes_empty_v21_delta_serial8_chunk() {
+        let input = delta_serial_frame(None, &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 0);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_delta_without_first_value_without_mutating_destination() {
+        let input = delta_serial_frame(None, &[1]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_delta_output_limit_without_mutating_destination() {
+        let input = delta_serial_frame(Some(2), &[1, 1, 2, 250]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {
