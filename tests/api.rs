@@ -20,6 +20,26 @@ fn stored_serial_frame(bytes: &[u8]) -> Vec<u8> {
     input
 }
 
+fn transform_graph_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(4);
+    input.push(2);
+    input.push(1);
+    input.push(0);
+    input.push(22);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(3);
+    input.extend_from_slice(&[1, 2, 3]);
+    input.push(0);
+    input
+}
+
 #[test]
 fn inspect_rejects_non_openzl_input() {
     let err = ozlrip::inspect(b"not-openzl").unwrap_err();
@@ -30,6 +50,17 @@ fn inspect_rejects_non_openzl_input() {
 fn decode_into_preserves_destination_on_unsupported_header() {
     let mut dst = vec![1, 2, 3];
     let err = ozlrip::decode_into(b"not-openzl", &mut dst, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(dst, [1, 2, 3]);
+}
+
+#[test]
+fn decode_into_preserves_destination_on_unsupported_graph() {
+    let frame = transform_graph_frame();
+    let mut dst = vec![1, 2, 3];
+
+    let err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
 }

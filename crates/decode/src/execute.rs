@@ -41,7 +41,7 @@ fn stored_only_output<'a>(input: &'a [u8], plan: &FramePlan, limits: Limits) -> 
             .with_detail("stored-output frame contains multiple stored streams"));
     }
     let stored = range.as_slice(input)?;
-    check_output_size(stored.len(), plan, limits)?;
+    check_output_size(stored.len(), input.len(), plan, limits)?;
     #[cfg(not(feature = "checksum"))]
     let _ = chunk.decoded_checksum;
     #[cfg(feature = "checksum")]
@@ -49,10 +49,26 @@ fn stored_only_output<'a>(input: &'a [u8], plan: &FramePlan, limits: Limits) -> 
     Ok(stored)
 }
 
-fn check_output_size(size: usize, plan: &FramePlan, limits: Limits) -> Result<()> {
+fn check_output_size(
+    size: usize,
+    encoded_size: usize,
+    plan: &FramePlan,
+    limits: Limits,
+) -> Result<()> {
     if size > limits.max_decoded_bytes || size > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let max_expanded = encoded_size
+        .checked_mul(limits.max_expansion_ratio)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow)
+                .with_detail("encoded size expansion limit overflowed")
+        })?;
+    if size > max_expanded {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded expansion ratio exceeded")
         );
     }
     if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
@@ -130,6 +146,31 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn enforces_expansion_ratio_without_mutating_destination() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_expansion_ratio: 0,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
         assert_eq!(output, [1, 2]);
     }
 
