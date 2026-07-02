@@ -10,11 +10,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const INPUTS: &[(&str, &[u8], &str)] = &[
-    ("serial-small", b"openzl interop serial fixture\n", "serial"),
-    ("u8-ramp", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "u8"),
-];
-
 #[test]
 fn upstream_zli_golden_roundtrips_match_ozlrip() {
     let Some(zli) = zli_path() else {
@@ -30,7 +25,10 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     )
     .unwrap();
 
-    for &(name, input, profile) in INPUTS {
+    for case in interop_cases() {
+        let name = case.name;
+        let input = case.input.as_slice();
+        let profile = case.profile;
         let input_path = work.path.join(format!("{name}.input"));
         let frame_path = work.path.join(format!("{name}.zl"));
         let zli_decoded_path = work.path.join(format!("{name}.zli.decoded"));
@@ -103,6 +101,69 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     let manifest_dir = Path::new("tmp").join("ozlrip-interop");
     fs::create_dir_all(&manifest_dir).unwrap();
     fs::write(manifest_dir.join("last-run.manifest"), manifest).unwrap();
+}
+
+fn interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase {
+            name: "serial-small",
+            input: b"openzl interop serial fixture\n".to_vec(),
+            profile: "serial",
+        },
+        InteropCase {
+            name: "u8-ramp",
+            input: (0..=31).collect(),
+            profile: "u8",
+        },
+        InteropCase {
+            name: "i8-signed",
+            input: [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
+                .into_iter()
+                .map(i8::cast_unsigned)
+                .collect(),
+            profile: "i8",
+        },
+        InteropCase {
+            name: "le-u16-ramp",
+            input: le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX]),
+            profile: "le-u16",
+        },
+        InteropCase {
+            name: "le-u32-ramp",
+            input: le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX]),
+            profile: "le-u32",
+        },
+    ]
+}
+
+fn le_bytes<const N: usize, T: LeBytes>(values: [T; N]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in values {
+        out.extend_from_slice(&value.to_le_vec());
+    }
+    out
+}
+
+trait LeBytes {
+    fn to_le_vec(self) -> Vec<u8>;
+}
+
+impl LeBytes for u16 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl LeBytes for u32 {
+    fn to_le_vec(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+struct InteropCase {
+    name: &'static str,
+    input: Vec<u8>,
+    profile: &'static str,
 }
 
 fn zli_path() -> Option<PathBuf> {
