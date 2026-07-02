@@ -1297,7 +1297,7 @@ pub(crate) struct ChunkPlan {
 }
 
 impl ChunkPlan {
-    fn transforms(&self) -> usize {
+    pub(crate) fn transforms(&self) -> usize {
         self.nodes.len()
     }
 
@@ -1305,11 +1305,8 @@ impl ChunkPlan {
         !self.nodes.is_empty()
     }
 
-    pub(crate) fn single_node(&self) -> Option<&NodePlan> {
-        match self.nodes.as_slice() {
-            [node] => Some(node),
-            _ => None,
-        }
+    pub(crate) fn nodes(&self) -> &[NodePlan] {
+        &self.nodes
     }
 
     pub(crate) fn stored_streams(&self) -> usize {
@@ -1324,7 +1321,7 @@ impl ChunkPlan {
         self.transform_header_range
     }
 
-    fn regenerated_streams(&self) -> usize {
+    pub(crate) fn regenerated_streams(&self) -> usize {
         self.nodes
             .iter()
             .map(|node| node.regen_distances.len())
@@ -1372,6 +1369,14 @@ impl NodePlan {
     pub(crate) fn regen_distances(&self) -> &[u32] {
         &self.regen_distances
     }
+
+    pub(crate) const fn transform_header_start(&self) -> usize {
+        self.transform_header_start
+    }
+
+    pub(crate) const fn transform_header_size(&self) -> usize {
+        self.transform_header_size
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1381,10 +1386,6 @@ pub(crate) struct ByteRange {
 }
 
 impl ByteRange {
-    pub(crate) const fn len(self) -> usize {
-        self.len
-    }
-
     pub(crate) fn as_slice(self, input: &[u8]) -> Result<&[u8]> {
         let end = checked_add(self.start, self.len)?;
         input

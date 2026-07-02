@@ -58,7 +58,7 @@ fn collect_decoded_output<'a>(
     let mut total_len = 0usize;
     for chunk in &plan.chunks {
         let decoded = if chunk.has_nodes() {
-            decode_simple_transform_chunk(input, chunk, limits)?
+            decode_transform_chunk(input, chunk, limits)?
         } else {
             DecodedChunk::Borrowed(stored_only_chunk(input, chunk)?)
         };
@@ -88,103 +88,293 @@ fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Re
     range.as_slice(input)
 }
 
-fn decode_simple_transform_chunk(
-    input: &[u8],
+fn decode_transform_chunk<'a>(
+    input: &'a [u8],
     chunk: &crate::parse::ChunkPlan,
     limits: Limits,
-) -> Result<DecodedChunk<'static>> {
-    let Some(node) = chunk.single_node() else {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-node transform chunks are implemented"));
-    };
-    if node.standard_id() == Some(standard::CONCAT_SERIAL_ID) {
-        return decode_concat_serial_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
+) -> Result<DecodedChunk<'a>> {
+    let plan = build_chunk_execution_plan(chunk)?;
+    let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
+    let transform_headers = chunk.transform_header_range().as_slice(input)?;
+
+    for node in plan.nodes {
+        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
+        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        let output = execute_standard_node(
+            node.standard_id,
+            &inputs,
+            node.variable_inputs,
+            header,
+            limits,
+        )?;
+        let target = streams.get_mut(node.output_target).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("node output target is out of bounds")
+        })?;
+        if !matches!(target, StreamSlot::Empty) {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("node output overwrites an existing stream"));
+        }
+        *target = StreamSlot::Owned(output);
     }
-    if node.standard_id() == Some(standard::SPLITN_ID) {
-        return decode_splitn_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
-    }
-    if node.standard_id() == Some(standard::FLATPACK_ID) {
-        return decode_flatpack_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
-    }
-    if let Some(width) = transpose_split_width(node.standard_id()) {
-        return decode_transpose_split_chunk(input, chunk, node, width, limits)
-            .map(DecodedChunk::Owned);
-    }
-    if node.variable_outputs() != 0 || node.regen_distances() != [0] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-input single-output transform chunks are implemented"));
-    }
-    if chunk.stored_stream_range(1).is_some() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transform chunk contains multiple stored streams"));
-    }
-    let Some(stored_range) = chunk.stored_stream_range(0) else {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transform chunk does not contain one stored stream"));
-    };
-    let stored = stored_range.as_slice(input)?;
-    let header = chunk.transform_header_range().as_slice(input)?;
-    match node.standard_id() {
-        Some(standard::LZ4_ID) => decode_lz4_chunk(stored, header, limits).map(DecodedChunk::Owned),
-        Some(standard::ZSTD_ID) => {
-            decode_zstd_chunk(stored, header, limits).map(DecodedChunk::Owned)
+
+    let final_index = streams.len().checked_sub(1).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("transform chunk has no output stream")
+    })?;
+    match streams.swap_remove(final_index) {
+        StreamSlot::Borrowed(bytes) => Ok(DecodedChunk::Borrowed(bytes)),
+        StreamSlot::Owned(bytes) => Ok(DecodedChunk::Owned(bytes)),
+        StreamSlot::Empty => {
+            Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
         }
-        Some(standard::BITPACK_SERIAL_ID) => {
-            decode_bitpack_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::CONSTANT_SERIAL_ID) => {
-            decode_constant_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID) => {
-            decode_byte_preserving_conversion_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::ZIGZAG_ID) => {
-            decode_zigzag_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::DELTA_INT_ID) => {
-            decode_delta_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::BITUNPACK_ID) => {
-            decode_bitunpack_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        Some(standard::RANGE_PACK_ID) => {
-            decode_range_pack_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
-        }
-        _ => Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transform graph execution is not implemented yet")),
     }
 }
 
-fn decode_concat_serial_chunk(
-    input: &[u8],
+struct ChunkExecutionPlan {
+    nodes: Vec<NodeExecutionPlan>,
+    regen_targets: Vec<bool>,
+}
+
+struct NodeExecutionPlan {
+    standard_id: u32,
+    input_start: usize,
+    input_count: usize,
+    output_target: usize,
+    variable_inputs: u32,
+    header_start: usize,
+    header_size: usize,
+}
+
+fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkExecutionPlan> {
+    let total_streams = chunk
+        .stored_streams()
+        .checked_add(chunk.regenerated_streams())
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut regen_targets = Vec::new();
+    regen_targets
+        .try_reserve_exact(total_streams)
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("regen target allocation failed")
+        })?;
+    regen_targets.resize(total_streams, false);
+
+    let mut nodes = Vec::new();
+    nodes.try_reserve_exact(chunk.transforms()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("node execution allocation failed")
+    })?;
+    let mut stream_cursor = 0usize;
+    for node in chunk.nodes() {
+        let standard_id = node.standard_id().ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported).with_detail("custom graph execution is unsupported")
+        })?;
+        if node.regen_distances().len() != 1 {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("multi-output graph execution is unsupported"));
+        }
+        let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
+        })?;
+        let input_count = standard_node_input_count(standard_id, variable_inputs)?;
+        let input_end = stream_cursor
+            .checked_add(input_count)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let distance = usize::try_from(node.regen_distances()[0]).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("regen distance is too large")
+        })?;
+        let output_target = input_end
+            .checked_add(distance)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let target = regen_targets.get_mut(output_target).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph)
+                .with_detail("regen stream distance is out of bounds")
+        })?;
+        if *target {
+            return Err(
+                Error::new(ErrorKind::InvalidGraph).with_detail("duplicate regen stream distance")
+            );
+        }
+        *target = true;
+        nodes.push(NodeExecutionPlan {
+            standard_id,
+            input_start: stream_cursor,
+            input_count,
+            output_target,
+            variable_inputs: node.variable_outputs(),
+            header_start: node.transform_header_start(),
+            header_size: node.transform_header_size(),
+        });
+        stream_cursor = input_end;
+    }
+
+    Ok(ChunkExecutionPlan {
+        nodes,
+        regen_targets,
+    })
+}
+
+fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
+    let static_inputs: usize = match standard_id {
+        standard::SPLITN_ID => 0,
+        standard::CONCAT_SERIAL_ID | standard::FLATPACK_ID | standard::TRANSPOSE_SPLIT2_ID => 2,
+        standard::TRANSPOSE_SPLIT4_ID => 4,
+        standard::TRANSPOSE_SPLIT8_ID => 8,
+        standard::LZ4_ID
+        | standard::ZSTD_ID
+        | standard::BITPACK_SERIAL_ID
+        | standard::CONSTANT_SERIAL_ID
+        | standard::CONVERT_SERIAL_TO_STRUCT_ID
+        | standard::CONVERT_STRUCT_TO_SERIAL_ID
+        | standard::ZIGZAG_ID
+        | standard::DELTA_INT_ID
+        | standard::BITUNPACK_ID
+        | standard::RANGE_PACK_ID => 1,
+        _ => {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("standard transform graph execution is not implemented yet"));
+        }
+    };
+    static_inputs
+        .checked_add(variable_inputs)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn initialize_stream_slots<'a>(
+    input: &'a [u8],
     chunk: &crate::parse::ChunkPlan,
-    node: &crate::parse::NodePlan,
+    regen_targets: &[bool],
+) -> Result<Vec<StreamSlot<'a>>> {
+    let mut streams = Vec::new();
+    streams
+        .try_reserve_exact(regen_targets.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("stream table allocation failed")
+        })?;
+    streams.resize_with(regen_targets.len(), || StreamSlot::Empty);
+
+    let mut stored_index = 0usize;
+    for (stream_index, is_regen_target) in regen_targets.iter().copied().enumerate() {
+        if is_regen_target {
+            continue;
+        }
+        let range = chunk.stored_stream_range(stored_index).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("stored stream slot is missing")
+        })?;
+        streams[stream_index] = StreamSlot::Borrowed(range.as_slice(input)?);
+        stored_index = stored_index
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    if stored_index != chunk.stored_streams() {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("stored stream count does not match stream slots"));
+    }
+    Ok(streams)
+}
+
+fn collect_node_inputs<'a>(
+    streams: &'a [StreamSlot<'a>],
+    input_start: usize,
+    input_count: usize,
+) -> Result<Vec<&'a [u8]>> {
+    let input_end = input_start
+        .checked_add(input_count)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let input_slots = streams.get(input_start..input_end).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("node input range is out of bounds")
+    })?;
+    let mut inputs = Vec::new();
+    inputs.try_reserve_exact(input_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("node input allocation failed")
+    })?;
+    for slot in input_slots {
+        inputs.push(slot.as_slice()?);
+    }
+    Ok(inputs)
+}
+
+fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[u8]> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    headers.get(start..end).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("node header is out of bounds")
+    })
+}
+
+fn execute_standard_node(
+    standard_id: u32,
+    inputs: &[&[u8]],
+    variable_inputs: u32,
+    header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if chunk.transform_header_range().len() != 0 {
+    match standard_id {
+        standard::CONCAT_SERIAL_ID => decode_concat_serial_node(inputs, header, limits),
+        standard::SPLITN_ID => decode_splitn_node(inputs, variable_inputs, header, limits),
+        standard::FLATPACK_ID => decode_flatpack_node(inputs, header, limits),
+        id if transpose_split_width(Some(id)).is_some() => {
+            decode_transpose_split_node(inputs, header, limits)
+        }
+        standard::LZ4_ID => decode_lz4_chunk(single_input(inputs)?, header, limits),
+        standard::ZSTD_ID => decode_zstd_chunk(single_input(inputs)?, header, limits),
+        standard::BITPACK_SERIAL_ID => {
+            decode_bitpack_serial_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::CONSTANT_SERIAL_ID => {
+            decode_constant_serial_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID => {
+            decode_byte_preserving_conversion_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::ZIGZAG_ID => decode_zigzag_serial8_chunk(single_input(inputs)?, header, limits),
+        standard::DELTA_INT_ID => decode_delta_serial8_chunk(single_input(inputs)?, header, limits),
+        standard::BITUNPACK_ID => {
+            decode_bitunpack_serial8_chunk(single_input(inputs)?, header, limits)
+        }
+        standard::RANGE_PACK_ID => {
+            decode_range_pack_serial8_chunk(single_input(inputs)?, header, limits)
+        }
+        _ => Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("standard transform graph execution is not implemented yet")),
+    }
+}
+
+fn single_input<'a>(inputs: &[&'a [u8]]) -> Result<&'a [u8]> {
+    match inputs {
+        [input] => Ok(*input),
+        _ => Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("single-input transform received the wrong input count")),
+    }
+}
+
+enum StreamSlot<'a> {
+    Empty,
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> StreamSlot<'a> {
+    fn as_slice(&'a self) -> Result<&'a [u8]> {
+        match self {
+            Self::Borrowed(bytes) => Ok(bytes),
+            Self::Owned(bytes) => Ok(bytes),
+            Self::Empty => {
+                Err(Error::new(ErrorKind::InvalidGraph).with_detail("node input stream is missing"))
+            }
+        }
+    }
+}
+
+fn decode_concat_serial_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("concat_serial transform headers are unsupported"));
     }
-    if node.regen_distances() != [0] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-output concat_serial chunks are implemented"));
-    }
-    if node.variable_outputs() != 0 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("variable concat_serial outputs are unsupported"));
-    }
-    if chunk.stored_streams() != 2 {
+    let [sizes, concatenated] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("concat_serial input count does not match stored streams"));
-    }
-
-    let sizes_range = chunk
-        .stored_stream_range(0)
-        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing concat sizes"))?;
-    let concatenated_range = chunk
-        .stored_stream_range(1)
-        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing concat input"))?;
-    let sizes = sizes_range.as_slice(input)?;
+            .with_detail("concat_serial input count does not match node shape"));
+    };
+    let sizes = *sizes;
+    let concatenated = *concatenated;
     if sizes.len() != 4 {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("concat_serial size table is malformed")
@@ -197,7 +387,7 @@ fn decode_concat_serial_chunk(
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("concat size is too large")
         })?;
-    if decoded_size != concatenated_range.len() {
+    if decoded_size != concatenated.len() {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("concat_serial size does not match input")
         );
@@ -212,7 +402,7 @@ fn decode_concat_serial_chunk(
     output.try_reserve_exact(decoded_size).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
     })?;
-    output.extend_from_slice(concatenated_range.as_slice(input)?);
+    output.extend_from_slice(concatenated);
     Ok(output)
 }
 
@@ -225,28 +415,16 @@ fn transpose_split_width(id: Option<u32>) -> Option<usize> {
     }
 }
 
-fn decode_transpose_split_chunk(
-    input: &[u8],
-    chunk: &crate::parse::ChunkPlan,
-    node: &crate::parse::NodePlan,
-    width: usize,
-    limits: Limits,
-) -> Result<Vec<u8>> {
-    if node.variable_outputs() != 0 || node.regen_distances() != [0] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-output transpose_split chunks are implemented"));
-    }
-    if chunk.transform_header_range().len() != 0 {
+fn decode_transpose_split_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transpose_split transform headers are unsupported"));
     }
-    if chunk.stored_streams() != width {
+    let Some(first) = inputs.first() else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("transpose_split input count does not match width"));
-    }
-    let first = chunk.stored_stream_range(0).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidGraph).with_detail("missing transpose input")
-    })?;
+    };
+    let width = inputs.len();
     let lane_len = first.len();
     let output_len = lane_len.checked_mul(width).ok_or_else(|| {
         Error::new(ErrorKind::IntegerOverflow).with_detail("transpose size overflowed")
@@ -256,63 +434,33 @@ fn decode_transpose_split_chunk(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
-    let mut lanes = Vec::new();
-    lanes
-        .try_reserve_exact(width)
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("lane allocation failed"))?;
-    for index in 0..width {
-        let lane = chunk
-            .stored_stream_range(index)
-            .ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph).with_detail("missing transpose input")
-            })?
-            .as_slice(input)?;
+    for lane in inputs {
         if lane.len() != lane_len {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("transpose_split lanes have different sizes"));
         }
-        lanes.push(lane);
     }
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("transpose allocation failed")
     })?;
     for element in 0..lane_len {
-        for lane in &lanes {
+        for lane in inputs {
             output.push(lane[element]);
         }
     }
     Ok(output)
 }
 
-fn decode_flatpack_chunk(
-    input: &[u8],
-    chunk: &crate::parse::ChunkPlan,
-    node: &crate::parse::NodePlan,
-    limits: Limits,
-) -> Result<Vec<u8>> {
-    if node.variable_outputs() != 0 || node.regen_distances() != [0] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-output flatpack chunks are implemented"));
-    }
-    if chunk.transform_header_range().len() != 0 {
+fn decode_flatpack_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("flatpack transform headers are unsupported"));
     }
-    if chunk.stored_streams() != 2 {
+    let [alphabet, packed] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("flatpack input count does not match stored streams"));
-    }
-    let alphabet = chunk
-        .stored_stream_range(0)
-        .ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("missing flatpack alphabet")
-        })?
-        .as_slice(input)?;
-    let packed = chunk
-        .stored_stream_range(1)
-        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing flatpack input"))?
-        .as_slice(input)?;
+            .with_detail("flatpack input count does not match node shape"));
+    };
     decode_flatpack_serial(alphabet, packed, limits)
 }
 
@@ -397,23 +545,18 @@ fn flatpack_output_len(bits: usize, packed: &[u8]) -> Result<usize> {
     Ok(packed_bits / bits)
 }
 
-fn decode_splitn_chunk(
-    input: &[u8],
-    chunk: &crate::parse::ChunkPlan,
-    node: &crate::parse::NodePlan,
+fn decode_splitn_node(
+    inputs: &[&[u8]],
+    variable_inputs: u32,
+    header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if node.regen_distances() != [0] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single-output splitn chunks are implemented"));
-    }
-    let input_count = usize::try_from(node.variable_outputs())
+    let input_count = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("too many splitn inputs"))?;
-    if chunk.stored_streams() != input_count {
+    if inputs.len() != input_count {
         return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("splitn input count does not match stored streams"));
+            .with_detail("splitn input count does not match node shape"));
     }
-    let header = chunk.transform_header_range().as_slice(input)?;
     if input_count == 0 {
         validate_splitn_empty_header(header)?;
         return Ok(Vec::new());
@@ -425,11 +568,8 @@ fn decode_splitn_chunk(
     }
 
     let mut total_len = 0usize;
-    for index in 0..input_count {
-        let range = chunk.stored_stream_range(index).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("missing splitn input")
-        })?;
-        total_len = total_len.checked_add(range.len()).ok_or_else(|| {
+    for input in inputs {
+        total_len = total_len.checked_add(input.len()).ok_or_else(|| {
             Error::new(ErrorKind::IntegerOverflow).with_detail("splitn size overflowed")
         })?;
     }
@@ -443,11 +583,8 @@ fn decode_splitn_chunk(
     output.try_reserve_exact(total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
     })?;
-    for index in 0..input_count {
-        let range = chunk.stored_stream_range(index).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("missing splitn input")
-        })?;
-        output.extend_from_slice(range.as_slice(input)?);
+    for input in inputs {
+        output.extend_from_slice(input);
     }
     Ok(output)
 }
@@ -1121,6 +1258,32 @@ mod tests {
         standard_transform_serial_frame(21, 1, deltas, decoded_len, &header)
     }
 
+    fn zigzag_delta_graph_frame(zigzag_encoded_deltas: &[u8], first: u8) -> Vec<u8> {
+        let decoded_len = zigzag_encoded_deltas.len() + 1;
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(3);
+        input.push(1);
+        input.push(0);
+        input.extend_from_slice(&[67, 0]);
+        input.push(2);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        push_var_u64(
+            &mut input,
+            u64::try_from(zigzag_encoded_deltas.len()).unwrap(),
+        );
+        input.push(first);
+        input.extend_from_slice(zigzag_encoded_deltas);
+        input.push(0);
+        input
+    }
+
     fn flatpack_serial_frame(alphabet: &[u8], indexes: &[u8]) -> Vec<u8> {
         let packed = pack_flatpack_indexes(alphabet.len(), indexes);
         let mut input = Vec::new();
@@ -1602,6 +1765,18 @@ mod tests {
 
         assert_eq!(written, 5);
         assert_eq!(output, [2, 3, 4, 6, 0]);
+    }
+
+    #[test]
+    fn decodes_v21_two_node_regenerated_stream_graph() {
+        let input = zigzag_delta_graph_frame(&[2, 1, 6], 10);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 4);
+        assert_eq!(output, [10, 11, 10, 13]);
     }
 
     #[test]
