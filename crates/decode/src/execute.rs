@@ -96,6 +96,9 @@ fn decode_simple_transform_chunk(
     let header = chunk.transform_header_range().as_slice(input)?;
     match node.standard_id() {
         Some(standard::LZ4_ID) => decode_lz4_chunk(stored, header, limits).map(DecodedChunk::Owned),
+        Some(standard::ZSTD_ID) => {
+            decode_zstd_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -123,6 +126,46 @@ fn decode_lz4_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<V
     Err(Error::new(ErrorKind::Unsupported).with_detail("lz4 support is disabled"))
 }
 
+#[cfg(feature = "zstd")]
+fn decode_zstd_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("zstd transform headers are unsupported"));
+    }
+    let mut offset = 0usize;
+    let element_width = read_var_u64(stored, &mut offset)?;
+    if element_width == 0 || element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only serial byte zstd output is implemented"));
+    }
+    let magicless = stored
+        .get(offset..)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(4usize.checked_add(magicless.len()).ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow).with_detail("zstd frame size overflowed")
+        })?)
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("zstd frame allocation failed")
+        })?;
+    frame.extend_from_slice(&0xfd2f_b528u32.to_le_bytes());
+    frame.extend_from_slice(magicless);
+    let output = zrip::decompress_with_limit(&frame, limits.max_decoded_bytes)
+        .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed"))?;
+    if output.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok(output)
+}
+
+#[cfg(not(feature = "zstd"))]
+fn decode_zstd_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<Vec<u8>> {
+    Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
+}
+
 #[cfg(feature = "lz4")]
 fn read_single_varint_header(header: &[u8]) -> Result<usize> {
     let mut offset = 0usize;
@@ -137,7 +180,7 @@ fn read_single_varint_header(header: &[u8]) -> Result<usize> {
     })
 }
 
-#[cfg(feature = "lz4")]
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 fn read_var_u64(input: &[u8], offset: &mut usize) -> Result<u64> {
     let start = *offset;
     let mut value = 0u64;
@@ -279,6 +322,45 @@ mod tests {
         input
     }
 
+    fn standard_transform_serial_frame(
+        version: u32,
+        transform_id: u8,
+        stored: &[u8],
+        decoded_len: usize,
+        transform_header: &[u8],
+    ) -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(version));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(transform_id);
+        if transform_header.is_empty() {
+            input.push(0);
+        } else {
+            input.push(1);
+            push_var_u64(
+                &mut input,
+                u64::try_from(transform_header.len() - 1).unwrap(),
+            );
+        }
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
+        input.extend_from_slice(transform_header);
+        input.extend_from_slice(stored);
+        input.push(0);
+        input
+    }
+
+    fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
+        standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
+    }
+
     #[test]
     fn decodes_v21_stored_serial_output() {
         let mut input = Vec::new();
@@ -355,6 +437,53 @@ mod tests {
 
         assert_eq!(written, expected.len());
         assert_eq!(output, expected);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn decodes_v21_zstd_serial_chunk() {
+        let expected = b"zstd-backed OpenZL serial chunk";
+        let compressed = zrip::compress(expected, 1).unwrap();
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 1);
+        stored.extend_from_slice(&compressed[4..]);
+        let input = zstd_serial_frame(&stored, expected.len());
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_malformed_zstd_chunk_without_mutating_destination() {
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 1);
+        stored.extend_from_slice(&[0]);
+        let input = zstd_serial_frame(&stored, 8);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn rejects_zstd_chunk_when_feature_is_disabled() {
+        let input = zstd_serial_frame(&[1, 0], 8);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
     }
 
     #[cfg(feature = "lz4")]

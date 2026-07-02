@@ -29,7 +29,7 @@ fn transform_graph_frame() -> Vec<u8> {
     input.push(2);
     input.push(1);
     input.push(0);
-    input.push(22);
+    input.push(1);
     input.push(0);
     input.push(0);
     input.push(0);
