@@ -45,7 +45,7 @@ fn main() {
             .is_none_or(|filter| filter == OZLRIP_IMPL)
         {
             let ozlrip = bench_ozlrip(case, target);
-            ozlrip_mbps = Some(ozlrip.decode_mbps);
+            ozlrip_mbps = Some(ozlrip.decoded_mbps);
             print_result(&ozlrip, None);
             results.push(ozlrip);
         }
@@ -55,7 +55,7 @@ fn main() {
             .is_none_or(|filter| filter == OPENZL_C_IMPL)
         {
             let c = bench_openzl_c_ffi(case, target);
-            let relative = ozlrip_mbps.map(|base| base / c.decode_mbps);
+            let relative = ozlrip_mbps.map(|base| base / c.decoded_mbps);
             print_result(&c, relative);
             results.push(c);
         }
@@ -121,14 +121,14 @@ fn sequential_bytes(len: usize) -> Vec<u8> {
 fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
     let mut decoder = ozlrip::Decoder::new(bench_limits());
     let mut dst = Vec::new();
-    let decode_ns = bench_loop(target, || {
+    let stats = bench_loop(target, || {
         dst.clear();
         decoder
             .decode_into(black_box(&case.frame), black_box(&mut dst))
             .expect("ozlrip decode failed");
         black_box(&dst);
     });
-    BenchResult::new(OZLRIP_IMPL, case, decode_ns)
+    BenchResult::new(OZLRIP_IMPL, case, stats)
 }
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
@@ -146,11 +146,11 @@ fn bench_limits() -> ozlrip::Limits {
 
 fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
     let mut decoder = OpenZlCDecoder::new(case.input_size);
-    let decode_ns = bench_loop(target, || {
+    let stats = bench_loop(target, || {
         decoder.decode(black_box(&case.frame));
         black_box(&decoder.dst);
     });
-    BenchResult::new(OPENZL_C_IMPL, case, decode_ns)
+    BenchResult::new(OPENZL_C_IMPL, case, stats)
 }
 
 struct OpenZlCDecoder {
@@ -209,12 +209,12 @@ fn set_dparam(dctx: *mut sys::ZL_DCtx, param: sys::ZL_DParam, value: i32) {
     assert!(!sys::report_is_error(report), "ZL_DCtx_setParameter failed");
 }
 
-fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> f64 {
+fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> BenchStats {
     for _ in 0..WARMUP {
         f();
     }
 
-    let mut best = f64::MAX;
+    let mut rounds = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
         let started = Instant::now();
         let mut iters = 0u64;
@@ -224,9 +224,18 @@ fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> f64 {
         }
         let elapsed = started.elapsed();
         let ns_per_op = elapsed.as_nanos() as f64 / iters as f64;
-        best = best.min(ns_per_op);
+        rounds.push(ns_per_op);
     }
-    best
+    rounds.sort_by(f64::total_cmp);
+    BenchStats {
+        median_ns: rounds[ROUNDS / 2],
+        best_ns: rounds[0],
+    }
+}
+
+struct BenchStats {
+    median_ns: f64,
+    best_ns: f64,
 }
 
 #[derive(Clone)]
@@ -243,16 +252,19 @@ struct BenchResult {
     profile: &'static str,
     input_size: usize,
     frame_size: usize,
-    decode_ns: f64,
-    decode_mbps: f64,
+    median_decode_ns: f64,
+    best_decode_ns: f64,
+    decoded_mbps: f64,
+    frame_mbps: f64,
     frame_ratio: f64,
     timestamp_unix: u64,
     git_rev: String,
 }
 
 impl BenchResult {
-    fn new(impl_name: &'static str, case: &BenchCase, decode_ns: f64) -> Self {
-        let decode_mbps = case.input_size as f64 / decode_ns * 1_000.0;
+    fn new(impl_name: &'static str, case: &BenchCase, stats: BenchStats) -> Self {
+        let decoded_mbps = case.input_size as f64 / stats.median_ns * 1_000.0;
+        let frame_mbps = case.frame.len() as f64 / stats.median_ns * 1_000.0;
         let frame_ratio = case.frame.len() as f64 / case.input_size as f64;
         Self {
             impl_name,
@@ -260,8 +272,10 @@ impl BenchResult {
             profile: case.profile,
             input_size: case.input_size,
             frame_size: case.frame.len(),
-            decode_ns,
-            decode_mbps,
+            median_decode_ns: stats.median_ns,
+            best_decode_ns: stats.best_ns,
+            decoded_mbps,
+            frame_mbps,
             frame_ratio,
             timestamp_unix: timestamp_unix(),
             git_rev: git_rev(),
@@ -273,7 +287,8 @@ impl BenchResult {
             concat!(
                 r#"{{"impl": "{}", "input": "{}", "profile": "{}", "#,
                 r#""input_size": {}, "frame_size": {}, "#,
-                r#""frame_ratio": {:.4}, "decode_ns": {:.1}, "decode_mbps": {:.1}, "#,
+                r#""frame_ratio": {:.4}, "median_decode_ns": {:.1}, "best_decode_ns": {:.1}, "#,
+                r#""decoded_mbps": {:.1}, "frame_mbps": {:.1}, "#,
                 r#""timestamp_unix": {}, "git_rev": "{}"}}"#
             ),
             self.impl_name,
@@ -282,8 +297,10 @@ impl BenchResult {
             self.input_size,
             self.frame_size,
             self.frame_ratio,
-            self.decode_ns,
-            self.decode_mbps,
+            self.median_decode_ns,
+            self.best_decode_ns,
+            self.decoded_mbps,
+            self.frame_mbps,
             self.timestamp_unix,
             self.git_rev,
         )
@@ -293,11 +310,12 @@ impl BenchResult {
 fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
     if let Some(relative) = relative_to_c {
         println!(
-            "{:<20} {:<25} {:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.3} {}/{}={relative:.2}x",
+            "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4} {}/{}={relative:.2}x",
             result.input_name,
             result.impl_name,
-            result.decode_mbps,
-            result.decode_ns,
+            result.decoded_mbps,
+            result.frame_mbps,
+            result.median_decode_ns,
             result.frame_size,
             result.frame_ratio,
             OZLRIP_IMPL,
@@ -305,11 +323,12 @@ fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
         );
     } else {
         println!(
-            "{:<20} {:<25} {:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.3}",
+            "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4}",
             result.input_name,
             result.impl_name,
-            result.decode_mbps,
-            result.decode_ns,
+            result.decoded_mbps,
+            result.frame_mbps,
+            result.median_decode_ns,
             result.frame_size,
             result.frame_ratio
         );

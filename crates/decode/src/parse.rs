@@ -1,4 +1,4 @@
-use alloc::{vec, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameInfo, FrameValueType, Limits, Result};
 use smallvec::{SmallVec, smallvec};
@@ -913,8 +913,9 @@ fn validate_known_standard_node_shape(node: &NodePlan) -> Result<StandardNodeSha
             .with_detail("custom OpenZL transforms are not implemented"));
     };
     let shape = standard_node_shape(id).ok_or_else(|| {
-        Error::new(ErrorKind::Unsupported)
-            .with_detail("standard transform graph shape is unsupported")
+        Error::new(ErrorKind::Unsupported).with_detail(format!(
+            "standard transform graph shape is unsupported: id={id}"
+        ))
     })?;
     Ok(shape)
 }

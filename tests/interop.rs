@@ -163,6 +163,13 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             extra_args: &[],
         },
         InteropCase {
+            name: "upstream-csv-experiments",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_experiments.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &[],
+        },
+        InteropCase {
             name: "i8-signed",
             input: InteropInput::Inline(
                 [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
@@ -214,13 +221,6 @@ fn supported_interop_cases() -> Vec<InteropCase> {
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
     vec![
-        InteropCase {
-            name: "upstream-csv-experiments",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_experiments.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-        },
         InteropCase {
             name: "upstream-serial-repeated-string",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
