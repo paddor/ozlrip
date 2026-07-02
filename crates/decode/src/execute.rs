@@ -147,6 +147,9 @@ fn decode_simple_transform_chunk(
         Some(standard::BITUNPACK_ID) => {
             decode_bitunpack_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::RANGE_PACK_ID) => {
+            decode_range_pack_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -718,6 +721,45 @@ fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) 
     Ok(output)
 }
 
+fn decode_range_pack_serial8_chunk(
+    stored: &[u8],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if header.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("range_pack header is malformed"));
+    }
+    if header[0] != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only byte-width range_pack output is implemented"));
+    }
+    let min_value = match header.len() {
+        1 => 0,
+        2 => header[1],
+        _ => {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("range_pack header is malformed")
+            );
+        }
+    };
+    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("range_pack allocation failed")
+    })?;
+    for &value in stored {
+        let decoded = value.checked_add(min_value).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("range_pack value overflowed")
+        })?;
+        output.push(decoded);
+    }
+    Ok(output)
+}
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -1052,6 +1094,14 @@ mod tests {
         }
         let decoded_len = (values.len() * usize::from(bits)).div_ceil(8);
         standard_transform_serial_frame(21, 34, values, decoded_len, &header)
+    }
+
+    fn range_pack_serial_frame(values: &[u8], min_value: Option<u8>) -> Vec<u8> {
+        let mut header = vec![1];
+        if let Some(min_value) = min_value {
+            header.push(min_value);
+        }
+        standard_transform_serial_frame(21, 35, values, values.len(), &header)
     }
 
     fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
@@ -1392,6 +1442,59 @@ mod tests {
     #[test]
     fn rejects_bitunpack_output_limit_without_mutating_destination() {
         let input = bitunpack_serial_frame(&[2, 7, 3, 4, 5, 1, 7, 6], 3, None);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 2,
+            max_buffer_bytes: 2,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_range_pack_serial8_chunk() {
+        let input = range_pack_serial_frame(&[0, 1, 5], Some(10));
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [10, 11, 15]);
+    }
+
+    #[test]
+    fn decodes_v21_range_pack_serial8_without_minimum() {
+        let input = range_pack_serial_frame(&[0, 1, 5], None);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [0, 1, 5]);
+    }
+
+    #[test]
+    fn rejects_range_pack_overflow_without_mutating_destination() {
+        let input = range_pack_serial_frame(&[250], Some(10));
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_range_pack_output_limit_without_mutating_destination() {
+        let input = range_pack_serial_frame(&[0, 1, 5], Some(10));
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {

@@ -7,6 +7,7 @@ pub(crate) const CONCAT_SERIAL_ID: u32 = 55;
 pub(crate) const SPLITN_ID: u32 = 40;
 pub(crate) const BITPACK_SERIAL_ID: u32 = 27;
 pub(crate) const BITUNPACK_ID: u32 = 34;
+pub(crate) const RANGE_PACK_ID: u32 = 35;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
 pub(crate) const CONVERT_SERIAL_TO_STRUCT_ID: u32 = 5;
 pub(crate) const FLATPACK_ID: u32 = 29;
