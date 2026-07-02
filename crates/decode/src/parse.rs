@@ -412,6 +412,7 @@ fn read_chunks(
             return Ok(ChunkScan { summary, chunks });
         }
 
+        let chunk_start = reader.offset();
         let mut chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
         summary.chunks = checked_add(summary.chunks, 1)?;
         check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
@@ -453,7 +454,17 @@ fn read_chunks(
             chunk.decoded_checksum = Some(reader.read_u32_le()?);
         }
         if flags.has_encoded_checksum() {
+            let checksum_offset = reader.offset();
             chunk.encoded_checksum = Some(reader.read_u32_le()?);
+            #[cfg(not(feature = "checksum"))]
+            let _ = (chunk_start, checksum_offset);
+            #[cfg(feature = "checksum")]
+            verify_compressed_checksum(
+                reader.bytes,
+                chunk_start,
+                checksum_offset,
+                chunk.encoded_checksum,
+            )?;
         }
         chunks.try_reserve_exact(1).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
@@ -976,6 +987,27 @@ fn verify_header_checksum(bytes: &[u8], expected: u8, offset: usize) -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "checksum")]
+fn verify_compressed_checksum(
+    input: &[u8],
+    start: usize,
+    end: usize,
+    expected: Option<u32>,
+) -> Result<()> {
+    let expected = expected.ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("missing compressed checksum")
+    })?;
+    let bytes = input
+        .get(start..end)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, start))?;
+    let actual = (xxhash_rust::xxh3::xxh3_64(bytes) & 0xffff_ffff) as u32;
+    if actual != expected {
+        return Err(Error::at(ErrorKind::ChecksumMismatch, end)
+            .with_detail("OpenZL compressed checksum mismatch"));
+    }
+    Ok(())
+}
+
 fn runtime_input_limit(format_version: u32) -> usize {
     if format_version <= 14 { 1 } else { 2048 }
 }
@@ -1057,6 +1089,7 @@ struct OutputSizes {
     decoded_bytes: Option<usize>,
 }
 
+#[derive(Debug)]
 pub(crate) struct FramePlan {
     pub(crate) info: FrameInfo,
     pub(crate) chunks: Vec<ChunkPlan>,

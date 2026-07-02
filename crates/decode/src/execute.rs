@@ -179,4 +179,53 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
         assert_eq!(output, [1, 2]);
     }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn verifies_compressed_checksum() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(1 << 1);
+        input.push(1);
+        input.push(4);
+        let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
+        input.push(header_checksum);
+        let chunk_start = input.len();
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        let checksum = (xxhash_rust::xxh3::xxh3_64(&input[chunk_start..]) & 0xffff_ffff) as u32;
+        input.extend_from_slice(&checksum.to_le_bytes());
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [7, 8, 9]);
+    }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn rejects_compressed_checksum_mismatch() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(1 << 1);
+        input.push(1);
+        input.push(4);
+        let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
+        input.push(header_checksum);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        input.extend_from_slice(&0u32.to_le_bytes());
+        input.push(0);
+
+        let err = parse_frame_plan(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
+    }
 }
