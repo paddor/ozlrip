@@ -402,6 +402,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
+        standard::FIELD_LZ_ID => 5,
         standard::TRANSPOSE_SPLIT8_ID => 8,
         standard::LZ4_ID
         | standard::ZSTD_ID
@@ -536,9 +537,14 @@ fn execute_standard_node(
             header,
             limits,
         )),
-        standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID => one_typed(
+        standard::CONVERT_SERIAL_TO_STRUCT_ID => one_typed(
             decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, limits),
         ),
+        standard::CONVERT_STRUCT_TO_SERIAL_ID => one_typed(decode_serial_to_struct_chunk(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
         standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(decode_num_to_struct_le_chunk(
             single_stream(inputs)?,
             header,
@@ -556,6 +562,7 @@ fn execute_standard_node(
         )),
         standard::MUX_LENGTHS_ID => decode_mux_lengths_node(inputs, header, limits),
         standard::LZ_ID => one_serial(decode_lz_node(inputs, header, limits)),
+        standard::FIELD_LZ_ID => one_typed(decode_field_lz_node(inputs, header, limits)),
         standard::ZIGZAG_ID => one_serial(decode_zigzag_serial8_chunk(
             single_input(inputs)?,
             header,
@@ -1189,6 +1196,239 @@ fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) 
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large"))
 }
 
+fn decode_field_lz_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let [
+        literals,
+        tokens,
+        offsets,
+        extra_literal_lengths,
+        extra_match_lengths,
+    ] = inputs
+    else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("field_lz input count does not match node shape"));
+    };
+    let element_width = literals.element_width;
+    if !matches!(element_width, 1 | 2 | 4 | 8) {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("field_lz literal width is unsupported")
+        );
+    }
+    require_numeric_width(tokens, 2, "field_lz tokens")?;
+    require_numeric_width(offsets, 4, "field_lz offsets")?;
+    require_numeric_width(extra_literal_lengths, 4, "field_lz extra literal lengths")?;
+    require_numeric_width(extra_match_lengths, 4, "field_lz extra match lengths")?;
+
+    let mut header_offset = 0usize;
+    let output_elements = read_var_u64(header, &mut header_offset)?;
+    if header_offset != header.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("field_lz header has trailing bytes")
+        );
+    }
+    let output_elements = usize::try_from(output_elements).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz output size is too large")
+    })?;
+    let output_capacity = output_elements
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_capacity > limits.max_decoded_bytes || output_capacity > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let token_count = numeric_element_count(tokens.bytes, 2)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_capacity).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
+    })?;
+
+    let min_match = match element_width {
+        1 => 4usize,
+        2 => 2usize,
+        _ => 1usize,
+    };
+    let mut reps = [element_width, element_width * 2, element_width * 4];
+    let mut literal_pos = 0usize;
+    let mut offset_pos = 0usize;
+    let mut extra_literal_pos = 0usize;
+    let mut extra_match_pos = 0usize;
+    let offset_count = numeric_element_count(offsets.bytes, 4)?;
+    let extra_literal_count = numeric_element_count(extra_literal_lengths.bytes, 4)?;
+    let extra_match_count = numeric_element_count(extra_match_lengths.bytes, 4)?;
+
+    for token_index in 0..token_count {
+        let token = read_numeric_element(tokens.bytes, 2, token_index)?;
+        let offset_code =
+            usize::try_from(token & 0x3).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        let literal_code = usize::try_from((token >> 2) & 0x0f)
+            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        let match_code = usize::try_from((token >> 6) & 0x0f)
+            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+
+        let match_offset = match offset_code {
+            3 => {
+                let raw_offset = read_usize_numeric_element(offsets.bytes, 4, offset_pos)?;
+                offset_pos = checked_next_numeric_pos(offset_pos, offset_count)?;
+                let byte_offset = raw_offset
+                    .checked_mul(element_width)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                reps[2] = reps[1];
+                reps[1] = reps[0];
+                reps[0] = byte_offset;
+                byte_offset
+            }
+            0 => reps[0],
+            1 => {
+                let byte_offset = reps[1];
+                reps.swap(1, 0);
+                byte_offset
+            }
+            2 => {
+                let byte_offset = reps[2];
+                reps[2] = reps[1];
+                reps[1] = reps[0];
+                reps[0] = byte_offset;
+                byte_offset
+            }
+            _ => unreachable!("offset code is masked to two bits"),
+        };
+
+        let mut literal_elements = literal_code;
+        if literal_code == 15 {
+            literal_elements = literal_elements
+                .checked_add(read_usize_numeric_element(
+                    extra_literal_lengths.bytes,
+                    4,
+                    extra_literal_pos,
+                )?)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            extra_literal_pos = checked_next_numeric_pos(extra_literal_pos, extra_literal_count)?;
+        }
+        let literal_len = literal_elements
+            .checked_mul(element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+
+        let mut match_elements = match_code
+            .checked_add(min_match)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if match_code == 15 {
+            match_elements = match_elements
+                .checked_add(read_usize_numeric_element(
+                    extra_match_lengths.bytes,
+                    4,
+                    extra_match_pos,
+                )?)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            extra_match_pos = checked_next_numeric_pos(extra_match_pos, extra_match_count)?;
+        }
+        let match_len = match_elements
+            .checked_mul(element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+
+        append_field_lz_literals(&mut output, literals.bytes, &mut literal_pos, literal_len)?;
+        append_field_lz_match(&mut output, match_offset, match_len, output_capacity)?;
+    }
+
+    let remaining_literals = literals.bytes.get(literal_pos..).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
+    })?;
+    let final_len = output
+        .len()
+        .checked_add(remaining_literals.len())
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if final_len > output_capacity {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("field_lz output size exceeds header capacity"));
+    }
+    output.extend_from_slice(remaining_literals);
+
+    if offset_pos != offset_count
+        || extra_literal_pos != extra_literal_count
+        || extra_match_pos != extra_match_count
+    {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("field_lz numeric stream was not fully consumed"));
+    }
+
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+    })
+}
+
+fn require_numeric_width(stream: &StreamInput<'_>, expected: usize, name: &str) -> Result<()> {
+    if stream.element_width != expected {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail(format!("{name} width is unsupported"))
+        );
+    }
+    numeric_element_count(stream.bytes, expected)?;
+    Ok(())
+}
+
+fn checked_next_numeric_pos(position: usize, count: usize) -> Result<usize> {
+    if position >= count {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted"));
+    }
+    position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn append_field_lz_literals(
+    output: &mut Vec<u8>,
+    literals: &[u8],
+    literal_pos: &mut usize,
+    literal_len: usize,
+) -> Result<()> {
+    let literal_end = literal_pos
+        .checked_add(literal_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let src = literals.get(*literal_pos..literal_end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
+    })?;
+    output.extend_from_slice(src);
+    *literal_pos = literal_end;
+    Ok(())
+}
+
+fn append_field_lz_match(
+    output: &mut Vec<u8>,
+    match_offset: usize,
+    match_len: usize,
+    output_capacity: usize,
+) -> Result<()> {
+    if match_offset == 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("field_lz offset is zero"));
+    }
+    if match_offset > output.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("field_lz offset exceeds decoded prefix")
+        );
+    }
+    let end = output
+        .len()
+        .checked_add(match_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if end > output_capacity {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("field_lz match length exceeds output size"));
+    }
+    let start = output.len();
+    output.resize(end, 0);
+    for index in 0..match_len {
+        let value = output[start + index - match_offset];
+        output[start + index] = value;
+    }
+    Ok(())
+}
+
 fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let parsed = parse_bitpack_header(header, stored.len())?;
     if parsed.element_width != 1 {
@@ -1356,6 +1596,31 @@ fn decode_num_to_struct_le_chunk(
             .with_detail("convert_num_to_struct_le headers are unsupported"));
     }
     copy_byte_preserving_conversion(stored, stored.element_width, limits)
+}
+
+fn decode_serial_to_struct_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let mut offset = 0usize;
+    let element_width = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_struct_to_serial header has trailing bytes"));
+    }
+    let element_width = usize::try_from(element_width).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("conversion element width is too large")
+    })?;
+    if element_width == 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("conversion element width must be nonzero"));
+    }
+    if !stored.bytes.len().is_multiple_of(element_width) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("serial stream size is not a multiple of struct width"));
+    }
+    copy_byte_preserving_conversion(stored, element_width, limits)
 }
 
 fn decode_numeric_to_serial_le_chunk(
@@ -2144,6 +2409,7 @@ mod tests {
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::FIELD_LZ_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
@@ -2172,6 +2438,7 @@ mod tests {
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::FIELD_LZ_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
@@ -2505,6 +2772,76 @@ mod tests {
     }
 
     #[test]
+    fn decodes_field_lz_node_with_last_literals() {
+        let output = decode_field_lz_node(
+            &[
+                StreamInput {
+                    bytes: b"abcdef",
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 4,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 4,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 4,
+                },
+            ],
+            &[6],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 1);
+        assert_eq!(output.bytes, b"abcdef");
+    }
+
+    #[test]
+    fn decodes_field_lz_node_with_explicit_offset() {
+        let token = 3u16 | (3u16 << 2);
+        let offset = 3u32.to_le_bytes();
+        let output = decode_field_lz_node(
+            &[
+                StreamInput {
+                    bytes: b"abc!",
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &token.to_le_bytes(),
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &offset,
+                    element_width: 4,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 4,
+                },
+                StreamInput {
+                    bytes: &[],
+                    element_width: 4,
+                },
+            ],
+            &[8],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 1);
+        assert_eq!(output.bytes, b"abcabca!");
+    }
+
+    #[test]
     fn rejects_bitpack_output_limit_without_mutating_destination() {
         let expected = [0, 1, 2, 3, 4, 5, 6, 7, 1];
         let input = bitpack_serial_frame(&expected, 3);
@@ -2791,7 +3128,7 @@ mod tests {
     #[test]
     fn decodes_v21_convert_struct_to_serial_chunk() {
         let expected = b"serial payload bytes";
-        let input = standard_transform_serial_frame(21, 6, expected, expected.len(), &[]);
+        let input = standard_transform_serial_frame(21, 6, expected, expected.len(), &[1]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = Vec::new();
 
@@ -2895,7 +3232,7 @@ mod tests {
 
     #[test]
     fn rejects_convert_struct_to_serial_output_limit_without_mutating_destination() {
-        let input = standard_transform_serial_frame(21, 6, b"bytes", 5, &[]);
+        let input = standard_transform_serial_frame(21, 6, b"bytes", 5, &[1]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {

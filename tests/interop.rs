@@ -214,6 +214,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "upstream-u16-zigzag",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
+            profile: "le-u16",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "le-u32-ramp",
             input: InteropInput::Inline(le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX])),
             profile: "le-u32",
@@ -274,14 +282,6 @@ fn supported_interop_cases() -> Vec<InteropCase> {
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
     vec![
-        InteropCase {
-            name: "upstream-u16-zigzag",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
-            profile: "le-u16",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
         InteropCase {
             name: "upstream-csv-timeseries",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_timeseries.csv"),

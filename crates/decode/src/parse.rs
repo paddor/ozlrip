@@ -974,6 +974,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         }
         standard::MUX_LENGTHS_ID => Some(fixed_shape(2, 2)),
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => Some(fixed_shape(4, 1)),
+        standard::FIELD_LZ_ID => Some(fixed_shape(5, 1)),
         standard::TRANSPOSE_SPLIT8_ID => Some(fixed_shape(8, 1)),
         standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => Some(StandardNodeShape {
             static_inputs: 0,
