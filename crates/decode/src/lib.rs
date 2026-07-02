@@ -26,7 +26,7 @@ impl Decoder {
     }
 
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
-        self.inspect(input)?;
+        let _plan = parse::parse_frame_plan(input, self.limits)?;
         self.scratch.clear();
         let _ = dst;
         Err(Error::new(ErrorKind::Unsupported)

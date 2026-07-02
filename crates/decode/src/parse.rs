@@ -12,6 +12,10 @@ const UNIQUE_ID_BYTES: usize = 32;
 const MAX_HEADER_COMMENT_BYTES: u64 = 10_000;
 
 pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
+    Ok(parse_frame_plan(input, limits)?.info)
+}
+
+pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan> {
     check_limit(
         input.len(),
         limits.max_frame_bytes,
@@ -55,7 +59,7 @@ pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
     }
 
     let header_bytes = reader.offset();
-    let chunk_summary = read_chunks(
+    let chunk_scan = read_chunks(
         &mut reader,
         format_version,
         flags,
@@ -63,24 +67,30 @@ pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
         limits,
     )?;
 
-    Ok(FrameInfo {
+    let info = FrameInfo {
         format_version,
         frame_bytes: input.len(),
         header_bytes,
         decoded_bytes: output_sizes.decoded_bytes,
-        chunks: chunk_summary.chunks,
+        chunks: chunk_scan.summary.chunks,
         inputs: output_header.outputs,
         output_types: output_header.output_types,
         output_sizes: output_sizes.sizes,
         output_elements: output_sizes.elements,
-        transforms: chunk_summary.transforms,
-        stored_streams: chunk_summary.stored_streams,
-        regenerated_streams: chunk_summary.regenerated_streams,
+        transforms: chunk_scan.summary.transforms,
+        stored_streams: chunk_scan.summary.stored_streams,
+        regenerated_streams: chunk_scan.summary.regenerated_streams,
         has_decoded_checksum: flags.has_decoded_checksum(),
         has_encoded_checksum: flags.has_encoded_checksum(),
         has_comment: flags.has_comment(),
         dictionary_bundle_id,
-    })
+    };
+    let plan = FramePlan {
+        info,
+        chunks: chunk_scan.chunks,
+    };
+    validate_frame_plan(&plan)?;
+    Ok(plan)
 }
 
 fn format_version_from_magic(magic: u32) -> Result<u32> {
@@ -385,20 +395,21 @@ fn read_chunks(
     flags: FrameFlags,
     has_bundle_id: bool,
     limits: Limits,
-) -> Result<ChunkSummary> {
+) -> Result<ChunkScan> {
     let mut summary = ChunkSummary::default();
+    let mut chunks = Vec::new();
     if reader.is_empty() {
-        return Ok(summary);
+        return Ok(ChunkScan { summary, chunks });
     }
 
     loop {
         if format_version >= CHUNK_VERSION_MIN {
             if reader.peek_byte()? == 0 {
                 let _ = reader.read_byte()?;
-                return Ok(summary);
+                return Ok(ChunkScan { summary, chunks });
             }
         } else if summary.chunks > 0 {
-            return Ok(summary);
+            return Ok(ChunkScan { summary, chunks });
         }
 
         let chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
@@ -423,6 +434,10 @@ fn read_chunks(
             limits.max_streams,
             ErrorKind::LimitExceeded,
         )?;
+        chunks.try_reserve_exact(1).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
+        })?;
+        chunks.push(chunk);
 
         let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
         check_limit(
@@ -444,6 +459,30 @@ fn read_chunks(
             let _ = reader.read_u32_le()?;
         }
     }
+}
+
+fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
+    if plan.info.chunks != plan.chunks.len() {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("chunk count mismatch"));
+    }
+
+    let mut transforms = 0usize;
+    let mut stored_streams = 0usize;
+    let mut regenerated_streams = 0usize;
+    for chunk in &plan.chunks {
+        transforms = checked_add(transforms, chunk.transforms)?;
+        stored_streams = checked_add(stored_streams, chunk.stored_streams)?;
+        regenerated_streams = checked_add(regenerated_streams, chunk.regenerated_streams)?;
+    }
+
+    if transforms != plan.info.transforms
+        || stored_streams != plan.info.stored_streams
+        || regenerated_streams != plan.info.regenerated_streams
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("chunk summary mismatch"));
+    }
+
+    Ok(())
 }
 
 fn read_chunk_header(
@@ -873,6 +912,11 @@ struct OutputSizes {
     decoded_bytes: Option<usize>,
 }
 
+pub(crate) struct FramePlan {
+    pub(crate) info: FrameInfo,
+    chunks: Vec<ChunkPlan>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransformType {
     Standard,
@@ -885,6 +929,11 @@ struct ChunkSummary {
     transforms: usize,
     stored_streams: usize,
     regenerated_streams: usize,
+}
+
+struct ChunkScan {
+    summary: ChunkSummary,
+    chunks: Vec<ChunkPlan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
