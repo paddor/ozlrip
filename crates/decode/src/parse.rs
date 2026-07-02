@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameInfo, FrameValueType, Limits, Result};
 
@@ -54,19 +54,28 @@ pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
         verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
     }
 
+    let header_bytes = reader.offset();
+    let chunk_summary = read_chunks(
+        &mut reader,
+        format_version,
+        flags,
+        dictionary_bundle_id.is_some(),
+        limits,
+    )?;
+
     Ok(FrameInfo {
         format_version,
         frame_bytes: input.len(),
-        header_bytes: reader.offset(),
+        header_bytes,
         decoded_bytes: output_sizes.decoded_bytes,
-        chunks: 0,
+        chunks: chunk_summary.chunks,
         inputs: output_header.outputs,
         output_types: output_header.output_types,
         output_sizes: output_sizes.sizes,
         output_elements: output_sizes.elements,
-        transforms: 0,
-        stored_streams: 0,
-        regenerated_streams: 0,
+        transforms: chunk_summary.transforms,
+        stored_streams: chunk_summary.stored_streams,
+        regenerated_streams: chunk_summary.regenerated_streams,
         has_decoded_checksum: flags.has_decoded_checksum(),
         has_encoded_checksum: flags.has_encoded_checksum(),
         has_comment: flags.has_comment(),
@@ -370,6 +379,409 @@ fn read_comment(reader: &mut Reader<'_>) -> Result<()> {
     Ok(())
 }
 
+fn read_chunks(
+    reader: &mut Reader<'_>,
+    format_version: u32,
+    flags: FrameFlags,
+    has_bundle_id: bool,
+    limits: Limits,
+) -> Result<ChunkSummary> {
+    let mut summary = ChunkSummary::default();
+    if reader.is_empty() {
+        return Ok(summary);
+    }
+
+    loop {
+        if format_version >= CHUNK_VERSION_MIN {
+            if reader.peek_byte()? == 0 {
+                let _ = reader.read_byte()?;
+                return Ok(summary);
+            }
+        } else if summary.chunks > 0 {
+            return Ok(summary);
+        }
+
+        let chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
+        summary.chunks = checked_add(summary.chunks, 1)?;
+        check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
+        summary.transforms = checked_add(summary.transforms, chunk.transforms)?;
+        check_limit(
+            summary.transforms,
+            limits.max_nodes,
+            ErrorKind::LimitExceeded,
+        )?;
+        summary.stored_streams = checked_add(summary.stored_streams, chunk.stored_streams)?;
+        check_limit(
+            summary.stored_streams,
+            limits.max_streams,
+            ErrorKind::LimitExceeded,
+        )?;
+        summary.regenerated_streams =
+            checked_add(summary.regenerated_streams, chunk.regenerated_streams)?;
+        check_limit(
+            summary.regenerated_streams,
+            limits.max_streams,
+            ErrorKind::LimitExceeded,
+        )?;
+
+        let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
+        check_limit(
+            chunk.transform_header_bytes,
+            limits.max_transform_header_bytes,
+            ErrorKind::LimitExceeded,
+        )?;
+        check_limit(
+            chunk.stored_stream_bytes,
+            limits.max_stored_stream_bytes,
+            ErrorKind::LimitExceeded,
+        )?;
+        let _ = reader.read_slice(payload_bytes)?;
+
+        if flags.has_decoded_checksum() {
+            let _ = reader.read_u32_le()?;
+        }
+        if flags.has_encoded_checksum() {
+            let _ = reader.read_u32_le()?;
+        }
+    }
+}
+
+fn read_chunk_header(
+    reader: &mut Reader<'_>,
+    format_version: u32,
+    has_bundle_id: bool,
+    limits: Limits,
+) -> Result<ChunkPlan> {
+    let transforms = read_transform_count(reader, format_version)?;
+    let stored_streams_u64 = read_count(reader, format_version)?;
+    let stored_streams = usize::try_from(stored_streams_u64)
+        .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+    check_limit(
+        transforms,
+        runtime_node_limit(format_version),
+        ErrorKind::Malformed,
+    )?;
+    check_limit(
+        stored_streams,
+        runtime_stream_limit(format_version),
+        ErrorKind::Malformed,
+    )?;
+    check_limit(transforms, limits.max_nodes, ErrorKind::LimitExceeded)?;
+    check_limit(stored_streams, limits.max_streams, ErrorKind::LimitExceeded)?;
+
+    if (4..CHUNK_VERSION_MIN).contains(&format_version) {
+        let _ = reader.read_byte()?;
+    }
+
+    let transform_types = read_transform_types(reader, transforms)?;
+    let _transform_ids = read_transform_ids(reader, &transform_types, format_version)?;
+    let transform_header_sizes = read_transform_header_sizes(reader, transforms)?;
+    let transform_header_bytes = sum_u32_as_usize(&transform_header_sizes)?;
+    let _variable_outputs = read_variable_outputs(reader, transforms)?;
+    let regen_counts = read_regen_counts(reader, transforms, format_version)?;
+
+    if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
+        read_dict_indexes(reader, transforms)?;
+    }
+
+    let regenerated_streams = sum_usize(&regen_counts)?;
+    check_limit(
+        regenerated_streams,
+        runtime_stream_limit(format_version),
+        ErrorKind::Malformed,
+    )?;
+    let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
+    let _regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
+
+    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams)?;
+    let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
+
+    Ok(ChunkPlan {
+        transforms,
+        stored_streams,
+        regenerated_streams,
+        transform_header_bytes,
+        stored_stream_bytes,
+    })
+}
+
+fn read_transform_count(reader: &mut Reader<'_>, format_version: u32) -> Result<usize> {
+    let raw = read_count(reader, format_version)?;
+    let adjusted = if format_version >= CHUNK_VERSION_MIN {
+        raw.checked_sub(1)
+            .ok_or_else(|| Error::at(ErrorKind::Malformed, reader.offset()))?
+    } else {
+        raw
+    };
+    usize::try_from(adjusted).map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))
+}
+
+fn read_count(reader: &mut Reader<'_>, format_version: u32) -> Result<u64> {
+    if format_version < 9 {
+        Ok(u64::from(reader.read_byte()?))
+    } else {
+        reader.read_var_u64()
+    }
+}
+
+fn read_transform_types(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<TransformType>> {
+    let flags = read_bitpacked_u32(reader, transforms, 1)?;
+    let mut types = Vec::new();
+    types.try_reserve_exact(transforms).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("transform type allocation failed")
+    })?;
+    for flag in flags {
+        types.push(match flag {
+            0 => TransformType::Standard,
+            1 => TransformType::Custom,
+            _ => return Err(Error::new(ErrorKind::Malformed).with_detail("invalid transform type")),
+        });
+    }
+    Ok(types)
+}
+
+fn read_transform_ids(
+    reader: &mut Reader<'_>,
+    transform_types: &[TransformType],
+    format_version: u32,
+) -> Result<Vec<u32>> {
+    let standard_count = transform_types
+        .iter()
+        .filter(|&&kind| kind == TransformType::Standard)
+        .count();
+    let standard_bits = standard_transform_id_bits(format_version);
+    let standard_ids = read_bitpacked_u32(reader, standard_count, standard_bits)?;
+    let custom_count = transform_types.len() - standard_count;
+    let mut custom_ids = Vec::new();
+    custom_ids.try_reserve_exact(custom_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("custom transform ID allocation failed")
+    })?;
+    for _ in 0..custom_count {
+        let id = reader.read_var_u64()?;
+        custom_ids
+            .push(u32::try_from(id).map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?);
+    }
+
+    let mut standard_index = 0usize;
+    let mut custom_index = 0usize;
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(transform_types.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("transform ID allocation failed")
+    })?;
+    for &kind in transform_types {
+        match kind {
+            TransformType::Standard => {
+                let id = standard_ids[standard_index];
+                if id >= 128 {
+                    return Err(Error::new(ErrorKind::Unsupported)
+                        .with_detail("standard transform ID is outside the OpenZL range"));
+                }
+                ids.push(id);
+                standard_index = checked_add(standard_index, 1)?;
+            }
+            TransformType::Custom => {
+                ids.push(custom_ids[custom_index]);
+                custom_index = checked_add(custom_index, 1)?;
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn read_transform_header_sizes(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<u32>> {
+    let mut sizes = read_bitpacked_u32(reader, transforms, 1)?;
+    for size in &mut sizes {
+        if *size != 0 {
+            let decoded = reader.read_var_u64()?;
+            *size = u32::try_from(
+                decoded
+                    .checked_add(1)
+                    .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+            )
+            .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+        }
+    }
+    Ok(sizes)
+}
+
+fn read_variable_outputs(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<u32>> {
+    let mut outputs = read_bitpacked_u32(reader, transforms, 1)?;
+    for output in &mut outputs {
+        if *output != 0 {
+            let decoded = reader.read_var_u64()?;
+            *output = u32::try_from(
+                decoded
+                    .checked_add(1)
+                    .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+            )
+            .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+        }
+    }
+    Ok(outputs)
+}
+
+fn read_regen_counts(
+    reader: &mut Reader<'_>,
+    transforms: usize,
+    format_version: u32,
+) -> Result<Vec<usize>> {
+    if format_version < 16 {
+        return Ok(vec![1; transforms]);
+    }
+
+    let mut counts = read_bitpacked_u32(reader, transforms, 1)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(transforms).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("regen count allocation failed")
+    })?;
+    for count in &mut counts {
+        if *count != 0 {
+            let decoded = reader.read_var_u64()?;
+            *count = u32::try_from(
+                decoded
+                    .checked_add(2)
+                    .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+            )
+            .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+        } else {
+            *count = 1;
+        }
+        let count = usize::try_from(*count)
+            .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+        check_limit(
+            count,
+            runtime_node_input_limit(format_version),
+            ErrorKind::Malformed,
+        )?;
+        out.push(count);
+    }
+    Ok(out)
+}
+
+fn read_dict_indexes(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<Option<u32>>> {
+    let flags = read_bitpacked_u32(reader, transforms, 1)?;
+    let non_zero = flags.iter().filter(|&&flag| flag != 0).count();
+    let mut values = Vec::new();
+    if non_zero > 0 {
+        let bits = usize::from(reader.read_byte()?);
+        if bits > 16 {
+            return Err(Error::at(ErrorKind::Malformed, reader.offset())
+                .with_detail("dict index bit width is too large"));
+        }
+        values = read_bitpacked_u32(reader, non_zero, bits)?;
+    }
+
+    let mut value_index = 0usize;
+    let mut out = Vec::new();
+    out.try_reserve_exact(transforms).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dict index allocation failed")
+    })?;
+    for flag in flags {
+        if flag == 0 {
+            out.push(None);
+        } else {
+            let value = values[value_index];
+            if value > 0xffff {
+                return Err(Error::new(ErrorKind::Malformed).with_detail("dict index is too large"));
+            }
+            out.push(Some(value));
+            value_index = checked_add(value_index, 1)?;
+        }
+    }
+    Ok(out)
+}
+
+fn read_stored_stream_sizes(reader: &mut Reader<'_>, streams: usize) -> Result<Vec<usize>> {
+    let mut sizes = Vec::new();
+    sizes.try_reserve_exact(streams).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("stored stream size allocation failed")
+    })?;
+    for _ in 0..streams {
+        let size = reader.read_var_u64()?;
+        let size = usize::try_from(size)
+            .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+        sizes.push(size);
+    }
+    Ok(sizes)
+}
+
+fn read_bitpacked_u32(reader: &mut Reader<'_>, count: usize, bits: usize) -> Result<Vec<u32>> {
+    if bits > 32 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpacked width is too large"));
+    }
+    let bytes = bitpacked_bytes(count, bits)?;
+    let packed = reader.read_slice(bytes)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitpacked value allocation failed")
+    })?;
+    for index in 0..count {
+        out.push(read_packed_value(packed, index, bits)?);
+    }
+    Ok(out)
+}
+
+fn read_packed_value(bytes: &[u8], index: usize, bits: usize) -> Result<u32> {
+    if bits == 0 {
+        return Ok(0);
+    }
+    let bit_offset = checked_mul(index, bits)?;
+    let mut value = 0u32;
+    for bit in 0..bits {
+        let absolute = checked_add(bit_offset, bit)?;
+        let byte = *bytes
+            .get(absolute / 8)
+            .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        let bit_value = (byte >> (absolute % 8)) & 1;
+        value |= u32::from(bit_value) << bit;
+    }
+    Ok(value)
+}
+
+fn bitpacked_bytes(count: usize, bits: usize) -> Result<usize> {
+    checked_add(checked_mul(count, bits)?, 7).map(|bits| bits / 8)
+}
+
+fn bits_needed(max_value: usize) -> usize {
+    if max_value <= 1 {
+        0
+    } else {
+        usize::BITS as usize - (max_value - 1).leading_zeros() as usize
+    }
+}
+
+fn standard_transform_id_bits(format_version: u32) -> usize {
+    if format_version < 24 { 6 } else { 7 }
+}
+
+fn runtime_node_input_limit(format_version: u32) -> usize {
+    if format_version <= 15 {
+        1
+    } else {
+        runtime_input_limit(format_version)
+    }
+}
+
+fn runtime_node_limit(format_version: u32) -> usize {
+    if format_version < 9 {
+        256
+    } else if format_version < 20 {
+        10_000
+    } else {
+        20_000
+    }
+}
+
+fn runtime_stream_limit(format_version: u32) -> usize {
+    if format_version < 9 {
+        256
+    } else if format_version < 16 {
+        10_000
+    } else {
+        110_000
+    }
+}
+
 #[cfg(feature = "checksum")]
 fn verify_header_checksum(bytes: &[u8], expected: u8, offset: usize) -> Result<()> {
     let actual = (xxhash_rust::xxh3::xxh3_64(bytes) & 0xff) as u8;
@@ -399,6 +811,23 @@ fn checked_add(lhs: usize, rhs: usize) -> Result<usize> {
 fn checked_mul(lhs: usize, rhs: usize) -> Result<usize> {
     lhs.checked_mul(rhs)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn sum_u32_as_usize(values: &[u32]) -> Result<usize> {
+    let mut total = 0usize;
+    for &value in values {
+        let value = usize::try_from(value).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        total = checked_add(total, value)?;
+    }
+    Ok(total)
+}
+
+fn sum_usize(values: &[usize]) -> Result<usize> {
+    let mut total = 0usize;
+    for &value in values {
+        total = checked_add(total, value)?;
+    }
+    Ok(total)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -444,6 +873,29 @@ struct OutputSizes {
     decoded_bytes: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransformType {
+    Standard,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ChunkSummary {
+    chunks: usize,
+    transforms: usize,
+    stored_streams: usize,
+    regenerated_streams: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChunkPlan {
+    transforms: usize,
+    stored_streams: usize,
+    regenerated_streams: usize,
+    transform_header_bytes: usize,
+    stored_stream_bytes: usize,
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -456,6 +908,10 @@ impl<'a> Reader<'a> {
 
     const fn offset(&self) -> usize {
         self.offset
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.offset >= self.bytes.len()
     }
 
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8]> {
@@ -582,6 +1038,68 @@ mod tests {
         assert_eq!(info.decoded_bytes, None);
         assert_eq!(info.output_sizes, [None]);
         assert_eq!(info.output_elements, [None]);
+    }
+
+    #[test]
+    fn parses_v21_eof_marker() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(0);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(info.header_bytes, 7);
+        assert_eq!(info.chunks, 0);
+    }
+
+    #[test]
+    fn parses_v21_empty_chunk() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(info.header_bytes, 7);
+        assert_eq!(info.chunks, 1);
+        assert_eq!(info.transforms, 0);
+        assert_eq!(info.stored_streams, 0);
+        assert_eq!(info.regenerated_streams, 0);
+    }
+
+    #[test]
+    fn parses_v21_standard_transform_chunk() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(info.chunks, 1);
+        assert_eq!(info.transforms, 1);
+        assert_eq!(info.stored_streams, 1);
+        assert_eq!(info.regenerated_streams, 1);
     }
 
     #[test]
