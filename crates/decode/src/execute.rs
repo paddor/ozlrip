@@ -42,6 +42,10 @@ fn stored_only_output<'a>(input: &'a [u8], plan: &FramePlan, limits: Limits) -> 
     }
     let stored = range.as_slice(input)?;
     check_output_size(stored.len(), plan, limits)?;
+    #[cfg(not(feature = "checksum"))]
+    let _ = chunk.decoded_checksum;
+    #[cfg(feature = "checksum")]
+    verify_decoded_checksum(stored, chunk.decoded_checksum)?;
     Ok(stored)
 }
 
@@ -58,6 +62,18 @@ fn check_output_size(size: usize, plan: &FramePlan, limits: Limits) -> Result<()
         if expected != size {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("stored output size does not match frame header"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "checksum")]
+fn verify_decoded_checksum(output: &[u8], expected: Option<u32>) -> Result<()> {
+    if let Some(expected) = expected {
+        let actual = (xxhash_rust::xxh3::xxh3_64(output) & 0xffff_ffff) as u32;
+        if actual != expected {
+            return Err(Error::new(ErrorKind::ChecksumMismatch)
+                .with_detail("OpenZL decoded checksum mismatch"));
         }
     }
     Ok(())
@@ -114,6 +130,53 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn verifies_decoded_checksum() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(1);
+        input.push(1);
+        input.push(4);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        let checksum = (xxhash_rust::xxh3::xxh3_64(&[7, 8, 9]) & 0xffff_ffff) as u32;
+        input.extend_from_slice(&checksum.to_le_bytes());
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 3);
+        assert_eq!(output, [7, 8, 9]);
+    }
+
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn rejects_decoded_checksum_mismatch_without_mutating_destination() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(1);
+        input.push(1);
+        input.push(4);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        input.extend_from_slice(&0u32.to_le_bytes());
+        input.push(0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
         assert_eq!(output, [1, 2]);
     }
 }

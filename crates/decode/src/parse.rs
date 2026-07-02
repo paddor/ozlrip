@@ -450,10 +450,10 @@ fn read_chunks(
         let _ = reader.read_slice(payload_bytes)?;
 
         if flags.has_decoded_checksum() {
-            let _ = reader.read_u32_le()?;
+            chunk.decoded_checksum = Some(reader.read_u32_le()?);
         }
         if flags.has_encoded_checksum() {
-            let _ = reader.read_u32_le()?;
+            chunk.encoded_checksum = Some(reader.read_u32_le()?);
         }
         chunks.try_reserve_exact(1).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
@@ -626,6 +626,8 @@ fn read_chunk_header(
         stored_stream_bytes,
         transform_header_range: ByteRange::default(),
         stored_stream_ranges: Vec::new(),
+        decoded_checksum: None,
+        encoded_checksum: None,
     })
 }
 
@@ -1098,6 +1100,8 @@ pub(crate) struct ChunkPlan {
     stored_stream_bytes: usize,
     transform_header_range: ByteRange,
     stored_stream_ranges: Vec<ByteRange>,
+    pub(crate) decoded_checksum: Option<u32>,
+    encoded_checksum: Option<u32>,
 }
 
 impl ChunkPlan {
