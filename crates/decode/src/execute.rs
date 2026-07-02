@@ -105,6 +105,9 @@ fn decode_simple_transform_chunk(
         Some(standard::ZSTD_ID) => {
             decode_zstd_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::BITPACK_SERIAL_ID) => {
+            decode_bitpack_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -238,6 +241,83 @@ fn validate_splitn_empty_header(header: &[u8]) -> Result<()> {
     if element_width != 1 {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only serial byte splitn output is implemented"));
+    }
+    Ok(())
+}
+
+fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    let parsed = parse_bitpack_serial_header(header, stored.len())?;
+    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(parsed.output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitpack allocation failed")
+    })?;
+    output.resize(parsed.output_len, 0);
+    unpack_lsb_bits(stored, parsed.bits, &mut output)?;
+    Ok(output)
+}
+
+struct BitpackHeader {
+    bits: usize,
+    output_len: usize,
+}
+
+fn parse_bitpack_serial_header(header: &[u8], packed_len: usize) -> Result<BitpackHeader> {
+    if header.is_empty() || header.len() > 2 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack header is malformed"));
+    }
+    let element_width = 1usize
+        .checked_shl(u32::from((header[0] >> 6) & 0x3))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only serial byte bitpack output is implemented"));
+    }
+    let bits = usize::from(header[0] & 0x3f)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if bits > 8 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack width is too large"));
+    }
+    let max_elements = packed_len.checked_mul(8).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow).with_detail("bitpack size overflowed")
+    })? / bits;
+    let extra = header.get(1).copied().map_or(0usize, usize::from);
+    if extra > max_elements {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack header is corrupt"));
+    }
+    Ok(BitpackHeader {
+        bits,
+        output_len: max_elements - extra,
+    })
+}
+
+fn unpack_lsb_bits(stored: &[u8], bits: usize, output: &mut [u8]) -> Result<()> {
+    let mask = if bits == 8 {
+        u16::from(u8::MAX)
+    } else {
+        (1u16 << bits) - 1
+    };
+    for (index, out) in output.iter_mut().enumerate() {
+        let bit_offset = index
+            .checked_mul(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let byte_offset = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        let mut lane = u16::from(*stored.get(byte_offset).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+        })?);
+        if bit_shift + bits > 8 {
+            lane |= u16::from(*stored.get(byte_offset + 1).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+            })?) << 8;
+        }
+        *out = u8::try_from((lane >> bit_shift) & mask)
+            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
     }
     Ok(())
 }
@@ -558,6 +638,40 @@ mod tests {
         standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
     }
 
+    fn bitpack_serial_frame(values: &[u8], bits: u8) -> Vec<u8> {
+        let stored = pack_lsb_bits(values, bits);
+        let max_elements = (stored.len() * 8) / usize::from(bits);
+        let extra = max_elements - values.len();
+        let mut header = vec![bits - 1];
+        if extra != 0 {
+            header.push(u8::try_from(extra).unwrap());
+        }
+        standard_transform_serial_frame(21, 27, &stored, values.len(), &header)
+    }
+
+    fn pack_lsb_bits(values: &[u8], bits: u8) -> Vec<u8> {
+        let bits = usize::from(bits);
+        let packed_len = (values.len() * bits).div_ceil(8);
+        let mut output = vec![0; packed_len];
+        let mask = if bits == 8 {
+            u16::from(u8::MAX)
+        } else {
+            (1u16 << bits) - 1
+        };
+        for (index, &value) in values.iter().enumerate() {
+            let bit_offset = index * bits;
+            let byte_offset = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let lane = (u16::from(value) & mask) << bit_shift;
+            let lane_bytes = lane.to_le_bytes();
+            output[byte_offset] |= lane_bytes[0];
+            if bit_shift + bits > 8 {
+                output[byte_offset + 1] |= lane_bytes[1];
+            }
+        }
+        output
+    }
+
     #[test]
     fn decodes_v21_stored_serial_output() {
         let mut input = Vec::new();
@@ -682,6 +796,50 @@ mod tests {
         let limits = Limits {
             max_decoded_bytes: 8,
             max_buffer_bytes: 8,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_bitpack_serial_chunk() {
+        let expected = [0, 1, 2, 3, 4, 5, 6, 7, 1];
+        let input = bitpack_serial_frame(&expected, 3);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decodes_v21_full_width_bitpack_serial_chunk() {
+        let expected = b"bitpack";
+        let input = bitpack_serial_frame(expected, 8);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn rejects_bitpack_output_limit_without_mutating_destination() {
+        let expected = [0, 1, 2, 3, 4, 5, 6, 7, 1];
+        let input = bitpack_serial_frame(&expected, 3);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
             ..Limits::default()
         };
 

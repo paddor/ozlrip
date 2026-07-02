@@ -61,3 +61,10 @@ path = "fuzz_targets/decode_splitn_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_bitpack_node"
+path = "fuzz_targets/decode_bitpack_node.rs"
+test = false
+doc = false
+bench = false
