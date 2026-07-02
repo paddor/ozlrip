@@ -253,6 +253,8 @@ mod tests {
     }
 
     fn lz4_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
+        let mut transform_header = Vec::new();
+        push_var_u64(&mut transform_header, u64::try_from(decoded_len).unwrap());
         let mut input = Vec::new();
         input.extend_from_slice(&magic(23));
         input.push(0);
@@ -263,12 +265,15 @@ mod tests {
         input.push(0);
         input.push(62);
         input.push(1);
-        input.push(0);
+        push_var_u64(
+            &mut input,
+            u64::try_from(transform_header.len() - 1).unwrap(),
+        );
         input.push(0);
         input.push(0);
         input.push(0);
         push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
-        push_var_u64(&mut input, u64::try_from(decoded_len).unwrap());
+        input.extend_from_slice(&transform_header);
         input.extend_from_slice(stored);
         input.push(0);
         input
@@ -362,6 +367,24 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn enforces_lz4_header_output_limit_without_mutating_destination() {
+        let input = lz4_serial_frame(&[0], 4096);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 1024,
+            max_buffer_bytes: 1024,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
         assert_eq!(output, [1, 2]);
     }
 
