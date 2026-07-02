@@ -1448,6 +1448,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_v21_typed_output_descriptors() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(0b1000_0010);
+        input.push(4);
+        input.push(5);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(
+            info.output_types,
+            [FrameValueType::Serial, FrameValueType::Numeric]
+        );
+        assert_eq!(info.output_sizes, [Some(3), Some(4)]);
+        assert_eq!(info.output_elements, [Some(3), None]);
+        assert_eq!(info.decoded_bytes, Some(7));
+    }
+
+    #[test]
     fn enforces_output_buffer_limit() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));
@@ -1753,6 +1773,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_v22_comment() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(22));
+        input.push(1 << 2);
+        input.push(1);
+        input.push(4);
+        input.push(3);
+        input.extend_from_slice(b"abc");
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert!(info.has_comment);
+        assert_eq!(info.header_bytes, input.len());
+    }
+
+    #[test]
+    fn rejects_zero_length_comment() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(22));
+        input.push(1 << 2);
+        input.push(1);
+        input.push(4);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
     fn rejects_zero_length_bundle_id() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(25));
@@ -1760,6 +1810,31 @@ mod tests {
         input.push(0);
 
         let err = inspect_frame(&input, Limits::default()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn rejects_all_zero_bundle_id() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(25));
+        input.push(1 << 3);
+        input.push(2);
+        input.extend_from_slice(&[0, 0]);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn rejects_oversized_bundle_id() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(25));
+        input.push(1 << 3);
+        input.push(33);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
         assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 
