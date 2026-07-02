@@ -415,30 +415,25 @@ fn read_chunks(
         let chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
         summary.chunks = checked_add(summary.chunks, 1)?;
         check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
-        summary.transforms = checked_add(summary.transforms, chunk.transforms)?;
+        summary.transforms = checked_add(summary.transforms, chunk.transforms())?;
         check_limit(
             summary.transforms,
             limits.max_nodes,
             ErrorKind::LimitExceeded,
         )?;
-        summary.stored_streams = checked_add(summary.stored_streams, chunk.stored_streams)?;
+        summary.stored_streams = checked_add(summary.stored_streams, chunk.stored_streams())?;
         check_limit(
             summary.stored_streams,
             limits.max_streams,
             ErrorKind::LimitExceeded,
         )?;
         summary.regenerated_streams =
-            checked_add(summary.regenerated_streams, chunk.regenerated_streams)?;
+            checked_add(summary.regenerated_streams, chunk.regenerated_streams())?;
         check_limit(
             summary.regenerated_streams,
             limits.max_streams,
             ErrorKind::LimitExceeded,
         )?;
-        chunks.try_reserve_exact(1).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
-        })?;
-        chunks.push(chunk);
-
         let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
         check_limit(
             chunk.transform_header_bytes,
@@ -458,6 +453,10 @@ fn read_chunks(
         if flags.has_encoded_checksum() {
             let _ = reader.read_u32_le()?;
         }
+        chunks.try_reserve_exact(1).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
+        })?;
+        chunks.push(chunk);
     }
 }
 
@@ -470,9 +469,10 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
     let mut stored_streams = 0usize;
     let mut regenerated_streams = 0usize;
     for chunk in &plan.chunks {
-        transforms = checked_add(transforms, chunk.transforms)?;
-        stored_streams = checked_add(stored_streams, chunk.stored_streams)?;
-        regenerated_streams = checked_add(regenerated_streams, chunk.regenerated_streams)?;
+        validate_chunk_plan(chunk)?;
+        transforms = checked_add(transforms, chunk.transforms())?;
+        stored_streams = checked_add(stored_streams, chunk.stored_streams())?;
+        regenerated_streams = checked_add(regenerated_streams, chunk.regenerated_streams())?;
     }
 
     if transforms != plan.info.transforms
@@ -482,6 +482,56 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
         return Err(Error::new(ErrorKind::InvalidGraph).with_detail("chunk summary mismatch"));
     }
 
+    Ok(())
+}
+
+fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
+    let stream_bound = checked_add(chunk.regenerated_streams(), chunk.stored_streams())?;
+    let mut header_end = 0usize;
+    let mut regenerated = 0usize;
+    for node in &chunk.nodes {
+        if node.transform_type == TransformType::Standard && node.transform_id >= 128 {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("standard transform ID is outside the OpenZL range"));
+        }
+        if node.transform_header_start != header_end {
+            return Err(Error::new(ErrorKind::InvalidGraph).with_detail("transform header gap"));
+        }
+        header_end = checked_add(node.transform_header_start, node.transform_header_size)?;
+        if usize::try_from(node.variable_outputs)
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?
+            > stream_bound
+        {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("node input count is out of bounds"));
+        }
+        if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("custom transform dictionaries are unsupported"));
+        }
+        for &distance in &node.regen_distances {
+            let distance =
+                usize::try_from(distance).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+            if distance >= stream_bound {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("regen stream distance is out of bounds"));
+            }
+            regenerated = checked_add(regenerated, 1)?;
+        }
+    }
+    if header_end != chunk.transform_header_bytes {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("transform header size mismatch")
+        );
+    }
+    if regenerated != chunk.regenerated_streams() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("regenerated stream count mismatch")
+        );
+    }
+    if sum_usize(&chunk.stored_stream_sizes)? != chunk.stored_stream_bytes {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("stored stream size mismatch"));
+    }
     Ok(())
 }
 
@@ -513,15 +563,17 @@ fn read_chunk_header(
     }
 
     let transform_types = read_transform_types(reader, transforms)?;
-    let _transform_ids = read_transform_ids(reader, &transform_types, format_version)?;
+    let transform_ids = read_transform_ids(reader, &transform_types, format_version)?;
     let transform_header_sizes = read_transform_header_sizes(reader, transforms)?;
     let transform_header_bytes = sum_u32_as_usize(&transform_header_sizes)?;
-    let _variable_outputs = read_variable_outputs(reader, transforms)?;
+    let variable_outputs = read_variable_outputs(reader, transforms)?;
     let regen_counts = read_regen_counts(reader, transforms, format_version)?;
 
-    if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
-        read_dict_indexes(reader, transforms)?;
-    }
+    let dict_indexes = if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
+        read_dict_indexes(reader, transforms)?
+    } else {
+        vec![None; transforms]
+    };
 
     let regenerated_streams = sum_usize(&regen_counts)?;
     check_limit(
@@ -530,18 +582,84 @@ fn read_chunk_header(
         ErrorKind::Malformed,
     )?;
     let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
-    let _regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
+    let regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
 
     let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams)?;
     let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
+    let nodes = build_node_plans(
+        &transform_types,
+        &transform_ids,
+        &transform_header_sizes,
+        &variable_outputs,
+        &regen_counts,
+        &dict_indexes,
+        &regen_distances,
+    )?;
 
     Ok(ChunkPlan {
-        transforms,
-        stored_streams,
-        regenerated_streams,
+        nodes,
+        stored_stream_sizes,
         transform_header_bytes,
         stored_stream_bytes,
     })
+}
+
+fn build_node_plans(
+    transform_types: &[TransformType],
+    transform_ids: &[u32],
+    transform_header_sizes: &[u32],
+    variable_outputs: &[u32],
+    regen_counts: &[usize],
+    dict_indexes: &[Option<u32>],
+    regen_distances: &[u32],
+) -> Result<Vec<NodePlan>> {
+    let transforms = transform_types.len();
+    if transform_ids.len() != transforms
+        || transform_header_sizes.len() != transforms
+        || variable_outputs.len() != transforms
+        || regen_counts.len() != transforms
+        || dict_indexes.len() != transforms
+    {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("node metadata length mismatch")
+        );
+    }
+
+    let mut nodes = Vec::new();
+    nodes.try_reserve_exact(transforms).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("node plan allocation failed")
+    })?;
+
+    let mut header_start = 0usize;
+    let mut distance_start = 0usize;
+    for index in 0..transforms {
+        let header_size = usize::try_from(transform_header_sizes[index])
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        let distance_end = checked_add(distance_start, regen_counts[index])?;
+        let distances = regen_distances
+            .get(distance_start..distance_end)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph).with_detail("regen distance length mismatch")
+            })?
+            .to_vec();
+        nodes.push(NodePlan {
+            transform_type: transform_types[index],
+            transform_id: transform_ids[index],
+            transform_header_start: header_start,
+            transform_header_size: header_size,
+            variable_outputs: variable_outputs[index],
+            regen_distances: distances,
+            dict_index: dict_indexes[index],
+        });
+        header_start = checked_add(header_start, header_size)?;
+        distance_start = distance_end;
+    }
+
+    if distance_start != regen_distances.len() {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("unused regen distances"));
+    }
+
+    Ok(nodes)
 }
 
 fn read_transform_count(reader: &mut Reader<'_>, format_version: u32) -> Result<usize> {
@@ -923,6 +1041,17 @@ enum TransformType {
     Custom,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NodePlan {
+    transform_type: TransformType,
+    transform_id: u32,
+    transform_header_start: usize,
+    transform_header_size: usize,
+    variable_outputs: u32,
+    regen_distances: Vec<u32>,
+    dict_index: Option<u32>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ChunkSummary {
     chunks: usize,
@@ -936,13 +1065,29 @@ struct ChunkScan {
     chunks: Vec<ChunkPlan>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ChunkPlan {
-    transforms: usize,
-    stored_streams: usize,
-    regenerated_streams: usize,
+    nodes: Vec<NodePlan>,
+    stored_stream_sizes: Vec<usize>,
     transform_header_bytes: usize,
     stored_stream_bytes: usize,
+}
+
+impl ChunkPlan {
+    fn transforms(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn stored_streams(&self) -> usize {
+        self.stored_stream_sizes.len()
+    }
+
+    fn regenerated_streams(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| node.regen_distances.len())
+            .sum()
+    }
 }
 
 struct Reader<'a> {
