@@ -518,6 +518,12 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
     let stream_bound = checked_add(chunk.regenerated_streams(), chunk.stored_streams())?;
     let mut header_end = 0usize;
     let mut regenerated = 0usize;
+    let mut regen_targets = Vec::new();
+    regen_targets.try_reserve_exact(stream_bound).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("regen target validation allocation failed")
+    })?;
+    regen_targets.resize(stream_bound, false);
     for node in &chunk.nodes {
         if node.transform_type == TransformType::Standard && node.transform_id >= 128 {
             return Err(Error::new(ErrorKind::Unsupported)
@@ -539,13 +545,6 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("custom transform dictionaries are unsupported"));
         }
-        let mut regen_targets = Vec::new();
-        regen_targets
-            .try_reserve_exact(node.regen_distances.len())
-            .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
-                    .with_detail("regen target validation allocation failed")
-            })?;
         for &distance in &node.regen_distances {
             let distance =
                 usize::try_from(distance).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
@@ -553,11 +552,11 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("regen stream distance is out of bounds"));
             }
-            if regen_targets.contains(&distance) {
+            if regen_targets[distance] {
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("duplicate regen stream distance"));
             }
-            regen_targets.push(distance);
+            regen_targets[distance] = true;
             regenerated = checked_add(regenerated, 1)?;
         }
     }
@@ -1385,6 +1384,20 @@ mod tests {
         (MAGIC_BASE + version).to_le_bytes()
     }
 
+    fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
+        let len = (values.len() * bits).div_ceil(8);
+        let start = out.len();
+        out.resize(start + len, 0);
+        for (index, &value) in values.iter().enumerate() {
+            for bit in 0..bits {
+                if ((value >> bit) & 1) != 0 {
+                    let absolute = index * bits + bit;
+                    out[start + absolute / 8] |= 1 << (absolute % 8);
+                }
+            }
+        }
+    }
+
     #[test]
     fn rejects_truncated_magic() {
         let err = inspect_frame(&[0xd5, 0xa5], Limits::default()).unwrap_err();
@@ -1696,6 +1709,30 @@ mod tests {
         input.push(1);
         input.push(0);
         input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn rejects_duplicate_regen_stream_distance_across_nodes() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(3);
+        input.push(1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[22, 22], 6);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 1);
+        push_bitpacked_u32(&mut input, &[0, 0], 2);
         input.push(3);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
