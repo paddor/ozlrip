@@ -128,6 +128,9 @@ fn decode_simple_transform_chunk(
         Some(standard::CONSTANT_SERIAL_ID) => {
             decode_constant_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::CONVERT_SERIAL_TO_STRUCT_ID) => {
+            decode_convert_serial_to_struct_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -371,6 +374,28 @@ fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) ->
         Error::new(ErrorKind::LimitExceeded).with_detail("constant allocation failed")
     })?;
     output.resize(output_len, stored[0]);
+    Ok(output)
+}
+
+fn decode_convert_serial_to_struct_chunk(
+    stored: &[u8],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_serial_to_struct headers are unsupported"));
+    }
+    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
+    })?;
+    output.extend_from_slice(stored);
     Ok(output)
 }
 
@@ -934,6 +959,48 @@ mod tests {
     #[test]
     fn rejects_constant_serial_output_limit_without_mutating_destination() {
         let input = constant_serial_frame(b'x', 6);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_convert_serial_to_struct_chunk() {
+        let expected = b"struct payload bytes";
+        let input = standard_transform_serial_frame(21, 5, expected, expected.len(), &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn rejects_convert_serial_to_struct_header_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[0]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_convert_serial_to_struct_output_limit_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {
