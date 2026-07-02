@@ -80,6 +80,9 @@ fn decode_simple_transform_chunk(
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single-node transform chunks are implemented"));
     };
+    if node.standard_id() == Some(standard::CONCAT_SERIAL_ID) {
+        return decode_concat_serial_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
+    }
     if node.variable_outputs() != 0 || node.regen_distances() != [0] {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single-input single-output transform chunks are implemented"));
@@ -102,6 +105,67 @@ fn decode_simple_transform_chunk(
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
+}
+
+fn decode_concat_serial_chunk(
+    input: &[u8],
+    chunk: &crate::parse::ChunkPlan,
+    node: &crate::parse::NodePlan,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if chunk.transform_header_range().len() != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("concat_serial transform headers are unsupported"));
+    }
+    if node.regen_distances() != [0] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single-output concat_serial chunks are implemented"));
+    }
+    if node.variable_outputs() != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("variable concat_serial outputs are unsupported"));
+    }
+    if chunk.stored_streams() != 2 {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("concat_serial input count does not match stored streams"));
+    }
+
+    let sizes_range = chunk
+        .stored_stream_range(0)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing concat sizes"))?;
+    let concatenated_range = chunk
+        .stored_stream_range(1)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing concat input"))?;
+    let sizes = sizes_range.as_slice(input)?;
+    if sizes.len() != 4 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("concat_serial size table is malformed")
+        );
+    }
+    let decoded_size =
+        usize::try_from(u32::from_le_bytes(sizes.try_into().map_err(|_| {
+            Error::new(ErrorKind::Malformed).with_detail("invalid concat size")
+        })?))
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("concat size is too large")
+        })?;
+    if decoded_size != concatenated_range.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("concat_serial size does not match input")
+        );
+    }
+    if decoded_size > limits.max_decoded_bytes || decoded_size > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(decoded_size).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+    })?;
+    output.extend_from_slice(concatenated_range.as_slice(input)?);
+    Ok(output)
 }
 
 #[cfg(feature = "lz4")]
@@ -362,6 +426,29 @@ mod tests {
         input
     }
 
+    fn concat_serial_frame(payload: &[u8]) -> Vec<u8> {
+        let size_stream = u32::try_from(payload.len()).unwrap().to_le_bytes();
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(payload.len() + 1).unwrap());
+        input.push(2);
+        input.push(2);
+        input.push(0);
+        input.push(55);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(4);
+        push_var_u64(&mut input, u64::try_from(payload.len()).unwrap());
+        input.extend_from_slice(&size_stream);
+        input.extend_from_slice(payload);
+        input.push(0);
+        input
+    }
+
     fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
         standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
     }
@@ -427,6 +514,35 @@ mod tests {
 
         assert_eq!(written, 7);
         assert_eq!(output, [7, 8, 9, 10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn decodes_v21_concat_serial_chunk() {
+        let input = concat_serial_frame(b"openzl concat");
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 13);
+        assert_eq!(output, b"openzl concat");
+    }
+
+    #[test]
+    fn rejects_concat_serial_output_limit_without_mutating_destination() {
+        let input = concat_serial_frame(b"openzl concat");
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 8,
+            max_buffer_bytes: 8,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
     }
 
     #[cfg(feature = "lz4")]

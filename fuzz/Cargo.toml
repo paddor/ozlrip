@@ -47,3 +47,10 @@ path = "fuzz_targets/decode_zstd_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_concat_node"
+path = "fuzz_targets/decode_concat_node.rs"
+test = false
+doc = false
+bench = false

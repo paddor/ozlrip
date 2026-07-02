@@ -2,6 +2,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 pub(crate) const LZ4_ID: u32 = 62;
 pub(crate) const ZSTD_ID: u32 = 22;
+pub(crate) const CONCAT_SERIAL_ID: u32 = 55;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
     let Some(min_version) = min_version(id) else {

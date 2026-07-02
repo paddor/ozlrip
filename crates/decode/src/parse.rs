@@ -513,6 +513,7 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("standard transform ID is outside the OpenZL range"));
         }
+        validate_known_standard_node_shape(node)?;
         if node.transform_header_start != header_end {
             return Err(Error::new(ErrorKind::InvalidGraph).with_detail("transform header gap"));
         }
@@ -528,6 +529,13 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("custom transform dictionaries are unsupported"));
         }
+        let mut regen_targets = Vec::new();
+        regen_targets
+            .try_reserve_exact(node.regen_distances.len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("regen target validation allocation failed")
+            })?;
         for &distance in &node.regen_distances {
             let distance =
                 usize::try_from(distance).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
@@ -535,6 +543,11 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("regen stream distance is out of bounds"));
             }
+            if regen_targets.contains(&distance) {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("duplicate regen stream distance"));
+            }
+            regen_targets.push(distance);
             regenerated = checked_add(regenerated, 1)?;
         }
     }
@@ -571,6 +584,21 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
             );
         }
         expected_start = checked_add(range.start, range.len)?;
+    }
+    Ok(())
+}
+
+fn validate_known_standard_node_shape(node: &NodePlan) -> Result<()> {
+    if node.standard_id() == Some(standard::LZ4_ID) || node.standard_id() == Some(standard::ZSTD_ID)
+    {
+        if node.variable_outputs != 0 {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("codec node has unexpected variable inputs"));
+        }
+        if node.regen_distances.len() != 1 {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("codec node has unexpected output count"));
+        }
     }
     Ok(())
 }
@@ -1161,7 +1189,7 @@ impl ChunkPlan {
         }
     }
 
-    fn stored_streams(&self) -> usize {
+    pub(crate) fn stored_streams(&self) -> usize {
         self.stored_stream_sizes.len()
     }
 
@@ -1230,6 +1258,10 @@ pub(crate) struct ByteRange {
 }
 
 impl ByteRange {
+    pub(crate) const fn len(self) -> usize {
+        self.len
+    }
+
     pub(crate) fn as_slice(self, input: &[u8]) -> Result<&[u8]> {
         let end = checked_add(self.start, self.len)?;
         input
@@ -1561,6 +1593,55 @@ mod tests {
         input.push(0);
         input.push(1);
         input.push(2);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn rejects_fixed_codec_variable_inputs() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(24));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(62);
+        input.push(0);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn rejects_duplicate_regen_stream_distance() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(0);
+        input.push(0);
+        input.push(1);
         input.push(0);
         input.push(0);
         input.push(3);
