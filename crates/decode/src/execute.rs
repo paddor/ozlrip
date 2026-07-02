@@ -34,6 +34,16 @@ pub(crate) fn decode_plan_with_context(
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("dictionary bundle materialization is not implemented"));
     }
+    if let Some(written) = try_decode_single_zstd_into_dst(
+        input,
+        plan,
+        dst,
+        limits,
+        #[cfg(feature = "zstd")]
+        zstd,
+    )? {
+        return Ok(written);
+    }
     let decoded = collect_decoded_output(
         input,
         plan,
@@ -59,6 +69,83 @@ pub(crate) fn decode_plan_with_context(
         dst.extend_from_slice(chunk.as_slice());
     }
     Ok(decoded.total_len)
+}
+
+#[cfg(feature = "zstd")]
+fn try_decode_single_zstd_into_dst(
+    input: &[u8],
+    plan: &FramePlan,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    zstd: &mut zrip::DecompressContext,
+) -> Result<Option<usize>> {
+    if plan.info.output_types.as_slice() != [FrameValueType::Serial] || plan.chunks.len() != 1 {
+        return Ok(None);
+    }
+    let chunk = &plan.chunks[0];
+    let [node] = chunk.nodes() else {
+        return Ok(None);
+    };
+    if node.standard_id() != Some(standard::ZSTD_ID)
+        || node.variable_outputs() != 0
+        || node.regen_distances() != [0]
+        || node.transform_header_size() != 0
+        || node.transform_header_start() != 0
+        || chunk.stored_streams() != 1
+    {
+        return Ok(None);
+    }
+
+    let stored = chunk
+        .stored_stream_range(0)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("zstd input stream is missing")
+        })?
+        .as_slice(input)?;
+    let mut offset = 0usize;
+    let element_width = read_var_u64(stored, &mut offset)?;
+    if element_width == 0 || element_width != 1 {
+        return Ok(None);
+    }
+    let magicless = stored
+        .get(offset..)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let start = dst.len();
+    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
+        Ok(written) => written,
+        Err(err) => {
+            dst.truncate(start);
+            return Err(map_zstd_error(&err));
+        }
+    };
+    if written > limits.max_buffer_bytes {
+        dst.truncate(start);
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    if let Err(err) = check_output_size(written, input.len(), plan, limits) {
+        dst.truncate(start);
+        return Err(err);
+    }
+    #[cfg(feature = "checksum")]
+    if let Err(err) = verify_decoded_checksum(&dst[start..], chunk.decoded_checksum) {
+        dst.truncate(start);
+        return Err(err);
+    }
+    #[cfg(not(feature = "checksum"))]
+    let _ = chunk.decoded_checksum;
+    Ok(Some(written))
+}
+
+#[cfg(not(feature = "zstd"))]
+fn try_decode_single_zstd_into_dst(
+    _input: &[u8],
+    _plan: &FramePlan,
+    _dst: &mut Vec<u8>,
+    _limits: Limits,
+) -> Result<Option<usize>> {
+    Ok(None)
 }
 
 fn collect_decoded_output<'a>(
@@ -979,13 +1066,7 @@ fn decode_zstd_chunk(
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
     let output = zstd
         .decompress_after_magic_with_limit(magicless, limits.max_decoded_bytes)
-        .map_err(|err| {
-            if err == zrip::DecompressError::OutputTooSmall {
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            } else {
-                Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
-            }
-        })?;
+        .map_err(|err| map_zstd_error(&err))?;
     let output = output.into_owned();
     if output.len() > limits.max_buffer_bytes {
         return Err(
@@ -993,6 +1074,15 @@ fn decode_zstd_chunk(
         );
     }
     Ok(output)
+}
+
+#[cfg(feature = "zstd")]
+fn map_zstd_error(err: &zrip::DecompressError) -> Error {
+    if *err == zrip::DecompressError::OutputTooSmall {
+        Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+    } else {
+        Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
+    }
 }
 
 #[cfg(not(feature = "zstd"))]
