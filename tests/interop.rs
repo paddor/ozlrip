@@ -34,28 +34,10 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
         let zli_decoded_path = work.path.join(format!("{name}.zli.decoded"));
         fs::write(&input_path, input).unwrap();
 
-        run(
-            &zli,
-            [
-                OsStr::new("compress"),
-                input_path.as_os_str(),
-                OsStr::new("--profile"),
-                OsStr::new(profile),
-                OsStr::new("-o"),
-                frame_path.as_os_str(),
-                OsStr::new("-f"),
-            ],
-        );
-        run(
-            &zli,
-            [
-                OsStr::new("decompress"),
-                frame_path.as_os_str(),
-                OsStr::new("-o"),
-                zli_decoded_path.as_os_str(),
-                OsStr::new("-f"),
-            ],
-        );
+        let compress_args = compress_args(&input_path, profile, case.profile_arg, &frame_path);
+        let decompress_args = decompress_args(&frame_path, &zli_decoded_path);
+        run(&zli, compress_args.iter().copied());
+        run(&zli, decompress_args.iter().copied());
 
         let frame = fs::read(&frame_path).unwrap();
         let zli_decoded = fs::read(&zli_decoded_path).unwrap();
@@ -69,28 +51,8 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
         writeln!(
             manifest,
             "fixture={name}\nprofile={profile}\ncompress_command={}\ndecompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ndecoded_hash={:016x}\n",
-            command_line(
-                &zli,
-                [
-                    OsStr::new("compress"),
-                    input_path.as_os_str(),
-                    OsStr::new("--profile"),
-                    OsStr::new(profile),
-                    OsStr::new("-o"),
-                    frame_path.as_os_str(),
-                    OsStr::new("-f"),
-                ],
-            ),
-            command_line(
-                &zli,
-                [
-                    OsStr::new("decompress"),
-                    frame_path.as_os_str(),
-                    OsStr::new("-o"),
-                    zli_decoded_path.as_os_str(),
-                    OsStr::new("-f"),
-                ],
-            ),
+            command_line(&zli, compress_args.iter().copied()),
+            command_line(&zli, decompress_args.iter().copied()),
             hash64(input),
             hash64(&frame),
             hash64(&zli_decoded),
@@ -109,11 +71,13 @@ fn interop_cases() -> Vec<InteropCase> {
             name: "serial-small",
             input: b"openzl interop serial fixture\n".to_vec(),
             profile: "serial",
+            profile_arg: None,
         },
         InteropCase {
             name: "u8-ramp",
             input: (0..=31).collect(),
             profile: "u8",
+            profile_arg: None,
         },
         InteropCase {
             name: "i8-signed",
@@ -122,18 +86,46 @@ fn interop_cases() -> Vec<InteropCase> {
                 .map(i8::cast_unsigned)
                 .collect(),
             profile: "i8",
+            profile_arg: None,
         },
         InteropCase {
             name: "le-u16-ramp",
             input: le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX]),
             profile: "le-u16",
+            profile_arg: None,
         },
         InteropCase {
             name: "le-u32-ramp",
             input: le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX]),
             profile: "le-u32",
+            profile_arg: None,
+        },
+        InteropCase {
+            name: "sao-synthetic",
+            input: sao_synthetic(),
+            profile: "sao",
+            profile_arg: None,
+        },
+        InteropCase {
+            name: "sao-sddl2-synthetic",
+            input: sao_synthetic(),
+            profile: "sddl2",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
         },
     ]
+}
+
+fn sao_synthetic() -> Vec<u8> {
+    let mut out = (0..28).collect::<Vec<u8>>();
+    for index in 0i16..10 {
+        out.extend_from_slice(&(0.1f64 + f64::from(index)).to_le_bytes());
+        out.extend_from_slice(&(-0.2f64 - f64::from(index)).to_le_bytes());
+        out.extend_from_slice(b"G2");
+        out.extend_from_slice(&(100i16 + index).to_le_bytes());
+        out.extend_from_slice(&(0.01f32 * f32::from(index)).to_le_bytes());
+        out.extend_from_slice(&(-0.02f32 * f32::from(index)).to_le_bytes());
+    }
+    out
 }
 
 fn le_bytes<const N: usize, T: LeBytes>(values: [T; N]) -> Vec<u8> {
@@ -164,6 +156,37 @@ struct InteropCase {
     name: &'static str,
     input: Vec<u8>,
     profile: &'static str,
+    profile_arg: Option<&'static str>,
+}
+
+fn compress_args<'a>(
+    input_path: &'a Path,
+    profile: &'a str,
+    profile_arg: Option<&'a str>,
+    frame_path: &'a Path,
+) -> Vec<&'a OsStr> {
+    let mut args = vec![
+        OsStr::new("compress"),
+        input_path.as_os_str(),
+        OsStr::new("--profile"),
+        OsStr::new(profile),
+    ];
+    if let Some(profile_arg) = profile_arg {
+        args.push(OsStr::new("--profile-arg"));
+        args.push(OsStr::new(profile_arg));
+    }
+    args.extend([OsStr::new("-o"), frame_path.as_os_str(), OsStr::new("-f")]);
+    args
+}
+
+fn decompress_args<'a>(frame_path: &'a Path, decoded_path: &'a Path) -> Vec<&'a OsStr> {
+    vec![
+        OsStr::new("decompress"),
+        frame_path.as_os_str(),
+        OsStr::new("-o"),
+        decoded_path.as_os_str(),
+        OsStr::new("-f"),
+    ]
 }
 
 fn zli_path() -> Option<PathBuf> {
