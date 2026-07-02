@@ -20,20 +20,34 @@ fn main() {
             .unwrap_or(DEFAULT_TARGET_MS),
     );
     let cases = generated_cases();
+    let impl_filter = env::var("OZLRIP_BENCH_IMPL").ok();
+    let case_filter = env::var("OZLRIP_BENCH_CASE").ok();
     let mut results = Vec::new();
 
     for case in &cases {
-        let ozlrip = bench_ozlrip(case, target);
-        print_result(&ozlrip, None);
-        results.push(ozlrip);
+        if case_filter.as_deref().is_some_and(|filter| filter != case.name) {
+            continue;
+        }
+        let mut ozlrip_mbps = None;
+        if impl_filter
+            .as_deref()
+            .is_none_or(|filter| filter == "ozlrip")
+        {
+            let ozlrip = bench_ozlrip(case, target);
+            ozlrip_mbps = Some(ozlrip.decode_mbps);
+            print_result(&ozlrip, None);
+            results.push(ozlrip);
+        }
 
-        let c = bench_openzl_c_ffi(case, target);
-        let relative = results
-            .iter()
-            .find(|result| result.input_name == case.name && result.impl_name == "ozlrip")
-            .map(|base| base.decode_mbps / c.decode_mbps);
-        print_result(&c, relative);
-        results.push(c);
+        if impl_filter
+            .as_deref()
+            .is_none_or(|filter| filter == "openzl-c-ffi")
+        {
+            let c = bench_openzl_c_ffi(case, target);
+            let relative = ozlrip_mbps.map(|base| base / c.decode_mbps);
+            print_result(&c, relative);
+            results.push(c);
+        }
     }
 
     write_cache(&results);

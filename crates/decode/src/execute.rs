@@ -28,10 +28,21 @@ pub(crate) fn decode_plan_with_scratch(
             .with_detail("dictionary bundle materialization is not implemented"));
     }
     let decoded = collect_decoded_output(input, plan, limits)?;
+    let mut chunks = decoded.chunks;
+    if dst.is_empty() && chunks.len() == 1 {
+        match chunks.pop().expect("single decoded chunk exists") {
+            DecodedChunk::Owned(bytes) => {
+                let written = bytes.len();
+                *dst = bytes;
+                return Ok(written);
+            }
+            borrowed @ DecodedChunk::Borrowed(_) => chunks.push(borrowed),
+        }
+    }
     dst.try_reserve_exact(decoded.total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
     })?;
-    for chunk in decoded.chunks {
+    for chunk in chunks {
         dst.extend_from_slice(chunk.as_slice());
     }
     Ok(decoded.total_len)
