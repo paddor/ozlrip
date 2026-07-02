@@ -480,6 +480,42 @@ mod tests {
 
     #[cfg(feature = "zstd")]
     #[test]
+    fn rejects_zstd_non_byte_output_width_without_mutating_destination() {
+        let expected = b"zstd-backed OpenZL serial chunk";
+        let compressed = zrip::compress(expected, 1).unwrap();
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 2);
+        stored.extend_from_slice(&compressed[4..]);
+        let input = zstd_serial_frame(&stored, expected.len());
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_zstd_transform_header_without_mutating_destination() {
+        let expected = b"zstd-backed OpenZL serial chunk";
+        let compressed = zrip::compress(expected, 1).unwrap();
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 1);
+        stored.extend_from_slice(&compressed[4..]);
+        let input = standard_transform_serial_frame(21, 22, &stored, expected.len(), &[0]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
     fn enforces_zstd_output_limit_without_mutating_destination() {
         let expected = b"zstd output larger than configured limits";
         let compressed = zrip::compress(expected, 1).unwrap();
