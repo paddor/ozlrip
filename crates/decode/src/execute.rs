@@ -83,6 +83,9 @@ fn decode_simple_transform_chunk(
     if node.standard_id() == Some(standard::CONCAT_SERIAL_ID) {
         return decode_concat_serial_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
     }
+    if node.standard_id() == Some(standard::SPLITN_ID) {
+        return decode_splitn_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
+    }
     if node.variable_outputs() != 0 || node.regen_distances() != [0] {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single-input single-output transform chunks are implemented"));
@@ -168,6 +171,77 @@ fn decode_concat_serial_chunk(
     Ok(output)
 }
 
+fn decode_splitn_chunk(
+    input: &[u8],
+    chunk: &crate::parse::ChunkPlan,
+    node: &crate::parse::NodePlan,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if node.regen_distances() != [0] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single-output splitn chunks are implemented"));
+    }
+    let input_count = usize::try_from(node.variable_outputs())
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("too many splitn inputs"))?;
+    if chunk.stored_streams() != input_count {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("splitn input count does not match stored streams"));
+    }
+    let header = chunk.transform_header_range().as_slice(input)?;
+    if input_count == 0 {
+        validate_splitn_empty_header(header)?;
+        return Ok(Vec::new());
+    }
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
+        );
+    }
+
+    let mut total_len = 0usize;
+    for index in 0..input_count {
+        let range = chunk.stored_stream_range(index).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("missing splitn input")
+        })?;
+        total_len = total_len.checked_add(range.len()).ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow).with_detail("splitn size overflowed")
+        })?;
+    }
+    if total_len > limits.max_decoded_bytes || total_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(total_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
+    })?;
+    for index in 0..input_count {
+        let range = chunk.stored_stream_range(index).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("missing splitn input")
+        })?;
+        output.extend_from_slice(range.as_slice(input)?);
+    }
+    Ok(output)
+}
+
+fn validate_splitn_empty_header(header: &[u8]) -> Result<()> {
+    if header.is_empty() {
+        return Ok(());
+    }
+    let mut offset = 0usize;
+    let element_width = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("unexpected splitn header bytes"));
+    }
+    if element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only serial byte splitn output is implemented"));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -249,7 +323,6 @@ fn read_single_varint_header(header: &[u8]) -> Result<usize> {
     })
 }
 
-#[cfg(any(feature = "lz4", feature = "zstd"))]
 fn read_var_u64(input: &[u8], offset: &mut usize) -> Result<u64> {
     let start = *offset;
     let mut value = 0u64;
@@ -449,6 +522,38 @@ mod tests {
         input
     }
 
+    fn splitn_serial_frame(streams: &[&[u8]]) -> Vec<u8> {
+        let decoded_len = streams.iter().map(|stream| stream.len()).sum::<usize>();
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        push_var_u64(&mut input, u64::try_from(streams.len()).unwrap());
+        input.push(0);
+        input.push(40);
+        input.push(0);
+        if streams.is_empty() {
+            input.push(0);
+        } else {
+            input.push(1);
+            push_var_u64(&mut input, u64::try_from(streams.len() - 1).unwrap());
+        }
+        input.push(0);
+        if !streams.is_empty() {
+            input.push(0);
+        }
+        for stream in streams {
+            push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
+        }
+        for stream in streams {
+            input.extend_from_slice(stream);
+        }
+        input.push(0);
+        input
+    }
+
     fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
         standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
     }
@@ -531,6 +636,47 @@ mod tests {
     #[test]
     fn rejects_concat_serial_output_limit_without_mutating_destination() {
         let input = concat_serial_frame(b"openzl concat");
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 8,
+            max_buffer_bytes: 8,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_splitn_serial_chunk() {
+        let input = splitn_serial_frame(&[b"open", b"zl", b" splitn"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 13);
+        assert_eq!(output, b"openzl splitn");
+    }
+
+    #[test]
+    fn decodes_empty_v21_splitn_serial_chunk() {
+        let input = splitn_serial_frame(&[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 0);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_splitn_output_limit_without_mutating_destination() {
+        let input = splitn_serial_frame(&[b"open", b"zl", b" splitn"]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {

@@ -54,3 +54,10 @@ path = "fuzz_targets/decode_concat_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_splitn_node"
+path = "fuzz_targets/decode_splitn_node.rs"
+test = false
+doc = false
+bench = false
