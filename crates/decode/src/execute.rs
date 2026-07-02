@@ -12,7 +12,17 @@ pub(crate) fn decode_plan(
     limits: Limits,
 ) -> Result<usize> {
     let mut scratch = Vec::new();
-    decode_plan_with_scratch(input, plan, dst, &mut scratch, limits)
+    #[cfg(feature = "zstd")]
+    let mut zstd = zrip::DecompressContext::new();
+    decode_plan_with_scratch(
+        input,
+        plan,
+        dst,
+        &mut scratch,
+        limits,
+        #[cfg(feature = "zstd")]
+        &mut zstd,
+    )
 }
 
 pub(crate) fn decode_plan_with_scratch(
@@ -21,13 +31,21 @@ pub(crate) fn decode_plan_with_scratch(
     dst: &mut Vec<u8>,
     scratch: &mut Vec<u8>,
     limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
     scratch.clear();
     if plan.info.dictionary_bundle_id.is_some() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("dictionary bundle materialization is not implemented"));
     }
-    let decoded = collect_decoded_output(input, plan, limits)?;
+    let decoded = collect_decoded_output(
+        input,
+        plan,
+        scratch,
+        limits,
+        #[cfg(feature = "zstd")]
+        zstd,
+    )?;
     let mut chunks = decoded.chunks;
     if dst.is_empty() && chunks.len() == 1 {
         match chunks.pop().expect("single decoded chunk exists") {
@@ -51,7 +69,9 @@ pub(crate) fn decode_plan_with_scratch(
 fn collect_decoded_output<'a>(
     input: &'a [u8],
     plan: &FramePlan,
+    scratch: &mut Vec<u8>,
     limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<DecodedOutput<'a>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Err(Error::new(ErrorKind::Unsupported)
@@ -65,7 +85,14 @@ fn collect_decoded_output<'a>(
     let mut total_len = 0usize;
     for chunk in &plan.chunks {
         let decoded = if chunk.has_nodes() {
-            decode_transform_chunk(input, chunk, limits)?
+            decode_transform_chunk(
+                input,
+                chunk,
+                scratch,
+                limits,
+                #[cfg(feature = "zstd")]
+                zstd,
+            )?
         } else {
             DecodedChunk::Borrowed(stored_only_chunk(input, chunk)?)
         };
@@ -98,7 +125,9 @@ fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Re
 fn decode_transform_chunk<'a>(
     input: &'a [u8],
     chunk: &crate::parse::ChunkPlan,
+    scratch: &mut Vec<u8>,
     limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<DecodedChunk<'a>> {
     let plan = build_chunk_execution_plan(chunk)?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
@@ -112,7 +141,10 @@ fn decode_transform_chunk<'a>(
             &inputs,
             node.variable_inputs,
             header,
+            scratch,
             limits,
+            #[cfg(feature = "zstd")]
+            zstd,
         )?;
         let target = streams.get_mut(node.output_target).ok_or_else(|| {
             Error::new(ErrorKind::InvalidGraph).with_detail("node output target is out of bounds")
@@ -312,7 +344,9 @@ fn execute_standard_node(
     inputs: &[&[u8]],
     variable_inputs: u32,
     header: &[u8],
+    scratch: &mut Vec<u8>,
     limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<Vec<u8>> {
     match standard_id {
         standard::CONCAT_SERIAL_ID => decode_concat_serial_node(inputs, header, limits),
@@ -322,7 +356,14 @@ fn execute_standard_node(
             decode_transpose_split_node(inputs, header, limits)
         }
         standard::LZ4_ID => decode_lz4_chunk(single_input(inputs)?, header, limits),
-        standard::ZSTD_ID => decode_zstd_chunk(single_input(inputs)?, header, limits),
+        standard::ZSTD_ID => decode_zstd_chunk(
+            single_input(inputs)?,
+            header,
+            scratch,
+            limits,
+            #[cfg(feature = "zstd")]
+            zstd,
+        ),
         standard::BITPACK_SERIAL_ID => {
             decode_bitpack_serial_chunk(single_input(inputs)?, header, limits)
         }
@@ -928,7 +969,13 @@ fn decode_lz4_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<V
 }
 
 #[cfg(feature = "zstd")]
-fn decode_zstd_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_zstd_chunk(
+    stored: &[u8],
+    header: &[u8],
+    scratch: &mut Vec<u8>,
+    limits: Limits,
+    zstd: &mut zrip::DecompressContext,
+) -> Result<Vec<u8>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("zstd transform headers are unsupported"));
@@ -942,23 +989,26 @@ fn decode_zstd_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
-    let mut frame = Vec::new();
-    frame
+    scratch.clear();
+    scratch
         .try_reserve_exact(4usize.checked_add(magicless.len()).ok_or_else(|| {
             Error::new(ErrorKind::IntegerOverflow).with_detail("zstd frame size overflowed")
         })?)
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("zstd frame allocation failed")
         })?;
-    frame.extend_from_slice(&0xfd2f_b528u32.to_le_bytes());
-    frame.extend_from_slice(magicless);
-    let output = zrip::decompress_with_limit(&frame, limits.max_decoded_bytes).map_err(|err| {
-        if err == zrip::DecompressError::OutputTooSmall {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        } else {
-            Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
-        }
-    })?;
+    scratch.extend_from_slice(&0xfd2f_b528u32.to_le_bytes());
+    scratch.extend_from_slice(magicless);
+    let output = zstd
+        .decompress_with_limit(scratch, limits.max_decoded_bytes)
+        .map_err(|err| {
+            if err == zrip::DecompressError::OutputTooSmall {
+                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+            } else {
+                Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
+            }
+        })?;
+    let output = output.into_owned();
     if output.len() > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
@@ -968,7 +1018,12 @@ fn decode_zstd_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec
 }
 
 #[cfg(not(feature = "zstd"))]
-fn decode_zstd_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<Vec<u8>> {
+fn decode_zstd_chunk(
+    _stored: &[u8],
+    _header: &[u8],
+    _scratch: &mut Vec<u8>,
+    _limits: Limits,
+) -> Result<Vec<u8>> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
 }
 
