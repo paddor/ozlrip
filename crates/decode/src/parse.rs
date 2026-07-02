@@ -1,8 +1,17 @@
 use alloc::{vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameInfo, FrameValueType, Limits, Result};
+use smallvec::{SmallVec, smallvec};
 
 use crate::standard;
+
+type ChunkPlans = SmallVec<[ChunkPlan; 1]>;
+type NodePlans = SmallVec<[NodePlan; 2]>;
+type RegenDistances = SmallVec<[u32; 1]>;
+type StoredStreamSizes = SmallVec<[usize; 2]>;
+type ByteRanges = SmallVec<[ByteRange; 2]>;
+type OutputTypes = SmallVec<[FrameValueType; 2]>;
+type OutputSizeValues = SmallVec<[Option<u64>; 2]>;
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const MIN_FORMAT_VERSION: u32 = 8;
@@ -14,7 +23,7 @@ const UNIQUE_ID_BYTES: usize = 32;
 const MAX_HEADER_COMMENT_BYTES: u64 = 10_000;
 
 pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
-    Ok(parse_frame_plan(input, limits)?.info)
+    Ok(parse_frame_plan(input, limits)?.info.into_public_info())
 }
 
 pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan> {
@@ -73,7 +82,7 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
             .with_detail("trailing bytes after OpenZL frame EOF marker"));
     }
 
-    let info = FrameInfo {
+    let info = FramePlanInfo {
         format_version,
         frame_bytes: input.len(),
         header_bytes,
@@ -195,8 +204,8 @@ fn read_output_types(
     input: &[u8],
     outputs: usize,
     format_version: u32,
-) -> Result<Vec<FrameValueType>> {
-    let mut types = Vec::new();
+) -> Result<OutputTypes> {
+    let mut types = OutputTypes::new();
     types.try_reserve_exact(outputs).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output type allocation failed")
     })?;
@@ -270,7 +279,7 @@ fn read_output_types(
 
 fn read_packed_types(
     reader: &mut Reader<'_>,
-    types: &mut Vec<FrameValueType>,
+    types: &mut OutputTypes,
     outputs: usize,
     done: usize,
 ) -> Result<()> {
@@ -305,8 +314,8 @@ fn read_output_sizes(
     limits: Limits,
 ) -> Result<OutputSizes> {
     let outputs = types.len();
-    let mut sizes = Vec::new();
-    let mut elements = Vec::new();
+    let mut sizes = OutputSizeValues::new();
+    let mut elements = OutputSizeValues::new();
     sizes.try_reserve_exact(outputs).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output size allocation failed")
     })?;
@@ -413,7 +422,7 @@ fn read_chunks(
     limits: Limits,
 ) -> Result<ChunkScan> {
     let mut summary = ChunkSummary::default();
-    let mut chunks = Vec::new();
+    let mut chunks = ChunkPlans::new();
     if reader.is_empty() {
         return Ok(ChunkScan { summary, chunks });
     }
@@ -482,9 +491,6 @@ fn read_chunks(
                 chunk.encoded_checksum,
             )?;
         }
-        chunks.try_reserve_exact(1).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("chunk allocation failed")
-        })?;
         chunks.push(chunk);
     }
 }
@@ -519,6 +525,9 @@ fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize, limits: Limits) -
     if output_count > stream_bound {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("chunk has fewer streams than final outputs"));
+    }
+    if chunk.nodes.len() == 1 {
+        return validate_single_node_chunk_plan(chunk, output_count, stream_bound, limits);
     }
     let first_final_stream = stream_bound.saturating_sub(output_count);
     let mut stream_cursor = 0usize;
@@ -639,6 +648,112 @@ fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize, limits: Limits) -
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("final output stream is not produced"));
         }
+    }
+    Ok(())
+}
+
+fn validate_single_node_chunk_plan(
+    chunk: &ChunkPlan,
+    output_count: usize,
+    stream_bound: usize,
+    limits: Limits,
+) -> Result<()> {
+    let first_final_stream = stream_bound.saturating_sub(output_count);
+    let node = &chunk.nodes[0];
+    if node.transform_type == TransformType::Standard && node.transform_id >= 128 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("standard transform ID is outside the OpenZL range"));
+    }
+    let shape = validate_known_standard_node_shape(node)?;
+    if node.transform_header_start != 0 {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("transform header gap"));
+    }
+    if node.transform_header_size != chunk.transform_header_bytes {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("transform header size mismatch")
+        );
+    }
+    let variable_inputs =
+        usize::try_from(node.variable_outputs).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+    if variable_inputs > 0 && !shape.allows_variable_inputs {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("node has unexpected variable inputs")
+        );
+    }
+    let input_count = checked_add(shape.static_inputs, variable_inputs)?;
+    if input_count > first_final_stream {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("node input range reaches final output streams"));
+    }
+    check_limit(1, limits.max_graph_depth, ErrorKind::LimitExceeded)?;
+    validate_node_output_count(node, shape)?;
+    if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("custom transform dictionaries are unsupported"));
+    }
+
+    let mut regenerated = 0usize;
+    let mut produced_final_outputs = 0usize;
+    for &distance in &node.regen_distances {
+        let distance =
+            usize::try_from(distance).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        let target = checked_add(input_count, distance)?;
+        if target >= stream_bound {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("regen stream distance is out of bounds"));
+        }
+        if target >= first_final_stream {
+            produced_final_outputs = checked_add(produced_final_outputs, 1)?;
+        }
+        regenerated = checked_add(regenerated, 1)?;
+    }
+    if node.regen_distances.len() == 2 && node.regen_distances[0] == node.regen_distances[1] {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("duplicate regen stream distance")
+        );
+    }
+    if node.regen_distances.len() > 2 {
+        for index in 1..node.regen_distances.len() {
+            if node.regen_distances[..index].contains(&node.regen_distances[index]) {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("duplicate regen stream distance"));
+            }
+        }
+    }
+    if regenerated != chunk.regenerated_streams() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("regenerated stream count mismatch")
+        );
+    }
+    if sum_usize(&chunk.stored_stream_sizes)? != chunk.stored_stream_bytes {
+        return Err(Error::new(ErrorKind::InvalidGraph).with_detail("stored stream size mismatch"));
+    }
+    if chunk.stored_stream_ranges.len() != chunk.stored_stream_sizes.len() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("stored stream range count mismatch")
+        );
+    }
+    let mut expected_start = checked_add(
+        chunk.transform_header_range.start,
+        chunk.transform_header_range.len,
+    )?;
+    for (range, &size) in chunk
+        .stored_stream_ranges
+        .iter()
+        .zip(chunk.stored_stream_sizes.iter())
+    {
+        if range.start != expected_start || range.len != size {
+            return Err(
+                Error::new(ErrorKind::InvalidGraph).with_detail("stored stream range mismatch")
+            );
+        }
+        expected_start = checked_add(range.start, range.len)?;
+    }
+    let stored_final_outputs = output_count.saturating_sub(produced_final_outputs);
+    if stored_final_outputs > chunk.stored_streams() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is not produced")
+        );
     }
     Ok(())
 }
@@ -768,7 +883,7 @@ fn read_chunk_header(
     let dict_indexes = if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
         read_dict_indexes(reader, transforms)?
     } else {
-        vec![None; transforms]
+        smallvec![None; transforms]
     };
 
     let regenerated_streams = sum_usize(&regen_counts)?;
@@ -798,7 +913,7 @@ fn read_chunk_header(
         transform_header_bytes,
         stored_stream_bytes,
         transform_header_range: ByteRange::default(),
-        stored_stream_ranges: Vec::new(),
+        stored_stream_ranges: ByteRanges::new(),
         decoded_checksum: None,
         encoded_checksum: None,
     })
@@ -849,13 +964,10 @@ fn read_single_transform_chunk_header(
         ErrorKind::Malformed,
     )?;
     let distance_bits = bits_needed(checked_add(regen_count, stored_streams)?);
-    let regen_distances = read_bitpacked_u32(reader, regen_count, distance_bits)?;
+    let regen_distances = read_bitpacked_u32_inline::<1>(reader, regen_count, distance_bits)?;
     let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams, limits)?;
     let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
-    let mut nodes = Vec::new();
-    nodes.try_reserve_exact(1).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("node plan allocation failed")
-    })?;
+    let mut nodes = NodePlans::new();
     nodes.push(NodePlan {
         transform_type,
         transform_id,
@@ -872,7 +984,7 @@ fn read_single_transform_chunk_header(
         transform_header_bytes,
         stored_stream_bytes,
         transform_header_range: ByteRange::default(),
-        stored_stream_ranges: Vec::new(),
+        stored_stream_ranges: ByteRanges::new(),
         decoded_checksum: None,
         encoded_checksum: None,
     })
@@ -956,7 +1068,7 @@ fn build_node_plans(
     regen_counts: &[usize],
     dict_indexes: &[Option<u32>],
     regen_distances: &[u32],
-) -> Result<Vec<NodePlan>> {
+) -> Result<NodePlans> {
     let transforms = transform_types.len();
     if transform_ids.len() != transforms
         || transform_header_sizes.len() != transforms
@@ -969,7 +1081,7 @@ fn build_node_plans(
         );
     }
 
-    let mut nodes = Vec::new();
+    let mut nodes = NodePlans::new();
     nodes.try_reserve_exact(transforms).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("node plan allocation failed")
     })?;
@@ -985,7 +1097,9 @@ fn build_node_plans(
             .ok_or_else(|| {
                 Error::new(ErrorKind::InvalidGraph).with_detail("regen distance length mismatch")
             })?
-            .to_vec();
+            .iter()
+            .copied()
+            .collect::<RegenDistances>();
         nodes.push(NodePlan {
             transform_type: transform_types[index],
             transform_id: transform_ids[index],
@@ -1161,7 +1275,10 @@ fn read_regen_counts(
     Ok(out)
 }
 
-fn read_dict_indexes(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<Option<u32>>> {
+fn read_dict_indexes(
+    reader: &mut Reader<'_>,
+    transforms: usize,
+) -> Result<SmallVec<[Option<u32>; 2]>> {
     let flags = read_bitpacked_u32(reader, transforms, 1)?;
     let non_zero = flags.iter().filter(|&&flag| flag != 0).count();
     let mut values = Vec::new();
@@ -1175,7 +1292,7 @@ fn read_dict_indexes(reader: &mut Reader<'_>, transforms: usize) -> Result<Vec<O
     }
 
     let mut value_index = 0usize;
-    let mut out = Vec::new();
+    let mut out = SmallVec::new();
     out.try_reserve_exact(transforms).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dict index allocation failed")
     })?;
@@ -1198,8 +1315,8 @@ fn read_stored_stream_sizes(
     reader: &mut Reader<'_>,
     streams: usize,
     limits: Limits,
-) -> Result<Vec<usize>> {
-    let mut sizes = Vec::new();
+) -> Result<StoredStreamSizes> {
+    let mut sizes = StoredStreamSizes::new();
     sizes.try_reserve_exact(streams).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("stored stream size allocation failed")
     })?;
@@ -1229,6 +1346,26 @@ fn read_bitpacked_u32(reader: &mut Reader<'_>, count: usize, bits: usize) -> Res
     Ok(out)
 }
 
+fn read_bitpacked_u32_inline<const N: usize>(
+    reader: &mut Reader<'_>,
+    count: usize,
+    bits: usize,
+) -> Result<SmallVec<[u32; N]>> {
+    if bits > 32 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpacked width is too large"));
+    }
+    let bytes = bitpacked_bytes(count, bits)?;
+    let packed = reader.read_slice(bytes)?;
+    let mut out = SmallVec::new();
+    out.try_reserve_exact(count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitpacked value allocation failed")
+    })?;
+    for index in 0..count {
+        out.push(read_packed_value(packed, index, bits)?);
+    }
+    Ok(out)
+}
+
 fn read_bitpacked_single_u32(reader: &mut Reader<'_>, bits: usize) -> Result<u32> {
     if bits > 32 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitpacked width is too large"));
@@ -1243,16 +1380,25 @@ fn read_packed_value(bytes: &[u8], index: usize, bits: usize) -> Result<u32> {
         return Ok(0);
     }
     let bit_offset = checked_mul(index, bits)?;
-    let mut value = 0u32;
-    for bit in 0..bits {
-        let absolute = checked_add(bit_offset, bit)?;
+    let byte_start = bit_offset / 8;
+    let shift = bit_offset % 8;
+    let needed_bits = checked_add(bits, shift)?;
+    let needed_bytes = bitpacked_bytes(1, needed_bits)?;
+    let mut word = 0u64;
+    for offset in 0..needed_bytes {
         let byte = *bytes
-            .get(absolute / 8)
+            .get(checked_add(byte_start, offset)?)
             .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
-        let bit_value = (byte >> (absolute % 8)) & 1;
-        value |= u32::from(bit_value) << bit;
+        let shift = u32::try_from(checked_mul(offset, 8)?)
+            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        word |= u64::from(byte) << shift;
     }
-    Ok(value)
+    let mask = if bits == 32 {
+        u64::from(u32::MAX)
+    } else {
+        (1u64 << bits) - 1
+    };
+    u32::try_from((word >> shift) & mask).map_err(|_| Error::new(ErrorKind::IntegerOverflow))
 }
 
 fn bitpacked_bytes(count: usize, bits: usize) -> Result<usize> {
@@ -1402,19 +1548,62 @@ impl FrameFlags {
 
 struct OutputHeader {
     outputs: usize,
-    output_types: Vec<FrameValueType>,
+    output_types: OutputTypes,
 }
 
 struct OutputSizes {
-    sizes: Vec<Option<u64>>,
-    elements: Vec<Option<u64>>,
+    sizes: OutputSizeValues,
+    elements: OutputSizeValues,
     decoded_bytes: Option<usize>,
 }
 
 #[derive(Debug)]
 pub(crate) struct FramePlan {
-    pub(crate) info: FrameInfo,
-    pub(crate) chunks: Vec<ChunkPlan>,
+    pub(crate) info: FramePlanInfo,
+    pub(crate) chunks: ChunkPlans,
+}
+
+#[derive(Debug)]
+pub(crate) struct FramePlanInfo {
+    pub(crate) format_version: u32,
+    pub(crate) frame_bytes: usize,
+    pub(crate) header_bytes: usize,
+    pub(crate) decoded_bytes: Option<usize>,
+    pub(crate) chunks: usize,
+    pub(crate) inputs: usize,
+    pub(crate) output_types: OutputTypes,
+    pub(crate) output_sizes: OutputSizeValues,
+    pub(crate) output_elements: OutputSizeValues,
+    pub(crate) transforms: usize,
+    pub(crate) stored_streams: usize,
+    pub(crate) regenerated_streams: usize,
+    pub(crate) has_decoded_checksum: bool,
+    pub(crate) has_encoded_checksum: bool,
+    pub(crate) has_comment: bool,
+    pub(crate) dictionary_bundle_id: Option<Vec<u8>>,
+}
+
+impl FramePlanInfo {
+    fn into_public_info(self) -> FrameInfo {
+        FrameInfo {
+            format_version: self.format_version,
+            frame_bytes: self.frame_bytes,
+            header_bytes: self.header_bytes,
+            decoded_bytes: self.decoded_bytes,
+            chunks: self.chunks,
+            inputs: self.inputs,
+            output_types: self.output_types.into_vec(),
+            output_sizes: self.output_sizes.into_vec(),
+            output_elements: self.output_elements.into_vec(),
+            transforms: self.transforms,
+            stored_streams: self.stored_streams,
+            regenerated_streams: self.regenerated_streams,
+            has_decoded_checksum: self.has_decoded_checksum,
+            has_encoded_checksum: self.has_encoded_checksum,
+            has_comment: self.has_comment,
+            dictionary_bundle_id: self.dictionary_bundle_id,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1430,7 +1619,7 @@ pub(crate) struct NodePlan {
     transform_header_start: usize,
     transform_header_size: usize,
     variable_outputs: u32,
-    regen_distances: Vec<u32>,
+    regen_distances: RegenDistances,
     dict_index: Option<u32>,
 }
 
@@ -1444,17 +1633,17 @@ struct ChunkSummary {
 
 struct ChunkScan {
     summary: ChunkSummary,
-    chunks: Vec<ChunkPlan>,
+    chunks: ChunkPlans,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChunkPlan {
-    nodes: Vec<NodePlan>,
-    stored_stream_sizes: Vec<usize>,
+    nodes: NodePlans,
+    stored_stream_sizes: StoredStreamSizes,
     transform_header_bytes: usize,
     stored_stream_bytes: usize,
     transform_header_range: ByteRange,
-    stored_stream_ranges: Vec<ByteRange>,
+    stored_stream_ranges: ByteRanges,
     pub(crate) decoded_checksum: Option<u32>,
     encoded_checksum: Option<u32>,
 }
