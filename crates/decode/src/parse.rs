@@ -964,6 +964,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZSTD_ID
         | standard::BITPACK_SERIAL_ID
+        | standard::BITPACK_INT_ID
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
         | standard::CONSTANT_SERIAL_ID

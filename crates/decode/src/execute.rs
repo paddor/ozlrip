@@ -391,6 +391,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::LZ4_ID
         | standard::ZSTD_ID
         | standard::BITPACK_SERIAL_ID
+        | standard::BITPACK_INT_ID
         | standard::CONSTANT_SERIAL_ID
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
@@ -500,6 +501,7 @@ fn execute_standard_node(
         standard::BITPACK_SERIAL_ID => {
             decode_bitpack_serial_chunk(single_input(inputs)?, header, limits)
         }
+        standard::BITPACK_INT_ID => decode_bitpack_int_chunk(single_input(inputs)?, header, limits),
         standard::CONSTANT_SERIAL_ID => {
             decode_constant_serial_chunk(single_input(inputs)?, header, limits)
         }
@@ -796,41 +798,59 @@ fn validate_splitn_empty_header(header: &[u8]) -> Result<()> {
 }
 
 fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
-    let parsed = parse_bitpack_serial_header(header, stored.len())?;
-    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
+    let parsed = parse_bitpack_header(header, stored.len())?;
+    if parsed.element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only serial byte bitpack output is implemented"));
+    }
+    decode_bitpack_chunk(stored, parsed, limits)
+}
+
+fn decode_bitpack_int_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    let parsed = parse_bitpack_header(header, stored.len())?;
+    decode_bitpack_chunk(stored, parsed, limits)
+}
+
+fn decode_bitpack_chunk(stored: &[u8], parsed: BitpackHeader, limits: Limits) -> Result<Vec<u8>> {
+    let output_len = parsed
+        .elements
+        .checked_mul(parsed.element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
     let mut output = Vec::new();
-    output.try_reserve_exact(parsed.output_len).map_err(|_| {
+    output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("bitpack allocation failed")
     })?;
-    output.resize(parsed.output_len, 0);
-    unpack_lsb_bits(stored, parsed.bits, &mut output)?;
+    output.resize(output_len, 0);
+    unpack_lsb_bits(stored, parsed.bits, parsed.element_width, &mut output)?;
     Ok(output)
 }
 
+#[derive(Clone, Copy)]
 struct BitpackHeader {
+    element_width: usize,
     bits: usize,
-    output_len: usize,
+    elements: usize,
 }
 
-fn parse_bitpack_serial_header(header: &[u8], packed_len: usize) -> Result<BitpackHeader> {
+fn parse_bitpack_header(header: &[u8], packed_len: usize) -> Result<BitpackHeader> {
     if header.is_empty() || header.len() > 2 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack header is malformed"));
     }
     let element_width = 1usize
         .checked_shl(u32::from((header[0] >> 6) & 0x3))
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if element_width != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only serial byte bitpack output is implemented"));
-    }
     let bits = usize::from(header[0] & 0x3f)
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if bits > 8 {
+    let max_bits = element_width
+        .checked_mul(8)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if bits > max_bits {
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack width is too large"));
     }
     let max_elements = packed_len.checked_mul(8).ok_or_else(|| {
@@ -841,35 +861,48 @@ fn parse_bitpack_serial_header(header: &[u8], packed_len: usize) -> Result<Bitpa
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack header is corrupt"));
     }
     Ok(BitpackHeader {
+        element_width,
         bits,
-        output_len: max_elements - extra,
+        elements: max_elements - extra,
     })
 }
 
-fn unpack_lsb_bits(stored: &[u8], bits: usize, output: &mut [u8]) -> Result<()> {
-    let mask = if bits == 8 {
-        u16::from(u8::MAX)
+fn unpack_lsb_bits(
+    stored: &[u8],
+    bits: usize,
+    element_width: usize,
+    output: &mut [u8],
+) -> Result<()> {
+    let mask = if bits == 128 {
+        u128::MAX
     } else {
-        (1u16 << bits) - 1
+        (1u128 << bits) - 1
     };
-    for (index, out) in output.iter_mut().enumerate() {
+    for (index, out) in output.chunks_exact_mut(element_width).enumerate() {
         let bit_offset = index
             .checked_mul(bits)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let byte_offset = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-        let mut lane = u16::from(*stored.get(byte_offset).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-        })?);
-        if bit_shift + bits > 8 {
-            lane |= u16::from(*stored.get(byte_offset + 1).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-            })?) << 8;
-        }
-        *out = u8::try_from((lane >> bit_shift) & mask)
-            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        let value = read_packed_value(stored, bit_offset, bits, mask)?;
+        out.copy_from_slice(&value.to_le_bytes()[..element_width]);
     }
     Ok(())
+}
+
+fn read_packed_value(stored: &[u8], bit_offset: usize, bits: usize, mask: u128) -> Result<u128> {
+    let byte_offset = bit_offset / 8;
+    let bit_shift = bit_offset % 8;
+    let lane_bytes = bit_shift
+        .checked_add(bits)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+        .div_ceil(8);
+    let mut lane = 0u128;
+    for byte_index in 0..lane_bytes {
+        let byte = stored.get(byte_offset + byte_index).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+        })?;
+        lane |= u128::from(*byte) << (byte_index * 8);
+    }
+    Ok((lane >> bit_shift) & mask)
 }
 
 fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -1455,6 +1488,30 @@ mod tests {
         standard_transform_serial_frame(21, 27, &stored, values.len(), &header)
     }
 
+    fn bitpack_int_frame(values: &[u64], bits: u8, element_width: u8) -> Vec<u8> {
+        let stored = pack_lsb_values(values, bits);
+        let max_elements = (stored.len() * 8) / usize::from(bits);
+        let extra = max_elements - values.len();
+        let width_log = match element_width {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            _ => panic!("invalid element width"),
+        };
+        let mut header = vec![(width_log << 6) | (bits - 1)];
+        if extra != 0 {
+            header.push(u8::try_from(extra).unwrap());
+        }
+        standard_transform_serial_frame(
+            21,
+            28,
+            &stored,
+            values.len() * usize::from(element_width),
+            &header,
+        )
+    }
+
     fn bitunpack_serial_frame(values: &[u8], bits: u8, trailing_bits: Option<u8>) -> Vec<u8> {
         let mut header = vec![bits];
         if let Some(trailing_bits) = trailing_bits {
@@ -1598,23 +1655,28 @@ mod tests {
     }
 
     fn pack_lsb_bits(values: &[u8], bits: u8) -> Vec<u8> {
+        let values = values.iter().copied().map(u64::from).collect::<Vec<_>>();
+        pack_lsb_values(&values, bits)
+    }
+
+    fn pack_lsb_values(values: &[u64], bits: u8) -> Vec<u8> {
         let bits = usize::from(bits);
         let packed_len = (values.len() * bits).div_ceil(8);
         let mut output = vec![0; packed_len];
-        let mask = if bits == 8 {
-            u16::from(u8::MAX)
+        let mask = if bits == 64 {
+            u64::MAX
         } else {
-            (1u16 << bits) - 1
+            (1u64 << bits) - 1
         };
         for (index, &value) in values.iter().enumerate() {
             let bit_offset = index * bits;
             let byte_offset = bit_offset / 8;
             let bit_shift = bit_offset % 8;
-            let lane = (u16::from(value) & mask) << bit_shift;
+            let lane = u128::from(value & mask) << bit_shift;
             let lane_bytes = lane.to_le_bytes();
-            output[byte_offset] |= lane_bytes[0];
-            if bit_shift + bits > 8 {
-                output[byte_offset + 1] |= lane_bytes[1];
+            let byte_count = (bit_shift + bits).div_ceil(8);
+            for byte_index in 0..byte_count {
+                output[byte_offset + byte_index] |= lane_bytes[byte_index];
             }
         }
         output
@@ -1624,6 +1686,7 @@ mod tests {
     fn supported_standard_nodes_have_decode_coverage() {
         let mut supported = vec![
             standard::BITPACK_SERIAL_ID,
+            standard::BITPACK_INT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONSTANT_SERIAL_ID,
@@ -1648,6 +1711,7 @@ mod tests {
 
         let mut covered = vec![
             standard::BITPACK_SERIAL_ID,
+            standard::BITPACK_INT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONSTANT_SERIAL_ID,
@@ -1832,6 +1896,18 @@ mod tests {
 
         assert_eq!(written, expected.len());
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn decodes_v21_bitpack_int16_chunk() {
+        let input = bitpack_int_frame(&[0, 1, 255, 256, 1023], 10, 2);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 10);
+        assert_eq!(output, [0, 0, 1, 0, 255, 0, 0, 1, 255, 3]);
     }
 
     #[test]

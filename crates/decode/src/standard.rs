@@ -6,6 +6,7 @@ pub(crate) const DELTA_INT_ID: u32 = 1;
 pub(crate) const CONCAT_SERIAL_ID: u32 = 55;
 pub(crate) const SPLITN_ID: u32 = 40;
 pub(crate) const BITPACK_SERIAL_ID: u32 = 27;
+pub(crate) const BITPACK_INT_ID: u32 = 28;
 pub(crate) const BITUNPACK_ID: u32 = 34;
 pub(crate) const RANGE_PACK_ID: u32 = 35;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
