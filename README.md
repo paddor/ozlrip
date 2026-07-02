@@ -45,9 +45,7 @@ Decode benchmarks report decoded MB/s and append JSONL results under
 
 ```sh
 cargo bench --manifest-path bench/Cargo.toml --bench decode_profiles
-OZLRIP_ZLI=tmp/openzl-upstream/path/to/zli \
-  cargo bench --manifest-path bench/Cargo.toml --bench decode_profiles
 ```
 
-When `OZLRIP_ZLI` is set, the benchmark generates temporary upstream OpenZL
-frames and compares `ozlrip` against `openzl-c-cli`.
+The benchmark uses `rust-openzl` as a bench-only dependency to generate upstream
+OpenZL frames and compare `ozlrip` against `openzl-c-ffi` in process.

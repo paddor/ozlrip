@@ -1,10 +1,9 @@
 use std::{
     env,
-    ffi::{OsStr, OsString},
     fs,
     hint::black_box,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -20,87 +19,49 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_TARGET_MS),
     );
-    let zli = zli_path();
-    let generated = generated_cases(zli.as_deref());
+    let cases = generated_cases();
     let mut results = Vec::new();
 
-    for case in &generated.cases {
+    for case in &cases {
         let ozlrip = bench_ozlrip(case, target);
         print_result(&ozlrip, None);
         results.push(ozlrip);
 
-        if let Some(zli) = zli.as_deref() {
-            let c = bench_openzl_c_cli(zli, case, target);
-            let relative = results
-                .iter()
-                .find(|result| result.input_name == case.name && result.impl_name == "ozlrip")
-                .map(|base| base.decode_mbps / c.decode_mbps);
-            print_result(&c, relative);
-            results.push(c);
-        }
+        let c = bench_openzl_c_ffi(case, target);
+        let relative = results
+            .iter()
+            .find(|result| result.input_name == case.name && result.impl_name == "ozlrip")
+            .map(|base| base.decode_mbps / c.decode_mbps);
+        print_result(&c, relative);
+        results.push(c);
     }
 
     write_cache(&results);
 }
 
-fn generated_cases(zli: Option<&Path>) -> GeneratedCases {
+fn generated_cases() -> Vec<BenchCase> {
     let mut cases = Vec::new();
-    if let Some(zli) = zli {
-        let work = WorkDir::new("ozlrip-bench");
-        for (name, input) in [
-            ("serial-4k", high_entropy_bytes(4 * 1024)),
-            ("serial-1m", high_entropy_bytes(1024 * 1024)),
-        ] {
-            let input_path = work.path.join(format!("{name}.input"));
-            let frame_path = work.path.join(format!("{name}.zl"));
-            fs::write(&input_path, &input).expect("write benchmark input");
-            run(
-                zli,
-                [
-                    OsStr::new("compress"),
-                    input_path.as_os_str(),
-                    OsStr::new("--profile"),
-                    OsStr::new("serial"),
-                    OsStr::new("-o"),
-                    frame_path.as_os_str(),
-                    OsStr::new("-f"),
-                ],
-            );
-            let frame = fs::read(&frame_path).expect("read generated frame");
-            assert_eq!(
-                ozlrip::decode(&frame).expect("ozlrip decode generated frame"),
-                input
-            );
-            cases.push(BenchCase {
-                name,
-                profile: "serial",
-                input_size: input.len(),
-                frame,
-                work: Some(work.path.clone()),
-            });
-        }
-        return GeneratedCases {
-            cases,
-            _work: Some(work),
-        };
+    for (name, input) in [
+        ("serial-4k", high_entropy_bytes(4 * 1024)),
+        ("serial-1m", high_entropy_bytes(1024 * 1024)),
+    ] {
+        let frame = rust_openzl::compress_serial(&input).expect("openzl-c-ffi compress_serial");
+        assert_eq!(
+            ozlrip::decode(&frame).expect("ozlrip decode generated frame"),
+            input
+        );
+        assert_eq!(
+            rust_openzl::decompress_serial(&frame).expect("openzl-c-ffi decompress_serial"),
+            input
+        );
+        cases.push(BenchCase {
+            name,
+            profile: "serial",
+            input_size: input.len(),
+            frame,
+        });
     }
-
-    cases.push(BenchCase {
-        name: "store-4k",
-        profile: "manual-store",
-        input_size: 4 * 1024,
-        frame: store_only_frame(4 * 1024),
-        work: None,
-    });
-    cases.push(BenchCase {
-        name: "store-1m",
-        profile: "manual-store",
-        input_size: 1024 * 1024,
-        frame: store_only_frame(1024 * 1024),
-        work: None,
-    });
-    eprintln!("set OZLRIP_ZLI to include openzl-c-cli baseline results");
-    GeneratedCases { cases, _work: None }
+    cases
 }
 
 fn high_entropy_bytes(len: usize) -> Vec<u8> {
@@ -128,22 +89,13 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
     BenchResult::new("ozlrip", case, decode_ns)
 }
 
-fn bench_openzl_c_cli(zli: &Path, case: &BenchCase, target: Duration) -> BenchResult {
-    let work = case.work.as_ref().expect("zli benchmark workdir missing");
-    let frame_path = work.join(format!("{}.zl", case.name));
-    let output_path = work.join(format!("{}.decoded", case.name));
-    let args = [
-        OsString::from("decompress"),
-        frame_path.as_os_str().to_owned(),
-        OsString::from("-o"),
-        output_path.as_os_str().to_owned(),
-        OsString::from("-f"),
-    ];
+fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
     let decode_ns = bench_loop(target, || {
-        run_owned(zli, &args);
-        black_box(fs::metadata(&output_path).expect("decoded output metadata").len());
+        let decoded =
+            rust_openzl::decompress_serial(black_box(&case.frame)).expect("openzl-c-ffi decode");
+        black_box(decoded);
     });
-    BenchResult::new("openzl-c-cli", case, decode_ns)
+    BenchResult::new("openzl-c-ffi", case, decode_ns)
 }
 
 fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> f64 {
@@ -172,12 +124,6 @@ struct BenchCase {
     profile: &'static str,
     input_size: usize,
     frame: Vec<u8>,
-    work: Option<PathBuf>,
-}
-
-struct GeneratedCases {
-    cases: Vec<BenchCase>,
-    _work: Option<WorkDir>,
 }
 
 struct BenchResult {
@@ -232,7 +178,7 @@ impl BenchResult {
 fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
     if let Some(relative) = relative_to_c {
         println!(
-            "{:<12} {:<13} {:>9.1} MB/s {:>10.1} ns/decode ozlrip/openzl-c-cli={relative:.2}x",
+            "{:<12} {:<13} {:>9.1} MB/s {:>10.1} ns/decode ozlrip/openzl-c-ffi={relative:.2}x",
             result.input_name, result.impl_name, result.decode_mbps, result.decode_ns
         );
     } else {
@@ -257,21 +203,12 @@ fn write_cache(results: &[BenchResult]) {
 }
 
 fn cache_dir() -> PathBuf {
-    let dir = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| OsString::from(".")))
+    let dir = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into()))
         .join(".cache")
         .join("ozlrip")
         .join(env::consts::ARCH);
     fs::create_dir_all(&dir).expect("create benchmark cache dir");
     dir
-}
-
-fn zli_path() -> Option<PathBuf> {
-    let raw = PathBuf::from(env::var_os("OZLRIP_ZLI")?);
-    if raw.is_absolute() || raw.exists() {
-        return Some(raw);
-    }
-    let repo_relative = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(&raw);
-    Some(repo_relative)
 }
 
 fn timestamp_unix() -> u64 {
@@ -288,88 +225,5 @@ fn git_rev() -> String {
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
         }
         _ => "unknown".to_owned(),
-    }
-}
-
-fn run<'a>(program: &Path, args: impl IntoIterator<Item = &'a OsStr>) {
-    let args: Vec<&OsStr> = args.into_iter().collect();
-    let output = Command::new(program)
-        .args(&args)
-        .output()
-        .expect("run zli");
-    assert!(
-        output.status.success(),
-        "command failed: {} {:?}\nstdout:\n{}\nstderr:\n{}",
-        program.display(),
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn run_owned(program: &Path, args: &[OsString]) {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .expect("run zli");
-    assert!(
-        output.status.success(),
-        "command failed: {} {:?}\nstdout:\n{}\nstderr:\n{}",
-        program.display(),
-        args,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
-
-fn store_only_frame(payload_len: usize) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&(MAGIC_BASE + 21).to_le_bytes());
-    input.push(0);
-    input.push(1);
-    push_var_u64(
-        &mut input,
-        u64::try_from(payload_len + 1).expect("payload length fits"),
-    );
-    input.push(1);
-    input.push(1);
-    push_var_u64(
-        &mut input,
-        u64::try_from(payload_len).expect("payload length fits"),
-    );
-    input.resize(input.len() + payload_len, 0x5a);
-    input.push(0);
-    input
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).expect("varint byte fits") | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).expect("varint byte fits"));
-}
-
-struct WorkDir {
-    path: PathBuf,
-}
-
-impl WorkDir {
-    fn new(prefix: &str) -> Self {
-        let path = env::temp_dir().join(format!(
-            "{prefix}-{}-{}",
-            std::process::id(),
-            timestamp_unix()
-        ));
-        fs::create_dir_all(&path).expect("create benchmark workdir");
-        Self { path }
-    }
-}
-
-impl Drop for WorkDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
