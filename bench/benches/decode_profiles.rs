@@ -11,6 +11,10 @@ use std::{
 const DEFAULT_TARGET_MS: u64 = 100;
 const ROUNDS: usize = 7;
 const WARMUP: usize = 3;
+#[cfg(feature = "no-checksum")]
+const OZLRIP_IMPL: &str = "ozlrip-no-checksum";
+#[cfg(not(feature = "no-checksum"))]
+const OZLRIP_IMPL: &str = "ozlrip";
 
 fn main() {
     let target = Duration::from_millis(
@@ -31,7 +35,7 @@ fn main() {
         let mut ozlrip_mbps = None;
         if impl_filter
             .as_deref()
-            .is_none_or(|filter| filter == "ozlrip")
+            .is_none_or(|filter| filter == OZLRIP_IMPL)
         {
             let ozlrip = bench_ozlrip(case, target);
             ozlrip_mbps = Some(ozlrip.decode_mbps);
@@ -100,7 +104,7 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
             .expect("ozlrip decode failed");
         black_box(&dst);
     });
-    BenchResult::new("ozlrip", case, decode_ns)
+    BenchResult::new(OZLRIP_IMPL, case, decode_ns)
 }
 
 fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
@@ -192,12 +196,16 @@ impl BenchResult {
 fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
     if let Some(relative) = relative_to_c {
         println!(
-            "{:<12} {:<13} {:>9.1} MB/s {:>10.1} ns/decode ozlrip/openzl-c-ffi={relative:.2}x",
-            result.input_name, result.impl_name, result.decode_mbps, result.decode_ns
+            "{:<12} {:<19} {:>9.1} MB/s {:>10.1} ns/decode {}/openzl-c-ffi={relative:.2}x",
+            result.input_name,
+            result.impl_name,
+            result.decode_mbps,
+            result.decode_ns,
+            OZLRIP_IMPL
         );
     } else {
         println!(
-            "{:<12} {:<13} {:>9.1} MB/s {:>10.1} ns/decode",
+            "{:<12} {:<19} {:>9.1} MB/s {:>10.1} ns/decode",
             result.input_name, result.impl_name, result.decode_mbps, result.decode_ns
         );
     }

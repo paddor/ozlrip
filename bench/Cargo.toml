@@ -6,8 +6,12 @@ publish = false
 
 [workspace]
 
+[features]
+default = ["ozlrip/default"]
+no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
+
 [dependencies]
-ozlrip = { path = ".." }
+ozlrip = { path = "..", default-features = false }
 rust-openzl = "0.1.0"
 
 [[bench]]

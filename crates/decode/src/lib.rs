@@ -12,7 +12,6 @@ mod standard;
 
 pub struct Decoder {
     limits: Limits,
-    scratch: Vec<u8>,
     #[cfg(feature = "zstd")]
     zstd: zrip::DecompressContext,
 }
@@ -21,7 +20,6 @@ impl Decoder {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
-            scratch: Vec::new(),
             #[cfg(feature = "zstd")]
             zstd: zrip::DecompressContext::new(),
         }
@@ -33,12 +31,10 @@ impl Decoder {
 
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
         let plan = parse::parse_frame_plan(input, self.limits)?;
-        self.scratch.clear();
-        execute::decode_plan_with_scratch(
+        execute::decode_plan_with_context(
             input,
             &plan,
             dst,
-            &mut self.scratch,
             self.limits,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
