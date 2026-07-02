@@ -1464,6 +1464,61 @@ mod tests {
     }
 
     #[test]
+    fn rejects_node_input_count_out_of_bounds() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(0);
+        input.push(1);
+        input.push(2);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn enforces_transform_header_byte_limit() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(3);
+        input.push(99);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+        let limits = Limits {
+            max_transform_header_bytes: 0,
+            ..Limits::default()
+        };
+
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    }
+
+    #[test]
     fn parses_v25_bundle_id() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(25));
