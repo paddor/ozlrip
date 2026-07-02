@@ -48,7 +48,8 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
         let frame_info = ozlrip::inspect(&frame).unwrap_or_else(|err| {
             panic!("{name} ozlrip inspect failed: {err:?}");
         });
-        let ozlrip_decoded = ozlrip::decode(&frame).unwrap_or_else(|err| {
+        let mut ozlrip_decoded = Vec::new();
+        ozlrip::decode_into(&frame, &mut ozlrip_decoded, case.limits()).unwrap_or_else(|err| {
             panic!("{name} ozlrip decode failed: {err:?}");
         });
         assert_eq!(ozlrip_decoded, input, "{name} ozlrip output mismatch");
@@ -133,6 +134,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "serial",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-serial-quick-brown-fox",
@@ -140,6 +142,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "serial",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-serial-binary",
@@ -147,6 +150,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "serial",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "u8-ramp",
@@ -154,6 +158,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-u8-random",
@@ -161,6 +166,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-u8-sequential",
@@ -168,6 +174,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-u8-repeated",
@@ -175,6 +182,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-csv-experiments",
@@ -182,6 +190,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "csv",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "i8-signed",
@@ -194,6 +203,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "i8",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "le-u16-ramp",
@@ -201,6 +211,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "le-u16",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "le-u32-ramp",
@@ -208,6 +219,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "le-u32",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "sao-synthetic",
@@ -215,6 +227,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "sao",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "sao-sddl2-synthetic",
@@ -222,6 +235,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "sddl2",
             profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "sao-full-sddl2-synthetic",
@@ -229,18 +243,15 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile: "sddl2",
             profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_full.sddl"),
             extra_args: &[],
+            relaxed_limits: false,
         },
-    ]
-}
-
-fn discovery_interop_cases() -> Vec<InteropCase> {
-    vec![
         InteropCase {
             name: "upstream-serial-repeated-string",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
             profile: "serial",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "serial-chunked-2m",
@@ -248,6 +259,7 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             profile: "serial",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
+            relaxed_limits: true,
         },
         InteropCase {
             name: "u8-chunked-2m",
@@ -255,13 +267,20 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             profile: "u8",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
+            relaxed_limits: true,
         },
+    ]
+}
+
+fn discovery_interop_cases() -> Vec<InteropCase> {
+    vec![
         InteropCase {
             name: "upstream-u16-zigzag",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
             profile: "le-u16",
             profile_arg: None,
             extra_args: &[],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-csv-timeseries",
@@ -269,6 +288,7 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             profile: "csv",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
+            relaxed_limits: false,
         },
         InteropCase {
             name: "upstream-tbl-supplier",
@@ -276,6 +296,7 @@ fn discovery_interop_cases() -> Vec<InteropCase> {
             profile: "csv",
             profile_arg: Some("|"),
             extra_args: &[],
+            relaxed_limits: false,
         },
     ]
 }
@@ -342,9 +363,23 @@ struct InteropCase {
     profile: &'static str,
     profile_arg: Option<&'static str>,
     extra_args: &'static [&'static str],
+    relaxed_limits: bool,
 }
 
 impl InteropCase {
+    fn limits(&self) -> ozlrip::Limits {
+        if self.relaxed_limits {
+            ozlrip::Limits {
+                max_decoded_bytes: 8 * 1024 * 1024,
+                max_buffer_bytes: 8 * 1024 * 1024,
+                max_expansion_ratio: 1_000_000,
+                ..ozlrip::Limits::default()
+            }
+        } else {
+            ozlrip::Limits::default()
+        }
+    }
+
     fn load_input(&self) -> Vec<u8> {
         match &self.input {
             InteropInput::Inline(bytes) => bytes.clone(),

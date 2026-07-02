@@ -1,4 +1,4 @@
-use alloc::{vec, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
 
@@ -401,7 +401,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::FLATPACK_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
-        standard::TRANSPOSE_SPLIT4_ID => 4,
+        standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
         standard::TRANSPOSE_SPLIT8_ID => 8,
         standard::LZ4_ID
         | standard::ZSTD_ID
@@ -478,7 +478,7 @@ fn collect_node_inputs<'a>(
     inputs.try_reserve_exact(input_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("node input allocation failed")
     })?;
-    for slot in input_slots {
+    for slot in input_slots.iter().rev() {
         inputs.push(slot.as_input()?);
     }
     Ok(inputs)
@@ -541,17 +541,18 @@ fn execute_standard_node(
             header,
             limits,
         )),
-        standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_typed(decode_serial_to_num_le_chunk(
+        standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_serial(decode_numeric_to_serial_le_chunk(
             single_stream(inputs)?,
             header,
             limits,
         )),
-        standard::CONVERT_NUM_TO_SERIAL_LE_ID => one_serial(decode_num_to_serial_le_chunk(
+        standard::CONVERT_NUM_TO_SERIAL_LE_ID => one_typed(decode_serial_to_numeric_le_chunk(
             single_stream(inputs)?,
             header,
             limits,
         )),
         standard::MUX_LENGTHS_ID => decode_mux_lengths_node(inputs, header, limits),
+        standard::LZ_ID => one_serial(decode_lz_node(inputs, header, limits)),
         standard::ZIGZAG_ID => one_serial(decode_zigzag_serial8_chunk(
             single_input(inputs)?,
             header,
@@ -1037,6 +1038,138 @@ fn write_numeric_element(dst: &mut [u8], element_width: usize, value: u64) {
     dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]);
 }
 
+fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    let [literals, offsets, literal_lengths, match_lengths] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("lz input count does not match node shape"));
+    };
+    if literals.element_width != 1 {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("lz literals must be serial bytes")
+        );
+    }
+    validate_numeric_stream_width(offsets.element_width, "lz offsets")?;
+    validate_numeric_stream_width(literal_lengths.element_width, "lz literal lengths")?;
+    validate_numeric_stream_width(match_lengths.element_width, "lz match lengths")?;
+    let sequence_count = numeric_element_count(offsets.bytes, offsets.element_width)?;
+    if numeric_element_count(literal_lengths.bytes, literal_lengths.element_width)?
+        != sequence_count
+        || numeric_element_count(match_lengths.bytes, match_lengths.element_width)?
+            != sequence_count
+    {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("lz sequence stream counts do not match")
+        );
+    }
+
+    let mut offset = 0usize;
+    let output_len = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("lz header has trailing bytes"));
+    }
+    let output_len = usize::try_from(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("lz output size is too large")
+    })?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("lz allocation failed"))?;
+    output.resize(output_len, 0);
+
+    let mut out_pos = 0usize;
+    let mut lit_pos = 0usize;
+    for sequence in 0..sequence_count {
+        let literal_len = read_usize_numeric_element(
+            literal_lengths.bytes,
+            literal_lengths.element_width,
+            sequence,
+        )?;
+        let match_offset =
+            read_usize_numeric_element(offsets.bytes, offsets.element_width, sequence)?;
+        let match_len =
+            read_usize_numeric_element(match_lengths.bytes, match_lengths.element_width, sequence)?;
+
+        let literal_end = lit_pos
+            .checked_add(literal_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let out_literal_end = out_pos
+            .checked_add(literal_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let literal_src = literals.bytes.get(lit_pos..literal_end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
+        })?;
+        let literal_dst = output.get_mut(out_pos..out_literal_end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("lz literal length exceeds output size")
+        })?;
+        literal_dst.copy_from_slice(literal_src);
+        lit_pos = literal_end;
+        out_pos = out_literal_end;
+
+        if match_offset == 0 {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("lz offset is zero"));
+        }
+        if match_offset > out_pos {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("lz offset exceeds decoded prefix")
+            );
+        }
+        let out_match_end = out_pos
+            .checked_add(match_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if out_match_end > output.len() {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
+            );
+        }
+        for index in 0..match_len {
+            let value = output[out_pos + index - match_offset];
+            output[out_pos + index] = value;
+        }
+        out_pos = out_match_end;
+    }
+
+    let remaining_literals = literals.bytes.get(lit_pos..).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
+    })?;
+    let out_end = out_pos
+        .checked_add(remaining_literals.len())
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if out_end != output.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("lz output size does not match header")
+        );
+    }
+    output[out_pos..].copy_from_slice(remaining_literals);
+    Ok(output)
+}
+
+fn validate_numeric_stream_width(element_width: usize, name: &str) -> Result<()> {
+    if matches!(element_width, 1 | 2 | 4 | 8) {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::InvalidType).with_detail(format!("{name} width is unsupported")))
+    }
+}
+
+fn numeric_element_count(bytes: &[u8], element_width: usize) -> Result<usize> {
+    if !bytes.len().is_multiple_of(element_width) {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("numeric stream has partial element")
+        );
+    }
+    Ok(bytes.len() / element_width)
+}
+
+fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<usize> {
+    usize::try_from(read_numeric_element(bytes, element_width, index)?)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large"))
+}
+
 fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let parsed = parse_bitpack_header(header, stored.len())?;
     if parsed.element_width != 1 {
@@ -1206,23 +1339,23 @@ fn decode_num_to_struct_le_chunk(
     copy_byte_preserving_conversion(stored, stored.element_width, limits)
 }
 
-fn decode_serial_to_num_le_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_serial_to_num_le headers are unsupported"));
-    }
-    copy_byte_preserving_conversion(stored, stored.element_width, limits)
-}
-
-fn decode_num_to_serial_le_chunk(
+fn decode_numeric_to_serial_le_chunk(
     stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_serial_to_num_le headers are unsupported"));
+    }
+    Ok(copy_byte_preserving_conversion(stored, 1, limits)?.bytes)
+}
+
+fn decode_serial_to_numeric_le_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
     let [int_log] = header else {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("convert_num_to_serial_le header is malformed"));
@@ -1236,9 +1369,9 @@ fn decode_num_to_serial_le_chunk(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     if !stored.bytes.len().is_multiple_of(int_size) {
         return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("numeric stream size is not a multiple of integer width"));
+            .with_detail("serial stream size is not a multiple of integer width"));
     }
-    Ok(copy_byte_preserving_conversion(stored, 1, limits)?.bytes)
+    copy_byte_preserving_conversion(stored, int_size, limits)
 }
 
 fn copy_byte_preserving_conversion(
@@ -1697,10 +1830,10 @@ mod tests {
         input.push(0);
         input.push(0);
         input.push(0);
-        input.push(4);
         push_var_u64(&mut input, u64::try_from(payload.len()).unwrap());
-        input.extend_from_slice(&size_stream);
+        input.push(4);
         input.extend_from_slice(payload);
+        input.extend_from_slice(&size_stream);
         input.push(0);
         input
     }
@@ -1727,10 +1860,10 @@ mod tests {
         if !streams.is_empty() {
             input.push(0);
         }
-        for stream in streams {
+        for stream in streams.iter().rev() {
             push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
         }
-        for stream in streams {
+        for stream in streams.iter().rev() {
             input.extend_from_slice(stream);
         }
         input.push(0);
@@ -1850,10 +1983,10 @@ mod tests {
         input.push(0);
         input.push(0);
         input.push(0);
-        push_var_u64(&mut input, u64::try_from(alphabet.len()).unwrap());
         push_var_u64(&mut input, u64::try_from(packed.len()).unwrap());
-        input.extend_from_slice(alphabet);
+        push_var_u64(&mut input, u64::try_from(alphabet.len()).unwrap());
         input.extend_from_slice(&packed);
+        input.extend_from_slice(alphabet);
         input.push(0);
         input
     }
@@ -1879,10 +2012,10 @@ mod tests {
         input.push(0);
         input.push(0);
         input.push(0);
-        for lane in lanes {
+        for lane in lanes.iter().rev() {
             push_var_u64(&mut input, u64::try_from(lane.len()).unwrap());
         }
-        for lane in lanes {
+        for lane in lanes.iter().rev() {
             input.extend_from_slice(lane);
         }
         input.push(0);
@@ -1961,6 +2094,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::FLATPACK_ID,
+            standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
@@ -1987,6 +2121,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::FLATPACK_ID,
+            standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
@@ -2248,6 +2383,72 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn decodes_lz_node_with_trailing_literals() {
+        let literals = b"abc!";
+        let offsets = 3u16.to_le_bytes();
+        let literal_lengths = 3u16.to_le_bytes();
+        let match_lengths = 3u16.to_le_bytes();
+        let output = decode_lz_node(
+            &[
+                StreamInput {
+                    bytes: literals,
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &offsets,
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &literal_lengths,
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &match_lengths,
+                    element_width: 2,
+                },
+            ],
+            &[7],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"abcabc!");
+    }
+
+    #[test]
+    fn decodes_lz_node_with_overlapping_match() {
+        let literals = b"a";
+        let offsets = 1u16.to_le_bytes();
+        let literal_lengths = 1u16.to_le_bytes();
+        let match_lengths = 4u16.to_le_bytes();
+        let output = decode_lz_node(
+            &[
+                StreamInput {
+                    bytes: literals,
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &offsets,
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &literal_lengths,
+                    element_width: 2,
+                },
+                StreamInput {
+                    bytes: &match_lengths,
+                    element_width: 2,
+                },
+            ],
+            &[5],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"aaaaa");
     }
 
     #[test]
