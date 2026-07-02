@@ -33,3 +33,10 @@ path = "fuzz_targets/decode_limited.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_lz4_node"
+path = "fuzz_targets/decode_lz4_node.rs"
+test = false
+doc = false
+bench = false
