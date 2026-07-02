@@ -748,6 +748,16 @@ fn read_chunk_header(
         let _ = reader.read_byte()?;
     }
 
+    if transforms == 1 {
+        return read_single_transform_chunk_header(
+            reader,
+            stored_streams,
+            format_version,
+            has_bundle_id,
+            limits,
+        );
+    }
+
     let transform_types = read_transform_types(reader, transforms)?;
     let transform_ids = read_transform_ids(reader, &transform_types, format_version)?;
     let transform_header_sizes = read_transform_header_sizes(reader, transforms)?;
@@ -792,6 +802,150 @@ fn read_chunk_header(
         decoded_checksum: None,
         encoded_checksum: None,
     })
+}
+
+fn read_single_transform_chunk_header(
+    reader: &mut Reader<'_>,
+    stored_streams: usize,
+    format_version: u32,
+    has_bundle_id: bool,
+    limits: Limits,
+) -> Result<ChunkPlan> {
+    let transform_type = match read_bitpacked_single_u32(reader, 1)? {
+        0 => TransformType::Standard,
+        1 => TransformType::Custom,
+        _ => return Err(Error::new(ErrorKind::Malformed).with_detail("invalid transform type")),
+    };
+    let transform_id = match transform_type {
+        TransformType::Standard => {
+            let id = read_bitpacked_single_u32(reader, standard_transform_id_bits(format_version))?;
+            if id >= 128 {
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("standard transform ID is outside the OpenZL range"));
+            }
+            standard::validate_transform_id(id, format_version)?;
+            id
+        }
+        TransformType::Custom => {
+            let _ = reader.read_var_u64()?;
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("custom OpenZL transforms are not implemented"));
+        }
+    };
+    let transform_header_size = read_one_transform_header_size(reader)?;
+    let transform_header_bytes =
+        usize::try_from(transform_header_size).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+    let variable_outputs = read_one_variable_output(reader)?;
+    let regen_count = read_one_regen_count(reader, format_version)?;
+    let dict_index = if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
+        read_one_dict_index(reader)?
+    } else {
+        None
+    };
+
+    check_limit(
+        regen_count,
+        runtime_stream_limit(format_version),
+        ErrorKind::Malformed,
+    )?;
+    let distance_bits = bits_needed(checked_add(regen_count, stored_streams)?);
+    let regen_distances = read_bitpacked_u32(reader, regen_count, distance_bits)?;
+    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams, limits)?;
+    let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
+    let mut nodes = Vec::new();
+    nodes.try_reserve_exact(1).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("node plan allocation failed")
+    })?;
+    nodes.push(NodePlan {
+        transform_type,
+        transform_id,
+        transform_header_start: 0,
+        transform_header_size: transform_header_bytes,
+        variable_outputs,
+        regen_distances,
+        dict_index,
+    });
+
+    Ok(ChunkPlan {
+        nodes,
+        stored_stream_sizes,
+        transform_header_bytes,
+        stored_stream_bytes,
+        transform_header_range: ByteRange::default(),
+        stored_stream_ranges: Vec::new(),
+        decoded_checksum: None,
+        encoded_checksum: None,
+    })
+}
+
+fn read_one_transform_header_size(reader: &mut Reader<'_>) -> Result<u32> {
+    let mut size = read_bitpacked_single_u32(reader, 1)?;
+    if size != 0 {
+        let decoded = reader.read_var_u64()?;
+        size = u32::try_from(
+            decoded
+                .checked_add(1)
+                .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+        )
+        .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+    }
+    Ok(size)
+}
+
+fn read_one_variable_output(reader: &mut Reader<'_>) -> Result<u32> {
+    let mut output = read_bitpacked_single_u32(reader, 1)?;
+    if output != 0 {
+        let decoded = reader.read_var_u64()?;
+        output = u32::try_from(
+            decoded
+                .checked_add(1)
+                .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+        )
+        .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+    }
+    Ok(output)
+}
+
+fn read_one_regen_count(reader: &mut Reader<'_>, format_version: u32) -> Result<usize> {
+    if format_version < 16 {
+        return Ok(1);
+    }
+    let mut count = read_bitpacked_single_u32(reader, 1)?;
+    if count != 0 {
+        let decoded = reader.read_var_u64()?;
+        count = u32::try_from(
+            decoded
+                .checked_add(2)
+                .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
+        )
+        .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+    } else {
+        count = 1;
+    }
+    let count =
+        usize::try_from(count).map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+    check_limit(
+        count,
+        runtime_node_input_limit(format_version),
+        ErrorKind::Malformed,
+    )?;
+    Ok(count)
+}
+
+fn read_one_dict_index(reader: &mut Reader<'_>) -> Result<Option<u32>> {
+    if read_bitpacked_single_u32(reader, 1)? == 0 {
+        return Ok(None);
+    }
+    let bits = usize::from(reader.read_byte()?);
+    if bits > 16 {
+        return Err(Error::at(ErrorKind::Malformed, reader.offset())
+            .with_detail("dict index bit width is too large"));
+    }
+    let value = read_bitpacked_single_u32(reader, bits)?;
+    if value > 0xffff {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("dict index is too large"));
+    }
+    Ok(Some(value))
 }
 
 fn build_node_plans(
@@ -1073,6 +1227,15 @@ fn read_bitpacked_u32(reader: &mut Reader<'_>, count: usize, bits: usize) -> Res
         out.push(read_packed_value(packed, index, bits)?);
     }
     Ok(out)
+}
+
+fn read_bitpacked_single_u32(reader: &mut Reader<'_>, bits: usize) -> Result<u32> {
+    if bits > 32 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpacked width is too large"));
+    }
+    let bytes = bitpacked_bytes(1, bits)?;
+    let packed = reader.read_slice(bytes)?;
+    read_packed_value(packed, 0, bits)
 }
 
 fn read_packed_value(bytes: &[u8], index: usize, bits: usize) -> Result<u32> {
