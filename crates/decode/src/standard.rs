@@ -8,6 +8,9 @@ pub(crate) const BITPACK_SERIAL_ID: u32 = 27;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
 pub(crate) const CONVERT_SERIAL_TO_STRUCT_ID: u32 = 5;
 pub(crate) const FLATPACK_ID: u32 = 29;
+pub(crate) const TRANSPOSE_SPLIT2_ID: u32 = 30;
+pub(crate) const TRANSPOSE_SPLIT4_ID: u32 = 31;
+pub(crate) const TRANSPOSE_SPLIT8_ID: u32 = 32;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
     let Some(min_version) = min_version(id) else {

@@ -106,6 +106,10 @@ fn decode_simple_transform_chunk(
     if node.standard_id() == Some(standard::FLATPACK_ID) {
         return decode_flatpack_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
     }
+    if let Some(width) = transpose_split_width(node.standard_id()) {
+        return decode_transpose_split_chunk(input, chunk, node, width, limits)
+            .map(DecodedChunk::Owned);
+    }
     if node.variable_outputs() != 0 || node.regen_distances() != [0] {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single-input single-output transform chunks are implemented"));
@@ -197,6 +201,75 @@ fn decode_concat_serial_chunk(
         Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
     })?;
     output.extend_from_slice(concatenated_range.as_slice(input)?);
+    Ok(output)
+}
+
+fn transpose_split_width(id: Option<u32>) -> Option<usize> {
+    match id {
+        Some(standard::TRANSPOSE_SPLIT2_ID) => Some(2),
+        Some(standard::TRANSPOSE_SPLIT4_ID) => Some(4),
+        Some(standard::TRANSPOSE_SPLIT8_ID) => Some(8),
+        _ => None,
+    }
+}
+
+fn decode_transpose_split_chunk(
+    input: &[u8],
+    chunk: &crate::parse::ChunkPlan,
+    node: &crate::parse::NodePlan,
+    width: usize,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if node.variable_outputs() != 0 || node.regen_distances() != [0] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single-output transpose_split chunks are implemented"));
+    }
+    if chunk.transform_header_range().len() != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("transpose_split transform headers are unsupported"));
+    }
+    if chunk.stored_streams() != width {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("transpose_split input count does not match width"));
+    }
+    let first = chunk.stored_stream_range(0).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("missing transpose input")
+    })?;
+    let lane_len = first.len();
+    let output_len = lane_len.checked_mul(width).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow).with_detail("transpose size overflowed")
+    })?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut lanes = Vec::new();
+    lanes
+        .try_reserve_exact(width)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("lane allocation failed"))?;
+    for index in 0..width {
+        let lane = chunk
+            .stored_stream_range(index)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph).with_detail("missing transpose input")
+            })?
+            .as_slice(input)?;
+        if lane.len() != lane_len {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("transpose_split lanes have different sizes"));
+        }
+        lanes.push(lane);
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("transpose allocation failed")
+    })?;
+    for element in 0..lane_len {
+        for lane in &lanes {
+            output.push(lane[element]);
+        }
+    }
     Ok(output)
 }
 
@@ -870,6 +943,37 @@ mod tests {
         input
     }
 
+    fn transpose_split_frame(width: usize, lanes: &[&[u8]]) -> Vec<u8> {
+        let decoded_len = lanes.first().map_or(0, |lane| lane.len() * width);
+        let transform_id = match width {
+            2 => 30,
+            4 => 31,
+            8 => 32,
+            _ => unreachable!(),
+        };
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        push_var_u64(&mut input, u64::try_from(lanes.len()).unwrap());
+        input.push(0);
+        input.push(transform_id);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        for lane in lanes {
+            push_var_u64(&mut input, u64::try_from(lane.len()).unwrap());
+        }
+        for lane in lanes {
+            input.extend_from_slice(lane);
+        }
+        input.push(0);
+        input
+    }
+
     fn pack_flatpack_indexes(alphabet_len: usize, indexes: &[u8]) -> Vec<u8> {
         if indexes.is_empty() || alphabet_len == 0 {
             return Vec::new();
@@ -1220,6 +1324,54 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_transpose_split2_chunk() {
+        let input = transpose_split_frame(2, &[b"ace", b"bdf"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 6);
+        assert_eq!(output, b"abcdef");
+    }
+
+    #[test]
+    fn decodes_v21_transpose_split4_chunk() {
+        let input = transpose_split_frame(4, &[b"ae", b"bf", b"cg", b"dh"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 8);
+        assert_eq!(output, b"abcdefgh");
+    }
+
+    #[test]
+    fn decodes_v21_transpose_split8_chunk() {
+        let input = transpose_split_frame(8, &[b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 8);
+        assert_eq!(output, b"abcdefgh");
+    }
+
+    #[test]
+    fn rejects_transpose_split_mismatched_lanes_without_mutating_destination() {
+        let input = transpose_split_frame(2, &[b"ace", b"bd"]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
         assert_eq!(output, [1, 2]);
     }
 
