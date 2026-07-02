@@ -960,6 +960,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_SERIAL_LE_ID
+        | standard::CONVERT_STRING_TO_SERIAL_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZSTD_ID
@@ -969,13 +970,20 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::RANGE_PACK_ID
         | standard::CONSTANT_SERIAL_ID
         | standard::LZ4_ID => Some(fixed_shape(1, 1)),
-        standard::FLATPACK_ID | standard::TRANSPOSE_SPLIT2_ID | standard::SPARSE_NUM_ID => {
-            Some(fixed_shape(2, 1))
-        }
+        standard::FLATPACK_ID
+        | standard::TRANSPOSE_SPLIT2_ID
+        | standard::SPARSE_NUM_ID
+        | standard::SEPARATE_STRING_COMPONENTS_ID => Some(fixed_shape(2, 1)),
         standard::MUX_LENGTHS_ID => Some(fixed_shape(2, 2)),
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => Some(fixed_shape(4, 1)),
         standard::FIELD_LZ_ID => Some(fixed_shape(5, 1)),
         standard::TRANSPOSE_SPLIT8_ID => Some(fixed_shape(8, 1)),
+        standard::DISPATCH_STRING_ID => Some(StandardNodeShape {
+            static_inputs: 1,
+            allows_variable_inputs: true,
+            min_outputs: 1,
+            max_outputs: Some(1),
+        }),
         standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => Some(StandardNodeShape {
             static_inputs: 0,
             allows_variable_inputs: true,

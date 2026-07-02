@@ -193,6 +193,22 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "upstream-csv-timeseries",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_timeseries.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "upstream-tbl-supplier",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/tbl/supplier_trunc.tbl"),
+            profile: "csv",
+            profile_arg: Some("|"),
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "i8-signed",
             input: InteropInput::Inline(
                 [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
@@ -281,24 +297,7 @@ fn supported_interop_cases() -> Vec<InteropCase> {
 }
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
-    vec![
-        InteropCase {
-            name: "upstream-csv-timeseries",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_timeseries.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-tbl-supplier",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/tbl/supplier_trunc.tbl"),
-            profile: "csv",
-            profile_arg: Some("|"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-    ]
+    vec![]
 }
 
 fn sao_synthetic() -> Vec<u8> {

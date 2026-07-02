@@ -223,6 +223,7 @@ fn collect_decoded_output<'a>(
             decode_transform_chunk(
                 input,
                 chunk,
+                plan.info.format_version,
                 limits,
                 #[cfg(feature = "zstd")]
                 zstd,
@@ -259,6 +260,7 @@ fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Re
 fn decode_transform_chunk<'a>(
     input: &'a [u8],
     chunk: &crate::parse::ChunkPlan,
+    format_version: u32,
     limits: Limits,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<DecodedChunk<'a>> {
@@ -274,6 +276,7 @@ fn decode_transform_chunk<'a>(
             &inputs,
             node.variable_inputs,
             header,
+            format_version,
             limits,
             #[cfg(feature = "zstd")]
             zstd,
@@ -366,8 +369,9 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
                 .checked_add(distance)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             let target = regen_targets.get_mut(output_target).ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("regen stream distance is out of bounds")
+                Error::new(ErrorKind::InvalidGraph).with_detail(format!(
+                    "regen stream distance is out of bounds: id={standard_id} input_end={input_end} distance={distance} target={output_target} streams={total_streams}"
+                ))
             })?;
             if *target {
                 return Err(Error::new(ErrorKind::InvalidGraph)
@@ -399,12 +403,14 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::SPLITN_ID | standard::TRANSPOSE_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
         | standard::FLATPACK_ID
+        | standard::SEPARATE_STRING_COMPONENTS_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
         standard::FIELD_LZ_ID => 5,
         standard::TRANSPOSE_SPLIT8_ID => 8,
-        standard::LZ4_ID
+        standard::DISPATCH_STRING_ID
+        | standard::LZ4_ID
         | standard::ZSTD_ID
         | standard::BITPACK_SERIAL_ID
         | standard::BITPACK_INT_ID
@@ -412,6 +418,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_SERIAL_LE_ID
+        | standard::CONVERT_STRING_TO_SERIAL_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
@@ -499,6 +506,7 @@ fn execute_standard_node(
     inputs: &[StreamInput<'_>],
     variable_inputs: u32,
     header: &[u8],
+    format_version: u32,
     limits: Limits,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<Vec<OwnedStream>> {
@@ -508,6 +516,21 @@ fn execute_standard_node(
             one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
         }
         standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, limits)),
+        standard::SEPARATE_STRING_COMPONENTS_ID => one_typed(
+            decode_separate_string_components_node(inputs, header, limits),
+        ),
+        standard::CONVERT_STRING_TO_SERIAL_ID => one_serial(decode_string_to_serial_node(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
+        standard::DISPATCH_STRING_ID => one_typed(decode_dispatch_string_node(
+            inputs,
+            variable_inputs,
+            header,
+            format_version,
+            limits,
+        )),
         id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
             inputs,
             variable_inputs,
@@ -620,10 +643,12 @@ impl<'a> StreamSlot<'a> {
             Self::Borrowed(stream) => Ok(StreamInput {
                 bytes: stream.bytes,
                 element_width: stream.element_width,
+                string_lengths: None,
             }),
             Self::Owned(stream) => Ok(StreamInput {
                 bytes: &stream.bytes,
                 element_width: stream.element_width,
+                string_lengths: stream.string_lengths.as_deref(),
             }),
             Self::Empty => {
                 Err(Error::new(ErrorKind::InvalidGraph).with_detail("node input stream is missing"))
@@ -642,12 +667,14 @@ struct BorrowedStream<'a> {
 struct StreamInput<'a> {
     bytes: &'a [u8],
     element_width: usize,
+    string_lengths: Option<&'a [u32]>,
 }
 
 #[derive(Debug)]
 struct OwnedStream {
     bytes: Vec<u8>,
     element_width: usize,
+    string_lengths: Option<Vec<u32>>,
 }
 
 impl OwnedStream {
@@ -655,6 +682,7 @@ impl OwnedStream {
         Self {
             bytes,
             element_width: 1,
+            string_lengths: None,
         }
     }
 }
@@ -768,6 +796,7 @@ fn decode_transpose_split_node(
     Ok(OwnedStream {
         bytes: output,
         element_width: width,
+        string_lengths: None,
     })
 }
 
@@ -785,6 +814,248 @@ fn decode_flatpack_node(
             .with_detail("flatpack input count does not match node shape"));
     };
     decode_flatpack_serial(alphabet.bytes, packed.bytes, limits)
+}
+
+fn decode_separate_string_components_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("separate_string_components header must be empty"));
+    }
+    let [content, field_sizes] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("separate_string_components input count does not match node shape"));
+    };
+    if content.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("separate_string_components content must be serial bytes"));
+    }
+    validate_numeric_stream_width(field_sizes.element_width, "string field sizes")?;
+    let field_count = numeric_element_count(field_sizes.bytes, field_sizes.element_width)?;
+    let mut total = 0usize;
+    let mut string_lengths = Vec::new();
+    string_lengths.try_reserve_exact(field_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("string length allocation failed")
+    })?;
+    for index in 0..field_count {
+        let size = read_usize_numeric_element(field_sizes.bytes, field_sizes.element_width, index)?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        string_lengths.push(u32::try_from(size).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string field size is too large")
+        })?);
+    }
+    if total != content.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("string field sizes do not sum to content size"));
+    }
+    if content.bytes.len() > limits.max_decoded_bytes
+        || content.bytes.len() > limits.max_buffer_bytes
+    {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(content.bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("string component allocation failed")
+    })?;
+    output.extend_from_slice(content.bytes);
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 1,
+        string_lengths: Some(string_lengths),
+    })
+}
+
+fn decode_dispatch_string_node(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string header must be empty")
+        );
+    }
+    let variable_inputs = usize::try_from(variable_inputs)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
+    if inputs.len()
+        != variable_inputs
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("dispatch_string input count does not match node shape"));
+    }
+    let (indices, string_inputs) = inputs.split_first().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("dispatch_string index stream is missing")
+    })?;
+    let expected_index_width = if format_version < 21 { 1 } else { 2 };
+    require_numeric_width(indices, expected_index_width, "dispatch_string indices")?;
+    let index_count = numeric_element_count(indices.bytes, indices.element_width)?;
+    if index_count != 0 && string_inputs.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatch_string indices require string inputs"));
+    }
+    let mut per_input_positions = Vec::new();
+    per_input_positions
+        .try_reserve_exact(string_inputs.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+        })?;
+    let mut total_string_count = 0usize;
+    let mut total_bytes = 0usize;
+    for input in string_inputs {
+        if input.element_width != 1 {
+            return Err(Error::new(ErrorKind::InvalidType)
+                .with_detail("dispatch_string inputs must be byte strings"));
+        }
+        let lengths = input.string_lengths.ok_or_else(|| {
+            Error::new(ErrorKind::InvalidType)
+                .with_detail("dispatch_string input is missing string lengths")
+        })?;
+        let byte_total = checked_sum_u32(lengths)?;
+        if byte_total != input.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatch_string input lengths do not sum to content size"));
+        }
+        total_string_count = total_string_count
+            .checked_add(lengths.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        total_bytes = total_bytes
+            .checked_add(byte_total)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        per_input_positions.push(0usize);
+    }
+    if index_count != total_string_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatch_string index count does not match string count"));
+    }
+    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut byte_offsets = Vec::new();
+    byte_offsets
+        .try_reserve_exact(string_inputs.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+        })?;
+    for input in string_inputs {
+        let mut offsets = Vec::new();
+        let lengths = input
+            .string_lengths
+            .expect("validated string lengths exist");
+        offsets.try_reserve_exact(lengths.len()).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+        })?;
+        let mut offset = 0usize;
+        for &length in lengths {
+            offsets.push(offset);
+            offset = offset
+                .checked_add(usize::try_from(length).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded).with_detail("string length too large")
+                })?)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+        byte_offsets.push(offsets);
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(total_bytes).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch output allocation failed")
+    })?;
+    let mut output_lengths = Vec::new();
+    output_lengths.try_reserve_exact(index_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch length allocation failed")
+    })?;
+    for index in 0..index_count {
+        let source = read_usize_numeric_element(indices.bytes, indices.element_width, index)?;
+        let input = string_inputs.get(source).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
+        })?;
+        let source_position = per_input_positions.get_mut(source).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
+        })?;
+        let lengths = input
+            .string_lengths
+            .expect("validated string lengths exist");
+        let length = *lengths.get(*source_position).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
+        })?;
+        let offset = byte_offsets[source][*source_position];
+        let length_usize = usize::try_from(length).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length too large")
+        })?;
+        let end = offset
+            .checked_add(length_usize)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let bytes = input.bytes.get(offset..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+        })?;
+        output.extend_from_slice(bytes);
+        output_lengths.push(length);
+        *source_position = source_position
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    for (position, input) in per_input_positions.iter().zip(string_inputs) {
+        if *position
+            != input
+                .string_lengths
+                .expect("validated string lengths exist")
+                .len()
+        {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatch_string did not consume every source string"));
+        }
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 1,
+        string_lengths: Some(output_lengths),
+    })
+}
+
+fn decode_string_to_serial_node(
+    input: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_string_to_serial header must be empty"));
+    }
+    if input.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("convert_string_to_serial input must be byte strings"));
+    }
+    let lengths = input.string_lengths.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidType)
+            .with_detail("convert_string_to_serial input is missing string lengths")
+    })?;
+    if checked_sum_u32(lengths)? != input.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_string_to_serial lengths do not sum to content size"));
+    }
+    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(input.bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
+    })?;
+    output.extend_from_slice(input.bytes);
+    Ok(output)
 }
 
 fn decode_flatpack_serial(alphabet: &[u8], packed: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -1030,10 +1301,12 @@ fn decode_mux_lengths_node(
         OwnedStream {
             bytes: literal_lengths,
             element_width,
+            string_lengths: None,
         },
         OwnedStream {
             bytes: match_lengths,
             element_width,
+            string_lengths: None,
         },
     ])
 }
@@ -1194,6 +1467,18 @@ fn numeric_element_count(bytes: &[u8], element_width: usize) -> Result<usize> {
 fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<usize> {
     usize::try_from(read_numeric_element(bytes, element_width, index)?)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large"))
+}
+
+fn checked_sum_u32(values: &[u32]) -> Result<usize> {
+    let mut total = 0usize;
+    for &value in values {
+        let value = usize::try_from(value)
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("value is too large"))?;
+        total = total
+            .checked_add(value)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    Ok(total)
 }
 
 fn decode_field_lz_node(
@@ -1359,6 +1644,7 @@ fn decode_field_lz_node(
     Ok(OwnedStream {
         bytes: output,
         element_width,
+        string_lengths: None,
     })
 }
 
@@ -1444,6 +1730,7 @@ fn decode_bitpack_int_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Res
     Ok(OwnedStream {
         bytes: decode_bitpack_chunk(stored, parsed, limits)?,
         element_width,
+        string_lengths: None,
     })
 }
 
@@ -1677,6 +1964,7 @@ fn copy_byte_preserving_conversion(
     Ok(OwnedStream {
         bytes: output,
         element_width,
+        string_lengths: None,
     })
 }
 
@@ -2407,13 +2695,16 @@ mod tests {
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
+            standard::CONVERT_STRING_TO_SERIAL_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
+            standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -2436,13 +2727,16 @@ mod tests {
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
+            standard::CONVERT_STRING_TO_SERIAL_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
             standard::FLATPACK_ID,
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
+            standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -2640,10 +2934,12 @@ mod tests {
                 StreamInput {
                     bytes: &muxed,
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &long,
                     element_width: 2,
+                    string_lengths: None,
                 },
             ],
             &[0x24],
@@ -2667,10 +2963,12 @@ mod tests {
                 StreamInput {
                     bytes: &muxed,
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &long,
                     element_width: 2,
+                    string_lengths: None,
                 },
             ],
             &[0x24],
@@ -2691,10 +2989,12 @@ mod tests {
                 StreamInput {
                     bytes: &muxed,
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &long,
                     element_width: 2,
+                    string_lengths: None,
                 },
             ],
             &[0x24],
@@ -2716,18 +3016,22 @@ mod tests {
                 StreamInput {
                     bytes: literals,
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &offsets,
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &literal_lengths,
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &match_lengths,
                     element_width: 2,
+                    string_lengths: None,
                 },
             ],
             &[7],
@@ -2749,18 +3053,22 @@ mod tests {
                 StreamInput {
                     bytes: literals,
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &offsets,
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &literal_lengths,
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &match_lengths,
                     element_width: 2,
+                    string_lengths: None,
                 },
             ],
             &[5],
@@ -2778,22 +3086,27 @@ mod tests {
                 StreamInput {
                     bytes: b"abcdef",
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 4,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 4,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 4,
+                    string_lengths: None,
                 },
             ],
             &[6],
@@ -2814,22 +3127,27 @@ mod tests {
                 StreamInput {
                     bytes: b"abc!",
                     element_width: 1,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &token.to_le_bytes(),
                     element_width: 2,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &offset,
                     element_width: 4,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 4,
+                    string_lengths: None,
                 },
                 StreamInput {
                     bytes: &[],
                     element_width: 4,
+                    string_lengths: None,
                 },
             ],
             &[8],
@@ -2839,6 +3157,145 @@ mod tests {
 
         assert_eq!(output.element_width, 1);
         assert_eq!(output.bytes, b"abcabca!");
+    }
+
+    #[test]
+    fn decodes_separate_string_components_node() {
+        let field_sizes = [1u16.to_le_bytes(), 3u16.to_le_bytes()].concat();
+        let output = decode_separate_string_components_node(
+            &[
+                StreamInput {
+                    bytes: b"abcd",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &field_sizes,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 1);
+        assert_eq!(output.bytes, b"abcd");
+        assert_eq!(output.string_lengths.as_deref(), Some([1, 3].as_slice()));
+    }
+
+    #[test]
+    fn rejects_separate_string_components_size_mismatch() {
+        let field_sizes = [2u16.to_le_bytes(), 3u16.to_le_bytes()].concat();
+        let err = decode_separate_string_components_node(
+            &[
+                StreamInput {
+                    bytes: b"abcd",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &field_sizes,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn decodes_dispatch_string_node() {
+        let indices = [
+            0u16.to_le_bytes(),
+            1u16.to_le_bytes(),
+            0u16.to_le_bytes(),
+            1u16.to_le_bytes(),
+        ]
+        .concat();
+        let first_lengths = [1, 1];
+        let second_lengths = [1, 1];
+
+        let output = decode_dispatch_string_node(
+            &[
+                StreamInput {
+                    bytes: &indices,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"ab",
+                    element_width: 1,
+                    string_lengths: Some(&first_lengths),
+                },
+                StreamInput {
+                    bytes: b"XY",
+                    element_width: 1,
+                    string_lengths: Some(&second_lengths),
+                },
+            ],
+            2,
+            &[],
+            21,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 1);
+        assert_eq!(output.bytes, b"aXbY");
+        assert_eq!(
+            output.string_lengths.as_deref(),
+            Some([1, 1, 1, 1].as_slice())
+        );
+    }
+
+    #[test]
+    fn rejects_dispatch_string_invalid_source_index() {
+        let indices = 2u16.to_le_bytes();
+        let lengths = [1];
+        let err = decode_dispatch_string_node(
+            &[
+                StreamInput {
+                    bytes: &indices,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"a",
+                    element_width: 1,
+                    string_lengths: Some(&lengths),
+                },
+            ],
+            1,
+            &[],
+            21,
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn decodes_string_to_serial_node() {
+        let lengths = [1, 3];
+        let output = decode_string_to_serial_node(
+            StreamInput {
+                bytes: b"abcd",
+                element_width: 1,
+                string_lengths: Some(&lengths),
+            },
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"abcd");
     }
 
     #[test]
