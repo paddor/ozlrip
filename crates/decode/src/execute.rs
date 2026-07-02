@@ -108,6 +108,9 @@ fn decode_simple_transform_chunk(
         Some(standard::BITPACK_SERIAL_ID) => {
             decode_bitpack_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::CONSTANT_SERIAL_ID) => {
+            decode_constant_serial_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -320,6 +323,38 @@ fn unpack_lsb_bits(stored: &[u8], bits: usize, output: &mut [u8]) -> Result<()> 
             .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
     }
     Ok(())
+}
+
+fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if stored.len() != 1 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("constant_serial input must contain one byte"));
+    }
+    let mut offset = 0usize;
+    let output_len = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("unexpected constant_serial header bytes")
+        );
+    }
+    if output_len == 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("constant_serial output count must be nonzero"));
+    }
+    let output_len = usize::try_from(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("output count is too large")
+    })?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("constant allocation failed")
+    })?;
+    output.resize(output_len, stored[0]);
+    Ok(output)
 }
 
 #[cfg(feature = "lz4")]
@@ -649,6 +684,12 @@ mod tests {
         standard_transform_serial_frame(21, 27, &stored, values.len(), &header)
     }
 
+    fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
+        let mut header = Vec::new();
+        push_var_u64(&mut header, u64::try_from(count).unwrap());
+        standard_transform_serial_frame(21, 44, &[value], count, &header)
+    }
+
     fn pack_lsb_bits(values: &[u8], bits: u8) -> Vec<u8> {
         let bits = usize::from(bits);
         let packed_len = (values.len() * bits).div_ceil(8);
@@ -835,6 +876,47 @@ mod tests {
     fn rejects_bitpack_output_limit_without_mutating_destination() {
         let expected = [0, 1, 2, 3, 4, 5, 6, 7, 1];
         let input = bitpack_serial_frame(&expected, 3);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_constant_serial_chunk() {
+        let input = constant_serial_frame(b'x', 6);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 6);
+        assert_eq!(output, b"xxxxxx");
+    }
+
+    #[test]
+    fn rejects_zero_count_constant_serial_without_mutating_destination() {
+        let input = constant_serial_frame(b'x', 0);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_constant_serial_output_limit_without_mutating_destination() {
+        let input = constant_serial_frame(b'x', 6);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {

@@ -5,6 +5,7 @@ pub(crate) const ZSTD_ID: u32 = 22;
 pub(crate) const CONCAT_SERIAL_ID: u32 = 55;
 pub(crate) const SPLITN_ID: u32 = 40;
 pub(crate) const BITPACK_SERIAL_ID: u32 = 27;
+pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
     let Some(min_version) = min_version(id) else {
