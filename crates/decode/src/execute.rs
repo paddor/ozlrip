@@ -22,22 +22,18 @@ pub(crate) fn decode_plan_with_scratch(
     scratch: &mut Vec<u8>,
     limits: Limits,
 ) -> Result<usize> {
+    scratch.clear();
     if plan.info.dictionary_bundle_id.is_some() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("dictionary bundle materialization is not implemented"));
     }
     let decoded = collect_decoded_output(input, plan, limits)?;
-    scratch.clear();
-    scratch.try_reserve_exact(decoded.total_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-    })?;
-    for chunk in decoded.chunks {
-        scratch.extend_from_slice(chunk.as_slice());
-    }
     dst.try_reserve_exact(decoded.total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
     })?;
-    dst.extend_from_slice(scratch);
+    for chunk in decoded.chunks {
+        dst.extend_from_slice(chunk.as_slice());
+    }
     Ok(decoded.total_len)
 }
 

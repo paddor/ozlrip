@@ -1,7 +1,7 @@
 [workspace]
 members = [".", "crates/core", "crates/decode"]
 exclude = ["bench", "fuzz"]
-resolver = "2"
+resolver = "3"
 
 [package]
 name = "ozlrip"
