@@ -1508,6 +1508,14 @@ mod tests {
         }
     }
 
+    fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
+            value >>= 7;
+        }
+        out.push(u8::try_from(value).unwrap());
+    }
+
     #[test]
     fn rejects_truncated_magic() {
         let err = inspect_frame(&[0xd5, 0xa5], Limits::default()).unwrap_err();
@@ -1605,6 +1613,26 @@ mod tests {
         let err = inspect_frame(&input, limits).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    }
+
+    #[test]
+    fn rejects_output_size_sum_overflow() {
+        let encoded_size = usize::MAX as u64;
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(2);
+        push_var_u64(&mut input, encoded_size);
+        push_var_u64(&mut input, encoded_size);
+        let limits = Limits {
+            max_decoded_bytes: usize::MAX,
+            max_buffer_bytes: usize::MAX,
+            ..Limits::default()
+        };
+
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::IntegerOverflow);
     }
 
     #[test]
@@ -1955,6 +1983,30 @@ mod tests {
         let err = inspect_frame(&input, limits).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    }
+
+    #[test]
+    fn rejects_stored_stream_size_sum_overflow() {
+        let encoded_size = usize::MAX as u64;
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(0);
+        input.push(1);
+        input.push(2);
+        push_var_u64(&mut input, encoded_size);
+        push_var_u64(&mut input, encoded_size);
+        let limits = Limits {
+            max_stored_stream_bytes: usize::MAX,
+            max_buffer_bytes: usize::MAX,
+            max_decoded_bytes: usize::MAX,
+            ..Limits::default()
+        };
+
+        let err = inspect_frame(&input, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::IntegerOverflow);
     }
 
     #[test]
