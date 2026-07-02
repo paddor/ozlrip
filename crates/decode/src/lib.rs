@@ -30,6 +30,16 @@ impl Decoder {
     }
 
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
+        #[cfg(feature = "zstd")]
+        if let Some(frame) = parse::parse_single_zstd_frame(input, self.limits)? {
+            return execute::decode_single_zstd_frame_with_context(
+                input,
+                frame,
+                dst,
+                self.limits,
+                &mut self.zstd,
+            );
+        }
         let plan = parse::parse_frame_plan(input, self.limits)?;
         execute::decode_plan_with_context(
             input,

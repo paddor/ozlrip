@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
 
+#[cfg(feature = "zstd")]
+use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
 #[cfg(test)]
@@ -69,6 +71,58 @@ pub(crate) fn decode_plan_with_context(
         dst.extend_from_slice(chunk.as_slice());
     }
     Ok(decoded.total_len)
+}
+
+#[cfg(feature = "zstd")]
+pub(crate) fn decode_single_zstd_frame_with_context(
+    input: &[u8],
+    frame: SingleZstdFrame,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
+    let stored = frame.stored.as_slice(input)?;
+    let mut offset = 0usize;
+    let element_width = read_var_u64(stored, &mut offset)?;
+    if element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("zstd serial streams with non-byte elements are unsupported"));
+    }
+    let magicless = stored
+        .get(offset..)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let start = dst.len();
+    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
+        Ok(written) => written,
+        Err(err) => {
+            dst.truncate(start);
+            return Err(map_zstd_error(&err));
+        }
+    };
+    if written > limits.max_buffer_bytes {
+        dst.truncate(start);
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    if let Some(expected) = frame.decoded_bytes
+        && expected != written
+    {
+        dst.truncate(start);
+        return Err(Error::new(ErrorKind::Malformed).with_detail("decoded output size mismatch"));
+    }
+    if frame.frame_bytes > 0 && written / frame.frame_bytes > limits.max_expansion_ratio {
+        dst.truncate(start);
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail("expansion ratio exceeded"));
+    }
+    #[cfg(feature = "checksum")]
+    if let Err(err) = verify_decoded_checksum(&dst[start..], frame.decoded_checksum) {
+        dst.truncate(start);
+        return Err(err);
+    }
+    #[cfg(not(feature = "checksum"))]
+    let _ = frame.decoded_checksum;
+    Ok(written)
 }
 
 #[cfg(feature = "zstd")]
