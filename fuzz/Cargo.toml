@@ -96,3 +96,10 @@ path = "fuzz_targets/decode_transpose_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_zigzag_node"
+path = "fuzz_targets/decode_zigzag_node.rs"
+test = false
+doc = false
+bench = false

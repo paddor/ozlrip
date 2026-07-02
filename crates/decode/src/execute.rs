@@ -138,6 +138,9 @@ fn decode_simple_transform_chunk(
         Some(standard::CONVERT_SERIAL_TO_STRUCT_ID) => {
             decode_convert_serial_to_struct_chunk(stored, header, limits).map(DecodedChunk::Owned)
         }
+        Some(standard::ZIGZAG_ID) => {
+            decode_zigzag_serial8_chunk(stored, header, limits).map(DecodedChunk::Owned)
+        }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transform graph execution is not implemented yet")),
     }
@@ -587,6 +590,27 @@ fn decode_convert_serial_to_struct_chunk(
     Ok(output)
 }
 
+fn decode_zigzag_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("zigzag transform headers are unsupported"));
+    }
+    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("zigzag allocation failed")
+    })?;
+    for &encoded in stored {
+        let mask = 0u8.wrapping_sub(encoded & 1);
+        output.push((encoded >> 1) ^ mask);
+    }
+    Ok(output)
+}
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -920,6 +944,10 @@ mod tests {
         standard_transform_serial_frame(21, 44, &[value], count, &header)
     }
 
+    fn zigzag_serial_frame(stored: &[u8]) -> Vec<u8> {
+        standard_transform_serial_frame(21, 3, stored, stored.len(), &[])
+    }
+
     fn flatpack_serial_frame(alphabet: &[u8], indexes: &[u8]) -> Vec<u8> {
         let packed = pack_flatpack_indexes(alphabet.len(), indexes);
         let mut input = Vec::new();
@@ -1230,6 +1258,47 @@ mod tests {
     #[test]
     fn rejects_constant_serial_output_limit_without_mutating_destination() {
         let input = constant_serial_frame(b'x', 6);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_zigzag_serial8_chunk() {
+        let input = zigzag_serial_frame(&[0, 1, 2, 3, 4, 5, 254, 255]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 8);
+        assert_eq!(output, [0, 255, 1, 254, 2, 253, 127, 128]);
+    }
+
+    #[test]
+    fn rejects_zigzag_header_without_mutating_destination() {
+        let input = standard_transform_serial_frame(21, 3, b"bytes", 5, &[0]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_zigzag_output_limit_without_mutating_destination() {
+        let input = zigzag_serial_frame(b"bytes");
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {
