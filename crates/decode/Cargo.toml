@@ -17,7 +17,7 @@ std = ["alloc", "ozlrip-core/std"]
 alloc = ["ozlrip-core/alloc"]
 zstd = ["std", "dep:zrip"]
 lz4 = ["std", "dep:lz4rip"]
-checksum = ["ozlrip-core/checksum"]
+checksum = ["ozlrip-core/checksum", "dep:xxhash-rust"]
 paranoid = ["ozlrip-core/paranoid"]
 dev-format = ["ozlrip-core/dev-format"]
 interop = ["std"]
@@ -26,6 +26,7 @@ interop = ["std"]
 ozlrip-core = { version = "0.0.0", path = "../core", default-features = false }
 zrip = { version = "0.8.1", path = "../../../zrip", default-features = false, features = ["std", "frame"], optional = true }
 lz4rip = { version = "0.9.3", path = "../../../lz4rip", default-features = false, features = ["std", "frame"], optional = true }
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 
 [dev-dependencies]
 ozlrip = { path = "../..", default-features = false, features = ["alloc"] }

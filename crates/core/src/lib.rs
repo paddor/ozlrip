@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -139,12 +140,26 @@ impl Default for Limits {
 pub struct FrameInfo {
     pub format_version: u32,
     pub frame_bytes: usize,
+    pub header_bytes: usize,
     pub decoded_bytes: Option<usize>,
     pub chunks: usize,
     pub inputs: usize,
+    pub output_types: Vec<FrameValueType>,
+    pub output_sizes: Vec<Option<u64>>,
+    pub output_elements: Vec<Option<u64>>,
     pub transforms: usize,
     pub stored_streams: usize,
     pub regenerated_streams: usize,
-    pub has_checksum: bool,
-    pub dictionary_bundle_id: Option<alloc::vec::Vec<u8>>,
+    pub has_decoded_checksum: bool,
+    pub has_encoded_checksum: bool,
+    pub has_comment: bool,
+    pub dictionary_bundle_id: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameValueType {
+    Serial,
+    Struct,
+    Numeric,
+    String,
 }
