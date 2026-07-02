@@ -498,7 +498,7 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
     let mut stored_streams = 0usize;
     let mut regenerated_streams = 0usize;
     for chunk in &plan.chunks {
-        validate_chunk_plan(chunk)?;
+        validate_chunk_plan(chunk, plan.info.output_types.len())?;
         transforms = checked_add(transforms, chunk.transforms())?;
         stored_streams = checked_add(stored_streams, chunk.stored_streams())?;
         regenerated_streams = checked_add(regenerated_streams, chunk.regenerated_streams())?;
@@ -514,8 +514,14 @@ fn validate_frame_plan(plan: &FramePlan) -> Result<()> {
     Ok(())
 }
 
-fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
+fn validate_chunk_plan(chunk: &ChunkPlan, output_count: usize) -> Result<()> {
     let stream_bound = checked_add(chunk.regenerated_streams(), chunk.stored_streams())?;
+    if output_count > stream_bound {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("chunk has fewer streams than final outputs"));
+    }
+    let first_final_stream = stream_bound.saturating_sub(output_count);
+    let mut stream_cursor = 0usize;
     let mut header_end = 0usize;
     let mut regenerated = 0usize;
     let mut regen_targets = Vec::new();
@@ -529,18 +535,24 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("standard transform ID is outside the OpenZL range"));
         }
-        validate_known_standard_node_shape(node)?;
+        let shape = validate_known_standard_node_shape(node)?;
         if node.transform_header_start != header_end {
             return Err(Error::new(ErrorKind::InvalidGraph).with_detail("transform header gap"));
         }
         header_end = checked_add(node.transform_header_start, node.transform_header_size)?;
-        if usize::try_from(node.variable_outputs)
-            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?
-            > stream_bound
-        {
+        let variable_inputs = usize::try_from(node.variable_outputs)
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+        if variable_inputs > 0 && !shape.allows_variable_inputs {
             return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("node input count is out of bounds"));
+                .with_detail("node has unexpected variable inputs"));
         }
+        let input_count = checked_add(shape.static_inputs, variable_inputs)?;
+        let input_end = checked_add(stream_cursor, input_count)?;
+        if input_end > first_final_stream {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("node input range reaches final output streams"));
+        }
+        validate_node_output_count(node, shape)?;
         if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("custom transform dictionaries are unsupported"));
@@ -548,17 +560,19 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
         for &distance in &node.regen_distances {
             let distance =
                 usize::try_from(distance).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-            if distance >= stream_bound {
+            let target = checked_add(input_end, distance)?;
+            if target >= stream_bound {
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("regen stream distance is out of bounds"));
             }
-            if regen_targets[distance] {
+            if regen_targets[target] {
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("duplicate regen stream distance"));
             }
-            regen_targets[distance] = true;
+            regen_targets[target] = true;
             regenerated = checked_add(regenerated, 1)?;
         }
+        stream_cursor = input_end;
     }
     if header_end != chunk.transform_header_bytes {
         return Err(
@@ -594,22 +608,98 @@ fn validate_chunk_plan(chunk: &ChunkPlan) -> Result<()> {
         }
         expected_start = checked_add(range.start, range.len)?;
     }
-    Ok(())
-}
-
-fn validate_known_standard_node_shape(node: &NodePlan) -> Result<()> {
-    if node.standard_id() == Some(standard::LZ4_ID) || node.standard_id() == Some(standard::ZSTD_ID)
+    if stream_bound > 0
+        && !regen_targets[first_final_stream..]
+            .iter()
+            .all(|&produced| produced)
     {
-        if node.variable_outputs != 0 {
+        let stored_final_outputs = regen_targets[first_final_stream..]
+            .iter()
+            .filter(|&&produced| !produced)
+            .count();
+        if stored_final_outputs > chunk.stored_streams() {
             return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("codec node has unexpected variable inputs"));
-        }
-        if node.regen_distances.len() != 1 {
-            return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("codec node has unexpected output count"));
+                .with_detail("final output stream is not produced"));
         }
     }
     Ok(())
+}
+
+fn validate_known_standard_node_shape(node: &NodePlan) -> Result<StandardNodeShape> {
+    let Some(id) = node.standard_id() else {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("custom OpenZL transforms are not implemented"));
+    };
+    let shape = standard_node_shape(id).ok_or_else(|| {
+        Error::new(ErrorKind::Unsupported)
+            .with_detail("standard transform graph shape is unsupported")
+    })?;
+    Ok(shape)
+}
+
+fn validate_node_output_count(node: &NodePlan, shape: StandardNodeShape) -> Result<()> {
+    if node.regen_distances.len() < shape.min_outputs {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("node has too few output streams")
+        );
+    }
+    if let Some(max_outputs) = shape.max_outputs
+        && node.regen_distances.len() > max_outputs
+    {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("node has too many output streams")
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct StandardNodeShape {
+    static_inputs: usize,
+    allows_variable_inputs: bool,
+    min_outputs: usize,
+    max_outputs: Option<usize>,
+}
+
+const fn fixed_shape(static_inputs: usize, outputs: usize) -> StandardNodeShape {
+    StandardNodeShape {
+        static_inputs,
+        allows_variable_inputs: false,
+        min_outputs: outputs,
+        max_outputs: Some(outputs),
+    }
+}
+
+const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
+    match id {
+        standard::DELTA_INT_ID
+        | standard::ZIGZAG_ID
+        | standard::CONVERT_SERIAL_TO_STRUCT_ID
+        | standard::ZSTD_ID
+        | standard::BITPACK_SERIAL_ID
+        | standard::BITUNPACK_ID
+        | standard::RANGE_PACK_ID
+        | standard::CONSTANT_SERIAL_ID
+        | standard::LZ4_ID => Some(fixed_shape(1, 1)),
+        standard::FLATPACK_ID | standard::TRANSPOSE_SPLIT2_ID | standard::SPARSE_NUM_ID => {
+            Some(fixed_shape(2, 1))
+        }
+        standard::TRANSPOSE_SPLIT4_ID => Some(fixed_shape(4, 1)),
+        standard::TRANSPOSE_SPLIT8_ID => Some(fixed_shape(8, 1)),
+        standard::SPLITN_ID => Some(StandardNodeShape {
+            static_inputs: 0,
+            allows_variable_inputs: true,
+            min_outputs: 1,
+            max_outputs: Some(1),
+        }),
+        standard::CONCAT_SERIAL_ID => Some(StandardNodeShape {
+            static_inputs: 2,
+            allows_variable_inputs: false,
+            min_outputs: 1,
+            max_outputs: None,
+        }),
+        _ => None,
+    }
 }
 
 fn read_chunk_header(
@@ -1529,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_v21_empty_chunk() {
+    fn rejects_v21_empty_chunk_without_final_stream() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));
         input.push(0);
@@ -1539,13 +1629,9 @@ mod tests {
         input.push(0);
         input.push(0);
 
-        let info = inspect_frame(&input, Limits::default()).unwrap();
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
 
-        assert_eq!(info.header_bytes, 7);
-        assert_eq!(info.chunks, 1);
-        assert_eq!(info.transforms, 0);
-        assert_eq!(info.stored_streams, 0);
-        assert_eq!(info.regenerated_streams, 0);
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
     }
 
     #[test]
@@ -1624,14 +1710,15 @@ mod tests {
         input.push(1);
         input.push(4);
         input.push(2);
-        input.push(1);
+        input.push(2);
         input.push(0);
         input.push(66);
         input.push(0);
         input.push(0);
         input.push(0);
         input.push(0);
-        input.push(3);
+        input.push(1);
+        input.push(2);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
 
@@ -1701,12 +1788,37 @@ mod tests {
         input.push(1);
         input.push(4);
         input.push(2);
+        input.push(2);
+        push_bitpacked_u32(&mut input, &[0], 1);
+        push_bitpacked_u32(&mut input, &[55], 6);
+        push_bitpacked_u32(&mut input, &[0], 1);
+        push_bitpacked_u32(&mut input, &[0], 1);
+        push_bitpacked_u32(&mut input, &[1], 1);
+        input.push(0);
+        push_bitpacked_u32(&mut input, &[0, 0], 2);
+        input.push(1);
+        input.push(2);
+        input.extend_from_slice(&[1, 2, 3]);
+        input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    }
+
+    #[test]
+    fn rejects_node_inputs_reaching_final_streams() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
         input.push(1);
         input.push(0);
-        input.push(22);
+        input.push(29);
         input.push(0);
         input.push(0);
-        input.push(1);
         input.push(0);
         input.push(0);
         input.push(3);
@@ -1732,7 +1844,7 @@ mod tests {
         push_bitpacked_u32(&mut input, &[0, 0], 1);
         push_bitpacked_u32(&mut input, &[0, 0], 1);
         push_bitpacked_u32(&mut input, &[0, 0], 1);
-        push_bitpacked_u32(&mut input, &[0, 0], 2);
+        push_bitpacked_u32(&mut input, &[1, 0], 2);
         input.push(3);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
