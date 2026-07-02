@@ -1280,6 +1280,10 @@ impl<'a> Reader<'a> {
         for index in 0..10 {
             let byte = self.read_byte()?;
             let payload = u64::from(byte & 0x7f);
+            if index == 9 && payload > 1 {
+                return Err(Error::at(ErrorKind::IntegerOverflow, start)
+                    .with_detail("u64 varint payload overflows"));
+            }
             let shift = checked_mul(index, 7)?;
             let shifted = payload
                 .checked_shl(
@@ -1318,6 +1322,20 @@ mod tests {
         let err = inspect_frame(b"not-openzl", Limits::default()).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(err.offset(), Some(0));
+    }
+
+    #[test]
+    fn rejects_overflowing_u64_varint() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.extend_from_slice(&[0xff; 9]);
+        input.push(0x02);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::IntegerOverflow);
     }
 
     #[test]
