@@ -6,7 +6,9 @@ use ozlrip::Limits;
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
-    let frame = convert_serial_to_struct_frame(data);
+    let (selector, payload) = data.split_first().map_or((0, data), |(&first, rest)| (first, rest));
+    let transform_id = if selector & 1 == 0 { 5 } else { 6 };
+    let frame = conversion_frame(transform_id, payload);
     let limits = Limits {
         max_frame_bytes: 8192,
         max_decoded_bytes: 4096,
@@ -23,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = ozlrip::decode_into(&frame, &mut output, limits);
 });
 
-fn convert_serial_to_struct_frame(stored: &[u8]) -> Vec<u8> {
+fn conversion_frame(transform_id: u8, stored: &[u8]) -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&(MAGIC_BASE + 21).to_le_bytes());
     input.push(0);
@@ -32,7 +34,7 @@ fn convert_serial_to_struct_frame(stored: &[u8]) -> Vec<u8> {
     input.push(2);
     input.push(1);
     input.push(0);
-    input.push(5);
+    input.push(transform_id);
     input.push(0);
     input.push(0);
     input.push(0);
