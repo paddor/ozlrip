@@ -3,10 +3,13 @@ use std::{
     fs,
     hint::black_box,
     io::Write,
+    os::raw::c_void,
     path::PathBuf,
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use rust_openzl_sys as sys;
 
 const DEFAULT_TARGET_MS: u64 = 100;
 const ROUNDS: usize = 7;
@@ -15,6 +18,10 @@ const WARMUP: usize = 3;
 const OZLRIP_IMPL: &str = "ozlrip-no-checksum";
 #[cfg(not(feature = "no-checksum"))]
 const OZLRIP_IMPL: &str = "ozlrip";
+#[cfg(feature = "no-checksum")]
+const OPENZL_C_IMPL: &str = "openzl-c-ffi-no-checksum";
+#[cfg(not(feature = "no-checksum"))]
+const OPENZL_C_IMPL: &str = "openzl-c-ffi";
 
 fn main() {
     let target = Duration::from_millis(
@@ -45,7 +52,7 @@ fn main() {
 
         if impl_filter
             .as_deref()
-            .is_none_or(|filter| filter == "openzl-c-ffi")
+            .is_none_or(|filter| filter == OPENZL_C_IMPL)
         {
             let c = bench_openzl_c_ffi(case, target);
             let relative = ozlrip_mbps.map(|base| base / c.decode_mbps);
@@ -108,12 +115,68 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
 }
 
 fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
+    let mut decoder = OpenZlCDecoder::new(case.input_size);
     let decode_ns = bench_loop(target, || {
-        let decoded =
-            rust_openzl::decompress_serial(black_box(&case.frame)).expect("openzl-c-ffi decode");
-        black_box(decoded);
+        decoder.decode(black_box(&case.frame));
+        black_box(&decoder.dst);
     });
-    BenchResult::new("openzl-c-ffi", case, decode_ns)
+    BenchResult::new(OPENZL_C_IMPL, case, decode_ns)
+}
+
+struct OpenZlCDecoder {
+    dctx: *mut sys::ZL_DCtx,
+    dst: Vec<u8>,
+}
+
+impl OpenZlCDecoder {
+    fn new(output_size: usize) -> Self {
+        let dctx = unsafe { sys::ZL_DCtx_create() };
+        assert!(!dctx.is_null(), "ZL_DCtx_create returned null");
+        #[cfg(feature = "no-checksum")]
+        {
+            set_dparam(dctx, sys::ZL_DParam::ZL_DParam_stickyParameters, 1);
+            set_dparam(
+                dctx,
+                sys::ZL_DParam::ZL_DParam_checkCompressedChecksum,
+                sys::ZL_TernaryParam::ZL_TernaryParam_disable as i32,
+            );
+            set_dparam(
+                dctx,
+                sys::ZL_DParam::ZL_DParam_checkContentChecksum,
+                sys::ZL_TernaryParam::ZL_TernaryParam_disable as i32,
+            );
+        }
+        Self {
+            dctx,
+            dst: vec![0; output_size],
+        }
+    }
+
+    fn decode(&mut self, frame: &[u8]) {
+        let report = unsafe {
+            sys::ZL_DCtx_decompress(
+                self.dctx,
+                self.dst.as_mut_ptr().cast::<c_void>(),
+                self.dst.len(),
+                frame.as_ptr().cast::<c_void>(),
+                frame.len(),
+            )
+        };
+        assert!(!sys::report_is_error(report), "openzl-c-ffi decode failed");
+        assert_eq!(sys::report_value(report), self.dst.len());
+    }
+}
+
+impl Drop for OpenZlCDecoder {
+    fn drop(&mut self) {
+        unsafe { sys::ZL_DCtx_free(self.dctx) };
+    }
+}
+
+#[cfg(feature = "no-checksum")]
+fn set_dparam(dctx: *mut sys::ZL_DCtx, param: sys::ZL_DParam, value: i32) {
+    let report = unsafe { sys::ZL_DCtx_setParameter(dctx, param, value) };
+    assert!(!sys::report_is_error(report), "ZL_DCtx_setParameter failed");
 }
 
 fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> f64 {
@@ -196,16 +259,17 @@ impl BenchResult {
 fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
     if let Some(relative) = relative_to_c {
         println!(
-            "{:<12} {:<19} {:>9.1} MB/s {:>10.1} ns/decode {}/openzl-c-ffi={relative:.2}x",
+            "{:<12} {:<25} {:>9.1} MB/s {:>10.1} ns/decode {}/{}={relative:.2}x",
             result.input_name,
             result.impl_name,
             result.decode_mbps,
             result.decode_ns,
-            OZLRIP_IMPL
+            OZLRIP_IMPL,
+            OPENZL_C_IMPL
         );
     } else {
         println!(
-            "{:<12} {:<19} {:>9.1} MB/s {:>10.1} ns/decode",
+            "{:<12} {:<25} {:>9.1} MB/s {:>10.1} ns/decode",
             result.input_name, result.impl_name, result.decode_mbps, result.decode_ns
         );
     }
