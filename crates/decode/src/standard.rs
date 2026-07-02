@@ -21,6 +21,7 @@ pub(crate) const TRANSPOSE_SPLIT2_ID: u32 = 30;
 pub(crate) const TRANSPOSE_SPLIT4_ID: u32 = 31;
 pub(crate) const TRANSPOSE_SPLIT8_ID: u32 = 32;
 pub(crate) const SPARSE_NUM_ID: u32 = 66;
+pub(crate) const MUX_LENGTHS_ID: u32 = 65;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
     let Some(min_version) = min_version(id) else {

@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
 
@@ -269,7 +269,7 @@ fn decode_transform_chunk<'a>(
     for node in plan.nodes {
         let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        let output = execute_standard_node(
+        let outputs = execute_standard_node(
             node.standard_id,
             &inputs,
             node.variable_inputs,
@@ -278,22 +278,29 @@ fn decode_transform_chunk<'a>(
             #[cfg(feature = "zstd")]
             zstd,
         )?;
-        let target = streams.get_mut(node.output_target).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("node output target is out of bounds")
-        })?;
-        if !matches!(target, StreamSlot::Empty) {
+        if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("node output overwrites an existing stream"));
+                .with_detail("node output count does not match graph"));
         }
-        *target = StreamSlot::Owned(output);
+        for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
+            let target = streams.get_mut(output_target).ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("node output target is out of bounds")
+            })?;
+            if !matches!(target, StreamSlot::Empty) {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("node output overwrites an existing stream"));
+            }
+            *target = StreamSlot::Owned(output);
+        }
     }
 
     let final_index = streams.len().checked_sub(1).ok_or_else(|| {
         Error::new(ErrorKind::InvalidGraph).with_detail("transform chunk has no output stream")
     })?;
     match streams.swap_remove(final_index) {
-        StreamSlot::Borrowed(bytes) => Ok(DecodedChunk::Borrowed(bytes)),
-        StreamSlot::Owned(bytes) => Ok(DecodedChunk::Owned(bytes)),
+        StreamSlot::Borrowed(stream) => Ok(DecodedChunk::Borrowed(stream.bytes)),
+        StreamSlot::Owned(stream) => Ok(DecodedChunk::Owned(stream.bytes)),
         StreamSlot::Empty => {
             Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
         }
@@ -309,7 +316,7 @@ struct NodeExecutionPlan {
     standard_id: u32,
     input_start: usize,
     input_count: usize,
-    output_target: usize,
+    output_targets: Vec<usize>,
     variable_inputs: u32,
     header_start: usize,
     header_size: usize,
@@ -337,10 +344,6 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
         let standard_id = node.standard_id().ok_or_else(|| {
             Error::new(ErrorKind::Unsupported).with_detail("custom graph execution is unsupported")
         })?;
-        if node.regen_distances().len() != 1 {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("multi-output graph execution is unsupported"));
-        }
         let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
         })?;
@@ -348,27 +351,36 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
         let input_end = stream_cursor
             .checked_add(input_count)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let distance = usize::try_from(node.regen_distances()[0]).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("regen distance is too large")
-        })?;
-        let output_target = input_end
-            .checked_add(distance)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let target = regen_targets.get_mut(output_target).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph)
-                .with_detail("regen stream distance is out of bounds")
-        })?;
-        if *target {
-            return Err(
-                Error::new(ErrorKind::InvalidGraph).with_detail("duplicate regen stream distance")
-            );
+        let mut output_targets = Vec::new();
+        output_targets
+            .try_reserve_exact(node.regen_distances().len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("node output target allocation failed")
+            })?;
+        for &distance in node.regen_distances() {
+            let distance = usize::try_from(distance).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded).with_detail("regen distance is too large")
+            })?;
+            let output_target = input_end
+                .checked_add(distance)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let target = regen_targets.get_mut(output_target).ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("regen stream distance is out of bounds")
+            })?;
+            if *target {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("duplicate regen stream distance"));
+            }
+            *target = true;
+            output_targets.push(output_target);
         }
-        *target = true;
         nodes.push(NodeExecutionPlan {
             standard_id,
             input_start: stream_cursor,
             input_count,
-            output_target,
+            output_targets,
             variable_inputs: node.variable_outputs(),
             header_start: node.transform_header_start(),
             header_size: node.transform_header_size(),
@@ -385,7 +397,10 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
 fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
     let static_inputs: usize = match standard_id {
         standard::SPLITN_ID => 0,
-        standard::CONCAT_SERIAL_ID | standard::FLATPACK_ID | standard::TRANSPOSE_SPLIT2_ID => 2,
+        standard::CONCAT_SERIAL_ID
+        | standard::FLATPACK_ID
+        | standard::TRANSPOSE_SPLIT2_ID
+        | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID => 4,
         standard::TRANSPOSE_SPLIT8_ID => 8,
         standard::LZ4_ID
@@ -433,7 +448,10 @@ fn initialize_stream_slots<'a>(
         let range = chunk.stored_stream_range(stored_index).ok_or_else(|| {
             Error::new(ErrorKind::InvalidGraph).with_detail("stored stream slot is missing")
         })?;
-        streams[stream_index] = StreamSlot::Borrowed(range.as_slice(input)?);
+        streams[stream_index] = StreamSlot::Borrowed(BorrowedStream {
+            bytes: range.as_slice(input)?,
+            element_width: 1,
+        });
         stored_index = stored_index
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -449,7 +467,7 @@ fn collect_node_inputs<'a>(
     streams: &'a [StreamSlot<'a>],
     input_start: usize,
     input_count: usize,
-) -> Result<Vec<&'a [u8]>> {
+) -> Result<Vec<StreamInput<'a>>> {
     let input_end = input_start
         .checked_add(input_count)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -461,7 +479,7 @@ fn collect_node_inputs<'a>(
         Error::new(ErrorKind::LimitExceeded).with_detail("node input allocation failed")
     })?;
     for slot in input_slots {
-        inputs.push(slot.as_slice()?);
+        inputs.push(slot.as_input()?);
     }
     Ok(inputs)
 }
@@ -477,60 +495,101 @@ fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[u8]> {
 
 fn execute_standard_node(
     standard_id: u32,
-    inputs: &[&[u8]],
+    inputs: &[StreamInput<'_>],
     variable_inputs: u32,
     header: &[u8],
     limits: Limits,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<OwnedStream>> {
     match standard_id {
-        standard::CONCAT_SERIAL_ID => decode_concat_serial_node(inputs, header, limits),
-        standard::SPLITN_ID => decode_splitn_node(inputs, variable_inputs, header, limits),
-        standard::FLATPACK_ID => decode_flatpack_node(inputs, header, limits),
-        id if transpose_split_width(Some(id)).is_some() => {
-            decode_transpose_split_node(inputs, header, limits)
+        standard::CONCAT_SERIAL_ID => one_serial(decode_concat_serial_node(inputs, header, limits)),
+        standard::SPLITN_ID => {
+            one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
         }
-        standard::LZ4_ID => decode_lz4_chunk(single_input(inputs)?, header, limits),
-        standard::ZSTD_ID => decode_zstd_chunk(
+        standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, limits)),
+        id if transpose_split_width(Some(id)).is_some() => {
+            one_serial(decode_transpose_split_node(inputs, header, limits))
+        }
+        standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, limits)),
+        standard::ZSTD_ID => one_serial(decode_zstd_chunk(
             single_input(inputs)?,
             header,
             limits,
             #[cfg(feature = "zstd")]
             zstd,
+        )),
+        standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::BITPACK_INT_ID => one_typed(decode_bitpack_int_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::CONSTANT_SERIAL_ID => one_serial(decode_constant_serial_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID => one_typed(
+            decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, limits),
         ),
-        standard::BITPACK_SERIAL_ID => {
-            decode_bitpack_serial_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::BITPACK_INT_ID => decode_bitpack_int_chunk(single_input(inputs)?, header, limits),
-        standard::CONSTANT_SERIAL_ID => {
-            decode_constant_serial_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::CONVERT_SERIAL_TO_STRUCT_ID | standard::CONVERT_STRUCT_TO_SERIAL_ID => {
-            decode_byte_preserving_conversion_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
-            decode_num_to_struct_le_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::CONVERT_SERIAL_TO_NUM_LE_ID => {
-            decode_serial_to_num_le_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::CONVERT_NUM_TO_SERIAL_LE_ID => {
-            decode_num_to_serial_le_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::ZIGZAG_ID => decode_zigzag_serial8_chunk(single_input(inputs)?, header, limits),
-        standard::DELTA_INT_ID => decode_delta_serial8_chunk(single_input(inputs)?, header, limits),
-        standard::BITUNPACK_ID => {
-            decode_bitunpack_serial8_chunk(single_input(inputs)?, header, limits)
-        }
-        standard::RANGE_PACK_ID => {
-            decode_range_pack_serial8_chunk(single_input(inputs)?, header, limits)
-        }
+        standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(decode_num_to_struct_le_chunk(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
+        standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_typed(decode_serial_to_num_le_chunk(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
+        standard::CONVERT_NUM_TO_SERIAL_LE_ID => one_serial(decode_num_to_serial_le_chunk(
+            single_stream(inputs)?,
+            header,
+            limits,
+        )),
+        standard::MUX_LENGTHS_ID => decode_mux_lengths_node(inputs, header, limits),
+        standard::ZIGZAG_ID => one_serial(decode_zigzag_serial8_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::DELTA_INT_ID => one_serial(decode_delta_serial8_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
+        standard::RANGE_PACK_ID => one_serial(decode_range_pack_serial8_chunk(
+            single_input(inputs)?,
+            header,
+            limits,
+        )),
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform graph execution is not implemented yet")),
     }
 }
 
-fn single_input<'a>(inputs: &[&'a [u8]]) -> Result<&'a [u8]> {
+fn one_serial(result: Result<Vec<u8>>) -> Result<Vec<OwnedStream>> {
+    Ok(vec![OwnedStream::serial(result?)])
+}
+
+fn one_typed(result: Result<OwnedStream>) -> Result<Vec<OwnedStream>> {
+    Ok(vec![result?])
+}
+
+fn single_input<'a>(inputs: &[StreamInput<'a>]) -> Result<&'a [u8]> {
+    Ok(single_stream(inputs)?.bytes)
+}
+
+fn single_stream<'a>(inputs: &[StreamInput<'a>]) -> Result<StreamInput<'a>> {
     match inputs {
         [input] => Ok(*input),
         _ => Err(Error::new(ErrorKind::InvalidGraph)
@@ -540,15 +599,21 @@ fn single_input<'a>(inputs: &[&'a [u8]]) -> Result<&'a [u8]> {
 
 enum StreamSlot<'a> {
     Empty,
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
+    Borrowed(BorrowedStream<'a>),
+    Owned(OwnedStream),
 }
 
 impl<'a> StreamSlot<'a> {
-    fn as_slice(&'a self) -> Result<&'a [u8]> {
+    fn as_input(&'a self) -> Result<StreamInput<'a>> {
         match self {
-            Self::Borrowed(bytes) => Ok(bytes),
-            Self::Owned(bytes) => Ok(bytes),
+            Self::Borrowed(stream) => Ok(StreamInput {
+                bytes: stream.bytes,
+                element_width: stream.element_width,
+            }),
+            Self::Owned(stream) => Ok(StreamInput {
+                bytes: &stream.bytes,
+                element_width: stream.element_width,
+            }),
             Self::Empty => {
                 Err(Error::new(ErrorKind::InvalidGraph).with_detail("node input stream is missing"))
             }
@@ -556,7 +621,38 @@ impl<'a> StreamSlot<'a> {
     }
 }
 
-fn decode_concat_serial_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+#[derive(Clone, Copy)]
+struct BorrowedStream<'a> {
+    bytes: &'a [u8],
+    element_width: usize,
+}
+
+#[derive(Clone, Copy)]
+struct StreamInput<'a> {
+    bytes: &'a [u8],
+    element_width: usize,
+}
+
+#[derive(Debug)]
+struct OwnedStream {
+    bytes: Vec<u8>,
+    element_width: usize,
+}
+
+impl OwnedStream {
+    fn serial(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            element_width: 1,
+        }
+    }
+}
+
+fn decode_concat_serial_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("concat_serial transform headers are unsupported"));
@@ -565,8 +661,8 @@ fn decode_concat_serial_node(inputs: &[&[u8]], header: &[u8], limits: Limits) ->
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("concat_serial input count does not match node shape"));
     };
-    let sizes = *sizes;
-    let concatenated = *concatenated;
+    let sizes = sizes.bytes;
+    let concatenated = concatenated.bytes;
     if sizes.len() != 4 {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("concat_serial size table is malformed")
@@ -607,7 +703,11 @@ fn transpose_split_width(id: Option<u32>) -> Option<usize> {
     }
 }
 
-fn decode_transpose_split_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_transpose_split_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("transpose_split transform headers are unsupported"));
@@ -617,7 +717,7 @@ fn decode_transpose_split_node(inputs: &[&[u8]], header: &[u8], limits: Limits) 
             .with_detail("transpose_split input count does not match width"));
     };
     let width = inputs.len();
-    let lane_len = first.len();
+    let lane_len = first.bytes.len();
     let output_len = lane_len.checked_mul(width).ok_or_else(|| {
         Error::new(ErrorKind::IntegerOverflow).with_detail("transpose size overflowed")
     })?;
@@ -627,7 +727,7 @@ fn decode_transpose_split_node(inputs: &[&[u8]], header: &[u8], limits: Limits) 
         );
     }
     for lane in inputs {
-        if lane.len() != lane_len {
+        if lane.bytes.len() != lane_len {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("transpose_split lanes have different sizes"));
         }
@@ -638,13 +738,17 @@ fn decode_transpose_split_node(inputs: &[&[u8]], header: &[u8], limits: Limits) 
     })?;
     for element in 0..lane_len {
         for lane in inputs {
-            output.push(lane[element]);
+            output.push(lane.bytes[element]);
         }
     }
     Ok(output)
 }
 
-fn decode_flatpack_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_flatpack_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("flatpack transform headers are unsupported"));
@@ -653,7 +757,7 @@ fn decode_flatpack_node(inputs: &[&[u8]], header: &[u8], limits: Limits) -> Resu
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("flatpack input count does not match node shape"));
     };
-    decode_flatpack_serial(alphabet, packed, limits)
+    decode_flatpack_serial(alphabet.bytes, packed.bytes, limits)
 }
 
 fn decode_flatpack_serial(alphabet: &[u8], packed: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -738,7 +842,7 @@ fn flatpack_output_len(bits: usize, packed: &[u8]) -> Result<usize> {
 }
 
 fn decode_splitn_node(
-    inputs: &[&[u8]],
+    inputs: &[StreamInput<'_>],
     variable_inputs: u32,
     header: &[u8],
     limits: Limits,
@@ -761,7 +865,7 @@ fn decode_splitn_node(
 
     let mut total_len = 0usize;
     for input in inputs {
-        total_len = total_len.checked_add(input.len()).ok_or_else(|| {
+        total_len = total_len.checked_add(input.bytes.len()).ok_or_else(|| {
             Error::new(ErrorKind::IntegerOverflow).with_detail("splitn size overflowed")
         })?;
     }
@@ -776,7 +880,7 @@ fn decode_splitn_node(
         Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
     })?;
     for input in inputs {
-        output.extend_from_slice(input);
+        output.extend_from_slice(input.bytes);
     }
     Ok(output)
 }
@@ -797,6 +901,142 @@ fn validate_splitn_empty_header(header: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn decode_mux_lengths_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<OwnedStream>> {
+    let [muxed_lengths, long_lengths] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("mux_lengths input count does not match node shape"));
+    };
+    let [header_byte] = header else {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("mux_lengths header is malformed"));
+    };
+    if muxed_lengths.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("mux_lengths muxed input must be serial bytes"));
+    }
+    let element_width = long_lengths.element_width;
+    if !matches!(element_width, 1 | 2 | 4 | 8) {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("mux_lengths long-length width is unsupported"));
+    }
+    if !long_lengths.bytes.len().is_multiple_of(element_width) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("mux_lengths long-length stream has partial element"));
+    }
+    let split_point = usize::from(header_byte & 0x0f);
+    if split_point > 8 {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("mux_lengths split point is invalid")
+        );
+    }
+    let match_length_bias = u64::from(header_byte >> 4);
+    let ll_mask = if split_point == 64 {
+        u64::MAX
+    } else {
+        (1u64 << split_point) - 1
+    };
+    let ml_mask = (1u64 << (8 - split_point)) - 1;
+    let ml_max = match_length_bias
+        .checked_add(ml_mask)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let output_len = muxed_lengths
+        .bytes
+        .len()
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut literal_lengths = Vec::new();
+    literal_lengths.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+    })?;
+    literal_lengths.resize(output_len, 0);
+    let mut match_lengths = Vec::new();
+    match_lengths.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+    })?;
+    match_lengths.resize(output_len, 0);
+
+    let mut long_pos = 0usize;
+    let long_count = long_lengths.bytes.len() / element_width;
+    for (index, &mux) in muxed_lengths.bytes.iter().enumerate() {
+        let mux = u64::from(mux);
+        let mut literal = mux & ll_mask;
+        let mut matched = match_length_bias + (mux >> split_point);
+
+        if literal == ll_mask {
+            literal = literal.wrapping_add(read_numeric_element(
+                long_lengths.bytes,
+                element_width,
+                long_pos,
+            )?);
+            long_pos = checked_next_long_pos(long_pos, long_count)?;
+        }
+        if matched == ml_max {
+            matched = matched.wrapping_add(read_numeric_element(
+                long_lengths.bytes,
+                element_width,
+                long_pos,
+            )?);
+            long_pos = checked_next_long_pos(long_pos, long_count)?;
+        }
+
+        let offset = index
+            .checked_mul(element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        write_numeric_element(&mut literal_lengths[offset..], element_width, literal);
+        write_numeric_element(&mut match_lengths[offset..], element_width, matched);
+    }
+    if long_pos != long_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("mux_lengths long-length stream was not fully consumed"));
+    }
+
+    Ok(vec![
+        OwnedStream {
+            bytes: literal_lengths,
+            element_width,
+        },
+        OwnedStream {
+            bytes: match_lengths,
+            element_width,
+        },
+    ])
+}
+
+fn checked_next_long_pos(long_pos: usize, long_count: usize) -> Result<usize> {
+    if long_pos >= long_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("mux_lengths long-length stream is exhausted"));
+    }
+    long_pos
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn read_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<u64> {
+    let start = index
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let element = bytes.get(start..start + element_width).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("numeric stream is truncated")
+    })?;
+    let mut value = [0u8; 8];
+    value[..element_width].copy_from_slice(element);
+    Ok(u64::from_le_bytes(value))
+}
+
+fn write_numeric_element(dst: &mut [u8], element_width: usize, value: u64) {
+    dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]);
+}
+
 fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let parsed = parse_bitpack_header(header, stored.len())?;
     if parsed.element_width != 1 {
@@ -806,9 +1046,13 @@ fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> 
     decode_bitpack_chunk(stored, parsed, limits)
 }
 
-fn decode_bitpack_int_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_bitpack_int_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<OwnedStream> {
     let parsed = parse_bitpack_header(header, stored.len())?;
-    decode_bitpack_chunk(stored, parsed, limits)
+    let element_width = parsed.element_width;
+    Ok(OwnedStream {
+        bytes: decode_bitpack_chunk(stored, parsed, limits)?,
+        element_width,
+    })
 }
 
 fn decode_bitpack_chunk(stored: &[u8], parsed: BitpackHeader, limits: Limits) -> Result<Vec<u8>> {
@@ -938,35 +1182,47 @@ fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) ->
 }
 
 fn decode_byte_preserving_conversion_chunk(
-    stored: &[u8],
+    stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
-) -> Result<Vec<u8>> {
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(
             Error::new(ErrorKind::Unsupported).with_detail("conversion headers are unsupported")
         );
     }
-    copy_byte_preserving_conversion(stored, limits)
+    copy_byte_preserving_conversion(stored, stored.element_width, limits)
 }
 
-fn decode_num_to_struct_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_num_to_struct_le_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("convert_num_to_struct_le headers are unsupported"));
     }
-    copy_byte_preserving_conversion(stored, limits)
+    copy_byte_preserving_conversion(stored, stored.element_width, limits)
 }
 
-fn decode_serial_to_num_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_serial_to_num_le_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("convert_serial_to_num_le headers are unsupported"));
     }
-    copy_byte_preserving_conversion(stored, limits)
+    copy_byte_preserving_conversion(stored, stored.element_width, limits)
 }
 
-fn decode_num_to_serial_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_num_to_serial_le_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
     let [int_log] = header else {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("convert_num_to_serial_le header is malformed"));
@@ -978,25 +1234,33 @@ fn decode_num_to_serial_le_chunk(stored: &[u8], header: &[u8], limits: Limits) -
     let int_size = 1usize
         .checked_shl(u32::from(*int_log))
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if !stored.len().is_multiple_of(int_size) {
+    if !stored.bytes.len().is_multiple_of(int_size) {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("numeric stream size is not a multiple of integer width"));
     }
-    copy_byte_preserving_conversion(stored, limits)
+    Ok(copy_byte_preserving_conversion(stored, 1, limits)?.bytes)
 }
 
-fn copy_byte_preserving_conversion(stored: &[u8], limits: Limits) -> Result<Vec<u8>> {
-    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
+fn copy_byte_preserving_conversion(
+    stored: StreamInput<'_>,
+    element_width: usize,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
     let mut output = Vec::new();
-    output.try_reserve_exact(stored.len()).map_err(|_| {
+    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
     })?;
-    output.extend_from_slice(stored);
-    Ok(output)
+    output.extend_from_slice(stored.bytes);
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+    })
 }
 
 fn decode_zigzag_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -1697,6 +1961,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::FLATPACK_ID,
+            standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -1722,6 +1987,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
             standard::FLATPACK_ID,
+            standard::MUX_LENGTHS_ID,
             standard::RANGE_PACK_ID,
             standard::SPLITN_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -1908,6 +2174,80 @@ mod tests {
 
         assert_eq!(written, 10);
         assert_eq!(output, [0, 0, 1, 0, 255, 0, 0, 1, 255, 3]);
+    }
+
+    #[test]
+    fn decodes_mux_lengths_inline_u16() {
+        let muxed = [0x21];
+        let long = [];
+        let outputs = decode_mux_lengths_node(
+            &[
+                StreamInput {
+                    bytes: &muxed,
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &long,
+                    element_width: 2,
+                },
+            ],
+            &[0x24],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].bytes, [1, 0]);
+        assert_eq!(outputs[1].bytes, [4, 0]);
+        assert_eq!(outputs[0].element_width, 2);
+        assert_eq!(outputs[1].element_width, 2);
+    }
+
+    #[test]
+    fn decodes_mux_lengths_overflow_u16() {
+        let muxed = [0xff];
+        let long = [5, 0, 2, 0];
+        let outputs = decode_mux_lengths_node(
+            &[
+                StreamInput {
+                    bytes: &muxed,
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &long,
+                    element_width: 2,
+                },
+            ],
+            &[0x24],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outputs[0].bytes, [20, 0]);
+        assert_eq!(outputs[1].bytes, [19, 0]);
+    }
+
+    #[test]
+    fn rejects_mux_lengths_exhausted_long_stream() {
+        let muxed = [0xff];
+        let long = [5, 0];
+        let err = decode_mux_lengths_node(
+            &[
+                StreamInput {
+                    bytes: &muxed,
+                    element_width: 1,
+                },
+                StreamInput {
+                    bytes: &long,
+                    element_width: 2,
+                },
+            ],
+            &[0x24],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 
     #[test]
