@@ -103,6 +103,9 @@ fn decode_simple_transform_chunk(
     if node.standard_id() == Some(standard::SPLITN_ID) {
         return decode_splitn_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
     }
+    if node.standard_id() == Some(standard::FLATPACK_ID) {
+        return decode_flatpack_chunk(input, chunk, node, limits).map(DecodedChunk::Owned);
+    }
     if node.variable_outputs() != 0 || node.regen_distances() != [0] {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only single-input single-output transform chunks are implemented"));
@@ -195,6 +198,118 @@ fn decode_concat_serial_chunk(
     })?;
     output.extend_from_slice(concatenated_range.as_slice(input)?);
     Ok(output)
+}
+
+fn decode_flatpack_chunk(
+    input: &[u8],
+    chunk: &crate::parse::ChunkPlan,
+    node: &crate::parse::NodePlan,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if node.variable_outputs() != 0 || node.regen_distances() != [0] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single-output flatpack chunks are implemented"));
+    }
+    if chunk.transform_header_range().len() != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("flatpack transform headers are unsupported"));
+    }
+    if chunk.stored_streams() != 2 {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("flatpack input count does not match stored streams"));
+    }
+    let alphabet = chunk
+        .stored_stream_range(0)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("missing flatpack alphabet")
+        })?
+        .as_slice(input)?;
+    let packed = chunk
+        .stored_stream_range(1)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("missing flatpack input"))?
+        .as_slice(input)?;
+    decode_flatpack_serial(alphabet, packed, limits)
+}
+
+fn decode_flatpack_serial(alphabet: &[u8], packed: &[u8], limits: Limits) -> Result<Vec<u8>> {
+    if alphabet.len() > 256 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("flatpack alphabet is too large"));
+    }
+    if alphabet.is_empty() || packed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bits = flatpack_bits(alphabet.len());
+    let output_len = flatpack_output_len(bits, packed)?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("flatpack allocation failed")
+    })?;
+
+    let mask = (1usize << bits) - 1;
+    let mut packed_index = 0usize;
+    let mut available_bits = 0usize;
+    let mut state = 0usize;
+    while output.len() < output_len {
+        if available_bits < bits {
+            let byte = *packed.get(packed_index).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("flatpack input is truncated")
+            })?;
+            packed_index += 1;
+            state |= usize::from(byte) << available_bits;
+            available_bits += 8;
+        }
+        let symbol_index = state & mask;
+        let symbol = *alphabet.get(symbol_index).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("flatpack symbol index is out of bounds")
+        })?;
+        output.push(symbol);
+        state >>= bits;
+        available_bits -= bits;
+    }
+    if packed_index < packed.len() {
+        state |= usize::from(packed[packed_index]) << available_bits;
+        packed_index += 1;
+        available_bits += 8;
+    }
+    if packed_index != packed.len() || state != 1 || available_bits > 8 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("flatpack sentinel is malformed"));
+    }
+    Ok(output)
+}
+
+fn flatpack_bits(alphabet_len: usize) -> usize {
+    if alphabet_len <= 1 {
+        alphabet_len
+    } else {
+        usize::BITS as usize - (alphabet_len - 1).leading_zeros() as usize
+    }
+}
+
+fn flatpack_output_len(bits: usize, packed: &[u8]) -> Result<usize> {
+    let last = u32::from(
+        *packed.last().ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("flatpack input is empty")
+        })? | 1,
+    );
+    let padding_bits = ((last << 24).leading_zeros() as usize)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let packed_bits = packed
+        .len()
+        .checked_mul(8)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow).with_detail("flatpack size overflowed")
+        })?
+        .checked_sub(padding_bits)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("flatpack padding is malformed")
+        })?;
+    Ok(packed_bits / bits)
 }
 
 fn decode_splitn_chunk(
@@ -732,6 +847,58 @@ mod tests {
         standard_transform_serial_frame(21, 44, &[value], count, &header)
     }
 
+    fn flatpack_serial_frame(alphabet: &[u8], indexes: &[u8]) -> Vec<u8> {
+        let packed = pack_flatpack_indexes(alphabet.len(), indexes);
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(indexes.len() + 1).unwrap());
+        input.push(2);
+        input.push(2);
+        input.push(0);
+        input.push(29);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        push_var_u64(&mut input, u64::try_from(alphabet.len()).unwrap());
+        push_var_u64(&mut input, u64::try_from(packed.len()).unwrap());
+        input.extend_from_slice(alphabet);
+        input.extend_from_slice(&packed);
+        input.push(0);
+        input
+    }
+
+    fn pack_flatpack_indexes(alphabet_len: usize, indexes: &[u8]) -> Vec<u8> {
+        if indexes.is_empty() || alphabet_len == 0 {
+            return Vec::new();
+        }
+        let bits = if alphabet_len <= 1 {
+            alphabet_len
+        } else {
+            usize::BITS as usize - (alphabet_len - 1).leading_zeros() as usize
+        };
+        let packed_len = 1 + (bits * indexes.len()) / 8;
+        let mut packed = vec![0; packed_len];
+        let mut bit_offset = 0usize;
+        for &index in indexes {
+            let byte_offset = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let lane = u16::from(index) << bit_shift;
+            let lane_bytes = lane.to_le_bytes();
+            packed[byte_offset] |= lane_bytes[0];
+            if bit_shift + bits > 8 {
+                packed[byte_offset + 1] |= lane_bytes[1];
+            }
+            bit_offset += bits;
+        }
+        let byte_offset = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        packed[byte_offset] |= 1 << bit_shift;
+        packed
+    }
+
     fn pack_lsb_bits(values: &[u8], bits: u8) -> Vec<u8> {
         let bits = usize::from(bits);
         let packed_len = (values.len() * bits).div_ceil(8);
@@ -1001,6 +1168,47 @@ mod tests {
     #[test]
     fn rejects_convert_serial_to_struct_output_limit_without_mutating_destination() {
         let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+        let limits = Limits {
+            max_decoded_bytes: 4,
+            max_buffer_bytes: 4,
+            ..Limits::default()
+        };
+
+        let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_v21_flatpack_serial_chunk() {
+        let input = flatpack_serial_frame(b"abc", &[0, 1, 2, 1, 0]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = Vec::new();
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 5);
+        assert_eq!(output, b"abcba");
+    }
+
+    #[test]
+    fn decodes_empty_v21_flatpack_serial_chunk() {
+        let input = flatpack_serial_frame(b"", &[]);
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+        assert_eq!(written, 0);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn rejects_flatpack_output_limit_without_mutating_destination() {
+        let input = flatpack_serial_frame(b"abc", &[0, 1, 2, 1, 0]);
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
         let limits = Limits {

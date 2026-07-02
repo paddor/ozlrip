@@ -82,3 +82,10 @@ path = "fuzz_targets/decode_conversion_node.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_flatpack_node"
+path = "fuzz_targets/decode_flatpack_node.rs"
+test = false
+doc = false
+bench = false
