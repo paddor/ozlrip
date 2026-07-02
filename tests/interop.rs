@@ -19,11 +19,7 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     let work = WorkDir::new("ozlrip-interop");
     let upstream_commit = upstream_commit(&zli).unwrap_or_else(|| "unknown".to_owned());
     let mut manifest = String::new();
-    writeln!(
-        manifest,
-        "upstream_commit={upstream_commit}\nformat_version=max"
-    )
-    .unwrap();
+    writeln!(manifest, "upstream_commit={upstream_commit}").unwrap();
 
     for case in interop_cases() {
         let name = case.name;
@@ -43,6 +39,9 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
         let zli_decoded = fs::read(&zli_decoded_path).unwrap();
         assert_eq!(zli_decoded, input, "{name} upstream roundtrip changed data");
 
+        let frame_info = ozlrip::inspect(&frame).unwrap_or_else(|err| {
+            panic!("{name} ozlrip inspect failed: {err:?}");
+        });
         let ozlrip_decoded = ozlrip::decode(&frame).unwrap_or_else(|err| {
             panic!("{name} ozlrip decode failed: {err:?}");
         });
@@ -50,7 +49,8 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
 
         writeln!(
             manifest,
-            "fixture={name}\nprofile={profile}\ncompress_command={}\ndecompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ndecoded_hash={:016x}\n",
+            "fixture={name}\nprofile={profile}\nformat_version={}\ncompress_command={}\ndecompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ndecoded_hash={:016x}\n",
+            frame_info.format_version,
             command_line(&zli, compress_args.iter().copied()),
             command_line(&zli, decompress_args.iter().copied()),
             hash64(input),
