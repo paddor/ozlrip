@@ -760,7 +760,7 @@ fn read_transform_ids(
     }
 
     let mut standard_index = 0usize;
-    let mut custom_index = 0usize;
+    let custom_index = 0usize;
     let mut ids = Vec::new();
     ids.try_reserve_exact(transform_types.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("transform ID allocation failed")
@@ -778,8 +778,9 @@ fn read_transform_ids(
                 standard_index = checked_add(standard_index, 1)?;
             }
             TransformType::Custom => {
-                ids.push(custom_ids[custom_index]);
-                custom_index = checked_add(custom_index, 1)?;
+                let _ = custom_ids[custom_index];
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("custom OpenZL transforms are not implemented"));
             }
         }
     }
@@ -1429,6 +1430,23 @@ mod tests {
         input.push(3);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn rejects_custom_transform_id() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(1);
+        input.push(1);
 
         let err = inspect_frame(&input, Limits::default()).unwrap_err();
 

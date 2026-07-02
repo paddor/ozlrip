@@ -10,6 +10,10 @@ pub(crate) fn decode_plan(
     dst: &mut Vec<u8>,
     limits: Limits,
 ) -> Result<usize> {
+    if plan.info.dictionary_bundle_id.is_some() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dictionary bundle materialization is not implemented"));
+    }
     let stored = collect_stored_output(input, plan, limits)?;
     dst.try_reserve_exact(stored.total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")

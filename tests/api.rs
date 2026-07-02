@@ -40,6 +40,22 @@ fn transform_graph_frame() -> Vec<u8> {
     input
 }
 
+fn bundled_stored_frame(bytes: &[u8]) -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(25));
+    input.push(1 << 3);
+    input.push(2);
+    input.extend_from_slice(&[1, 2]);
+    input.push(1);
+    input.push(u8::try_from(bytes.len() + 1).unwrap());
+    input.push(1);
+    input.push(1);
+    input.push(u8::try_from(bytes.len()).unwrap());
+    input.extend_from_slice(bytes);
+    input.push(0);
+    input
+}
+
 #[test]
 fn inspect_rejects_non_openzl_input() {
     let err = ozlrip::inspect(b"not-openzl").unwrap_err();
@@ -63,6 +79,24 @@ fn decode_into_preserves_destination_on_unsupported_graph() {
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
+}
+
+#[test]
+fn decode_into_preserves_destination_on_dictionary_bundle() {
+    let frame = bundled_stored_frame(&[7, 8, 9]);
+    let mut dst = vec![1, 2, 3];
+
+    let err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(dst, [1, 2, 3]);
+    assert_eq!(
+        ozlrip::inspect(&frame)
+            .unwrap()
+            .dictionary_bundle_id
+            .as_deref(),
+        Some(&[1, 2][..])
+    );
 }
 
 #[test]
