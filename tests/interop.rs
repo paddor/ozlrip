@@ -341,6 +341,22 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "sao-sddl1-synthetic-forced-graph",
+            input: InteropInput::Inline(sao_synthetic()),
+            profile: "sddl",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl"),
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "sao-full-sddl1-synthetic-forced-graph",
+            input: InteropInput::Inline(sao_full_synthetic()),
+            profile: "sddl",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl"),
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "upstream-serial-repeated-string",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
             profile: "serial",
@@ -428,6 +444,16 @@ fn supported_interop_cases() -> Vec<InteropCase> {
                 "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
             ),
             extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "upstream-sddl2-sample-2-forced-graph",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_2.bin"),
+            profile: "sddl2",
+            profile_arg: Some(
+                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
+            ),
+            extra_args: &["--no-store-on-expansion"],
             relaxed_limits: false,
         },
         InteropCase {
