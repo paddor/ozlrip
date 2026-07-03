@@ -30,6 +30,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --workspace --all-targets --no-default-features --features alloc -- -D warnings
       - run: cargo test --workspace --all-targets --features paranoid
+      - run: cargo check --manifest-path bench/Cargo.toml --benches
+      - run: cargo check --manifest-path fuzz/Cargo.toml --bins
 
   miri:
     runs-on: ubuntu-latest
@@ -39,4 +41,3 @@ jobs:
         with:
           components: miri
       - run: cargo miri test -p ozlrip-decode --no-default-features --features alloc
-
