@@ -15,6 +15,7 @@ use zrip_core::{
 use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
+mod fast_bitpack;
 mod fast_delta;
 mod fast_split_struct;
 mod fast_transpose;
@@ -4457,8 +4458,13 @@ fn decode_bitpack_chunk(stored: &[u8], parsed: BitpackHeader, limits: Limits) ->
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("bitpack allocation failed")
     })?;
-    output.resize(output_len, 0);
-    unpack_lsb_bits(stored, parsed.bits, parsed.element_width, &mut output)?;
+    fast_bitpack::unpack_lsb_bits(
+        stored,
+        parsed.bits,
+        parsed.element_width,
+        parsed.elements,
+        &mut output,
+    )?;
     Ok(output)
 }
 
@@ -4497,82 +4503,6 @@ fn parse_bitpack_header(header: &[u8], packed_len: usize) -> Result<BitpackHeade
         bits,
         elements: max_elements - extra,
     })
-}
-
-fn unpack_lsb_bits(
-    stored: &[u8],
-    bits: usize,
-    element_width: usize,
-    output: &mut [u8],
-) -> Result<()> {
-    let full_width_bits = element_width
-        .checked_mul(8)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if bits == full_width_bits {
-        let src = stored.get(..output.len()).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-        })?;
-        output.copy_from_slice(src);
-        return Ok(());
-    }
-    if bits <= 56 {
-        return unpack_lsb_bits_u64(stored, bits, element_width, output);
-    }
-
-    let mask = (1u128 << bits) - 1;
-    let mut byte_index = 0usize;
-    let mut bit_buffer = 0u128;
-    let mut available_bits = 0usize;
-
-    for out in output.chunks_exact_mut(element_width) {
-        while available_bits < bits {
-            let byte = *stored.get(byte_index).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-            })?;
-            bit_buffer |= u128::from(byte) << available_bits;
-            available_bits += 8;
-            byte_index = byte_index
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-
-        let value = bit_buffer & mask;
-        out.copy_from_slice(&value.to_le_bytes()[..element_width]);
-        bit_buffer >>= bits;
-        available_bits -= bits;
-    }
-    Ok(())
-}
-
-fn unpack_lsb_bits_u64(
-    stored: &[u8],
-    bits: usize,
-    element_width: usize,
-    output: &mut [u8],
-) -> Result<()> {
-    let mask = (1u64 << bits) - 1;
-    let mut byte_index = 0usize;
-    let mut bit_buffer = 0u64;
-    let mut available_bits = 0usize;
-
-    for out in output.chunks_exact_mut(element_width) {
-        while available_bits < bits {
-            let byte = *stored.get(byte_index).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-            })?;
-            bit_buffer |= u64::from(byte) << available_bits;
-            available_bits += 8;
-            byte_index = byte_index
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-
-        let value = bit_buffer & mask;
-        out.copy_from_slice(&value.to_le_bytes()[..element_width]);
-        bit_buffer >>= bits;
-        available_bits -= bits;
-    }
-    Ok(())
 }
 
 fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
