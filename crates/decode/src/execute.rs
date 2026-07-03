@@ -16,6 +16,7 @@ use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
 mod fast_delta;
+mod fast_split_struct;
 mod fast_transpose;
 
 #[cfg(test)]
@@ -49,6 +50,16 @@ pub(crate) fn decode_plan_with_context(
             .with_detail("dictionary bundle materialization is not implemented"));
     }
     if let Some(written) = try_decode_single_zstd_into_dst(
+        input,
+        plan,
+        dst,
+        limits,
+        #[cfg(feature = "zstd")]
+        zstd,
+    )? {
+        return Ok(written);
+    }
+    if let Some(written) = try_decode_plan_appending_to_dst(
         input,
         plan,
         dst,
@@ -214,6 +225,95 @@ fn try_decode_single_zstd_into_dst(
     Ok(None)
 }
 
+fn try_decode_plan_appending_to_dst(
+    input: &[u8],
+    plan: &FramePlan,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<Option<usize>> {
+    if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
+        return Ok(None);
+    }
+    if !plan.chunks.iter().all(chunk_supports_direct_append) {
+        return Ok(None);
+    }
+
+    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
+        let expected = usize::try_from(expected).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
+        })?;
+        dst.try_reserve_exact(expected).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+        })?;
+    }
+
+    let start_len = dst.len();
+    let result = decode_plan_appending_to_dst(
+        input,
+        plan,
+        dst,
+        limits,
+        #[cfg(feature = "zstd")]
+        zstd,
+    );
+    match result {
+        Ok(written) => Ok(Some(written)),
+        Err(err) => {
+            dst.truncate(start_len);
+            Err(err)
+        }
+    }
+}
+
+fn chunk_supports_direct_append(chunk: &crate::parse::ChunkPlan) -> bool {
+    if !chunk.has_nodes() {
+        return true;
+    }
+    let Ok(plan) = build_chunk_execution_plan(chunk) else {
+        return false;
+    };
+    direct_append_tail(&plan).is_some()
+}
+
+fn decode_plan_appending_to_dst(
+    input: &[u8],
+    plan: &FramePlan,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
+    let start_len = dst.len();
+    let mut total_len = 0usize;
+    for chunk in &plan.chunks {
+        let chunk_start = dst.len();
+        if chunk.has_nodes() {
+            decode_transform_chunk_appending(
+                input,
+                chunk,
+                plan.info.format_version,
+                limits,
+                dst,
+                #[cfg(feature = "zstd")]
+                zstd,
+            )?;
+        } else {
+            let stored = stored_only_chunk(input, chunk)?;
+            dst.extend_from_slice(stored);
+        }
+        let decoded = &dst[chunk_start..];
+        total_len = total_len
+            .checked_add(decoded.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        #[cfg(not(feature = "checksum"))]
+        let _ = chunk.decoded_checksum;
+        #[cfg(feature = "checksum")]
+        verify_decoded_checksum(decoded, chunk.decoded_checksum)?;
+    }
+    check_output_size(total_len, input.len(), plan, limits)?;
+    Ok(dst.len() - start_len)
+}
+
 fn collect_decoded_output<'a>(
     input: &'a [u8],
     plan: &FramePlan,
@@ -328,6 +428,326 @@ fn decode_transform_chunk<'a>(
             Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
         }
     }
+}
+
+fn decode_transform_chunk_appending(
+    input: &[u8],
+    chunk: &crate::parse::ChunkPlan,
+    format_version: u32,
+    limits: Limits,
+    dst: &mut Vec<u8>,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
+    let plan = build_chunk_execution_plan(chunk)?;
+    let append_tail = direct_append_tail(&plan).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("chunk is not direct-appendable")
+    })?;
+    let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
+    let transform_headers = chunk.transform_header_range().as_slice(input)?;
+
+    for (node_index, node) in plan.nodes.iter().enumerate() {
+        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        if node_index == append_tail.start {
+            let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
+            let output_start = dst.len();
+            let element_width = match append_tail.kind {
+                DirectAppendKind::FieldLz => {
+                    decode_field_lz_node_to_output(&inputs, header, limits, dst, output_start)?
+                }
+                DirectAppendKind::DispatchStringToSerial => {
+                    decode_dispatch_string_node_to_serial_output(
+                        &inputs,
+                        node.variable_inputs,
+                        header,
+                        format_version,
+                        limits,
+                        dst,
+                    )?;
+                    1
+                }
+                DirectAppendKind::SplitByStructToSplitN => {
+                    append_split_by_struct_to_final_splitn(
+                        &streams,
+                        &inputs,
+                        node,
+                        &plan.nodes[node_index + 1..],
+                        transform_headers,
+                        limits,
+                        dst,
+                    )?;
+                    1
+                }
+            };
+            drop(inputs);
+            match append_tail.kind {
+                DirectAppendKind::FieldLz => validate_direct_append_tail(
+                    &plan.nodes[node_index + 1..],
+                    transform_headers,
+                    element_width,
+                    &dst[output_start..],
+                    limits,
+                )?,
+                DirectAppendKind::DispatchStringToSerial => validate_string_to_serial_tail(
+                    &plan.nodes[node_index + 1..],
+                    transform_headers,
+                )?,
+                DirectAppendKind::SplitByStructToSplitN => {}
+            }
+            return Ok(dst.len() - output_start);
+        }
+        if try_execute_single_input_splitn_node(&mut streams, node, header, limits)? {
+            continue;
+        }
+        if try_execute_byte_preserving_conversion_node(&mut streams, node, header, limits)? {
+            continue;
+        }
+
+        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
+        let outputs = execute_standard_node(
+            node.standard_id,
+            &inputs,
+            node.variable_inputs,
+            header,
+            format_version,
+            limits,
+            #[cfg(feature = "zstd")]
+            zstd,
+        )?;
+        drop(inputs);
+        if outputs.len() != node.output_targets.len() {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("node output count does not match graph"));
+        }
+        for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
+            let target = streams.get_mut(output_target).ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("node output target is out of bounds")
+            })?;
+            if !matches!(target, StreamSlot::Empty) {
+                return Err(Error::new(ErrorKind::InvalidGraph)
+                    .with_detail("node output overwrites an existing stream"));
+            }
+            *target = StreamSlot::Owned(output);
+        }
+    }
+
+    Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
+}
+
+#[derive(Clone, Copy)]
+struct DirectAppendTail {
+    start: usize,
+    kind: DirectAppendKind,
+}
+
+#[derive(Clone, Copy)]
+enum DirectAppendKind {
+    FieldLz,
+    DispatchStringToSerial,
+    SplitByStructToSplitN,
+}
+
+fn direct_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
+    field_lz_append_tail_start(plan)
+        .or_else(|| dispatch_string_to_serial_append_tail(plan))
+        .or_else(|| split_by_struct_to_splitn_append_tail(plan))
+}
+
+fn field_lz_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
+    let final_stream = plan.regen_targets.len().checked_sub(1)?;
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.standard_id != standard::FIELD_LZ_ID || node.output_targets.len() != 1 {
+            continue;
+        }
+        let mut next_input = node.output_targets[0];
+        for tail in &plan.nodes[index + 1..] {
+            if !is_byte_preserving_conversion(tail.standard_id)
+                || tail.input_count != 1
+                || tail.input_start != next_input
+                || tail.output_targets.len() != 1
+            {
+                return None;
+            }
+            next_input = tail.output_targets[0];
+        }
+        if next_input == final_stream {
+            return Some(DirectAppendTail {
+                start: index,
+                kind: DirectAppendKind::FieldLz,
+            });
+        }
+    }
+    None
+}
+
+fn dispatch_string_to_serial_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
+    let final_stream = plan.regen_targets.len().checked_sub(1)?;
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.standard_id != standard::DISPATCH_STRING_ID || node.output_targets.len() != 1 {
+            continue;
+        }
+        let [tail] = &plan.nodes[index + 1..] else {
+            continue;
+        };
+        if tail.standard_id == standard::CONVERT_STRING_TO_SERIAL_ID
+            && tail.input_count == 1
+            && tail.input_start == node.output_targets[0]
+            && tail.output_targets.as_slice() == [final_stream]
+        {
+            return Some(DirectAppendTail {
+                start: index,
+                kind: DirectAppendKind::DispatchStringToSerial,
+            });
+        }
+    }
+    None
+}
+
+fn split_by_struct_to_splitn_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
+    let final_stream = plan.regen_targets.len().checked_sub(1)?;
+    let [split_by_struct, splitn] = plan
+        .nodes
+        .as_slice()
+        .get(plan.nodes.len().checked_sub(2)?..)?
+    else {
+        return None;
+    };
+    if split_by_struct.standard_id != standard::SPLIT_BY_STRUCT_ID
+        || split_by_struct.output_targets.len() != 1
+        || !matches!(
+            splitn.standard_id,
+            standard::SPLITN_ID | standard::SPLITN_STRUCT_ID
+        )
+        || splitn.output_targets.as_slice() != [final_stream]
+    {
+        return None;
+    }
+    let split_output = split_by_struct.output_targets[0];
+    let input_end = splitn.input_start.checked_add(splitn.input_count)?;
+    if !(splitn.input_start..input_end).contains(&split_output) {
+        return None;
+    }
+    Some(DirectAppendTail {
+        start: plan.nodes.len() - 2,
+        kind: DirectAppendKind::SplitByStructToSplitN,
+    })
+}
+
+fn validate_direct_append_tail(
+    tail: &[NodeExecutionPlan],
+    transform_headers: &[u8],
+    mut element_width: usize,
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<()> {
+    for node in tail {
+        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        let input = StreamInput {
+            bytes,
+            element_width,
+            string_lengths: None,
+        };
+        let Some(output_width) = byte_preserving_conversion_output_width(
+            node.standard_id,
+            node.input_count,
+            input,
+            header,
+            limits,
+        )?
+        else {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("direct-append tail contains a non-conversion node"));
+        };
+        element_width = output_width;
+    }
+    Ok(())
+}
+
+fn validate_string_to_serial_tail(
+    tail: &[NodeExecutionPlan],
+    transform_headers: &[u8],
+) -> Result<()> {
+    let [node] = tail else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("direct string append tail is malformed"));
+    };
+    let header = node_header(transform_headers, node.header_start, node.header_size)?;
+    if node.standard_id != standard::CONVERT_STRING_TO_SERIAL_ID || !header.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("direct string append tail is malformed"));
+    }
+    Ok(())
+}
+
+fn append_split_by_struct_to_final_splitn(
+    streams: &[StreamSlot<'_>],
+    split_by_struct_inputs: &[StreamInput<'_>],
+    split_by_struct: &NodeExecutionPlan,
+    tail: &[NodeExecutionPlan],
+    transform_headers: &[u8],
+    limits: Limits,
+    dst: &mut Vec<u8>,
+) -> Result<()> {
+    let [splitn] = tail else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("direct split_by_struct tail is malformed"));
+    };
+    let splitn_header = node_header(transform_headers, splitn.header_start, splitn.header_size)?;
+    if !splitn_header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
+        );
+    }
+    let [split_output] = split_by_struct.output_targets.as_slice() else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("split_by_struct output count does not match graph"));
+    };
+    let input_end = splitn
+        .input_start
+        .checked_add(splitn.input_count)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut total_len = 0usize;
+    for stream_index in (splitn.input_start..input_end).rev() {
+        let len = if stream_index == *split_output {
+            split_by_struct_output_len(split_by_struct_inputs)?
+        } else {
+            streams
+                .get(stream_index)
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidGraph)
+                        .with_detail("node input range is out of bounds")
+                })?
+                .as_input()?
+                .bytes
+                .len()
+        };
+        total_len = total_len
+            .checked_add(len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    if total_len > limits.max_decoded_bytes || total_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    dst.try_reserve_exact(total_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
+    })?;
+    for stream_index in (splitn.input_start..input_end).rev() {
+        if stream_index == *split_output {
+            append_split_by_struct_output(split_by_struct_inputs, limits, dst)?;
+        } else {
+            let input = streams
+                .get(stream_index)
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidGraph)
+                        .with_detail("node input range is out of bounds")
+                })?
+                .as_input()?;
+            dst.extend_from_slice(input.bytes);
+        }
+    }
+    Ok(())
 }
 
 fn try_execute_single_input_splitn_node(
@@ -1293,24 +1713,11 @@ fn decode_dispatch_string_node(
         total_bytes = total_bytes
             .checked_add(byte_total)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let mut offsets = Vec::new();
-        offsets.try_reserve_exact(lengths.len()).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
-        })?;
-        let mut offset = 0usize;
-        for &length in lengths {
-            offsets.push(offset);
-            offset = offset
-                .checked_add(usize::try_from(length).map_err(|_| {
-                    Error::new(ErrorKind::LimitExceeded).with_detail("string length too large")
-                })?)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
         sources.push(DispatchStringSource {
             bytes: input.bytes,
             lengths,
-            offsets,
             position: 0,
+            byte_position: 0,
         });
     }
     if index_count != total_string_count {
@@ -1354,7 +1761,7 @@ fn decode_dispatch_string_node(
         _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
     }
     for source in sources {
-        if source.position != source.lengths.len() {
+        if source.position != source.lengths.len() || source.byte_position != source.bytes.len() {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("dispatch_string did not consume every source string"));
         }
@@ -1369,8 +1776,8 @@ fn decode_dispatch_string_node(
 struct DispatchStringSource<'a> {
     bytes: &'a [u8],
     lengths: &'a [u32],
-    offsets: Vec<usize>,
     position: usize,
+    byte_position: usize,
 }
 
 #[expect(
@@ -1390,9 +1797,9 @@ fn append_dispatched_string(
     let length = *source.lengths.get(source.position).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
     })?;
-    let offset = source.offsets[source.position];
     let length_usize = usize::try_from(length)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let offset = source.byte_position;
     let end = offset
         .checked_add(length_usize)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -1405,6 +1812,149 @@ fn append_dispatched_string(
         .position
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    source.byte_position = end;
+    Ok(())
+}
+
+fn decode_dispatch_string_node_to_serial_output(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string header must be empty")
+        );
+    }
+    let variable_inputs = usize::try_from(variable_inputs)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
+    if inputs.len()
+        != variable_inputs
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("dispatch_string input count does not match node shape"));
+    }
+    let (indices, string_inputs) = inputs.split_first().ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("dispatch_string index stream is missing")
+    })?;
+    let expected_index_width = if format_version < 21 { 1 } else { 2 };
+    require_numeric_width(indices, expected_index_width, "dispatch_string indices")?;
+    let index_count = numeric_element_count(indices.bytes, indices.element_width)?;
+    if index_count != 0 && string_inputs.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatch_string indices require string inputs"));
+    }
+
+    let mut sources = Vec::new();
+    sources
+        .try_reserve_exact(string_inputs.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+        })?;
+    let mut total_string_count = 0usize;
+    let mut total_bytes = 0usize;
+    for input in string_inputs {
+        if input.element_width != 1 {
+            return Err(Error::new(ErrorKind::InvalidType)
+                .with_detail("dispatch_string inputs must be byte strings"));
+        }
+        let lengths = input.string_lengths.ok_or_else(|| {
+            Error::new(ErrorKind::InvalidType)
+                .with_detail("dispatch_string input is missing string lengths")
+        })?;
+        let byte_total = checked_sum_u32(lengths)?;
+        if byte_total != input.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatch_string input lengths do not sum to content size"));
+        }
+        total_string_count = total_string_count
+            .checked_add(lengths.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        total_bytes = total_bytes
+            .checked_add(byte_total)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        sources.push(DispatchStringSource {
+            bytes: input.bytes,
+            lengths,
+            position: 0,
+            byte_position: 0,
+        });
+    }
+    if index_count != total_string_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatch_string index count does not match string count"));
+    }
+    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    output.try_reserve_exact(total_bytes).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch output allocation failed")
+    })?;
+
+    match indices.element_width {
+        1 => {
+            for &source in indices.bytes {
+                append_dispatched_string_to_serial(usize::from(source), &mut sources, output)?;
+            }
+        }
+        2 => {
+            for source in indices.bytes.chunks_exact(2) {
+                append_dispatched_string_to_serial(
+                    usize::from(u16::from_le_bytes([source[0], source[1]])),
+                    &mut sources,
+                    output,
+                )?;
+            }
+        }
+        _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
+    }
+    for source in sources {
+        if source.position != source.lengths.len() || source.byte_position != source.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatch_string did not consume every source string"));
+        }
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV dispatch hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
+fn append_dispatched_string_to_serial(
+    source: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let source = sources.get_mut(source).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
+    })?;
+    let length = *source.lengths.get(source.position).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
+    })?;
+    let length = usize::try_from(length)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let offset = source.byte_position;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bytes = source.bytes.get(offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+    })?;
+    output.extend_from_slice(bytes);
+    source.position = source
+        .position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    source.byte_position = end;
     Ok(())
 }
 
@@ -1859,6 +2409,25 @@ fn decode_split_by_struct_node(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("split_by_struct input count does not match node shape"));
     }
+    let output_len = split_by_struct_output_len(inputs)?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("split_by_struct allocation failed")
+    })?;
+    append_split_by_struct_output(inputs, limits, &mut output)?;
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 1,
+        string_lengths: None,
+    })
+}
+
+fn split_by_struct_output_len(inputs: &[StreamInput<'_>]) -> Result<usize> {
     let Some(first) = inputs.first() else {
         return Err(Error::new(ErrorKind::Malformed).with_detail("split_by_struct requires inputs"));
     };
@@ -1894,31 +2463,34 @@ fn decode_split_by_struct_node(
     let output_len = element_count
         .checked_mul(struct_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    Ok(output_len)
+}
+
+fn append_split_by_struct_output(
+    inputs: &[StreamInput<'_>],
+    limits: Limits,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let output_len = split_by_struct_output_len(inputs)?;
     if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("split_by_struct allocation failed")
-    })?;
-    for element in 0..element_count {
-        for input in inputs {
-            let start = element
-                .checked_mul(input.element_width)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            let end = start
-                .checked_add(input.element_width)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            output.extend_from_slice(&input.bytes[start..end]);
-        }
+    let required_capacity = output
+        .len()
+        .checked_add(output_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output.capacity() < required_capacity {
+        output
+            .try_reserve_exact(required_capacity - output.len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("split_by_struct allocation failed")
+            })?;
     }
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 1,
-        string_lengths: None,
-    })
+    fast_split_struct::append_split_by_struct_output(inputs, output);
+    Ok(())
 }
 
 fn decode_mux_lengths_node(
@@ -2418,6 +2990,24 @@ fn decode_field_lz_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
+    let output_capacity = field_lz_output_capacity(inputs, header, limits)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_capacity).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
+    })?;
+    let element_width = decode_field_lz_node_to_output(inputs, header, limits, &mut output, 0)?;
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+    })
+}
+
+fn field_lz_output_capacity(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<usize> {
     let [
         literals,
         tokens,
@@ -2458,12 +3048,68 @@ fn decode_field_lz_node(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
+    Ok(output_capacity)
+}
+
+fn decode_field_lz_node_to_output(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+    output: &mut Vec<u8>,
+    output_base: usize,
+) -> Result<usize> {
+    let [
+        literals,
+        tokens,
+        offsets,
+        extra_literal_lengths,
+        extra_match_lengths,
+    ] = inputs
+    else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("field_lz input count does not match node shape"));
+    };
+    let element_width = literals.element_width;
+    if !matches!(element_width, 1 | 2 | 4 | 8) {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("field_lz literal width is unsupported")
+        );
+    }
+    require_numeric_width(tokens, 2, "field_lz tokens")?;
+    require_numeric_width(offsets, 4, "field_lz offsets")?;
+    require_numeric_width(extra_literal_lengths, 4, "field_lz extra literal lengths")?;
+    require_numeric_width(extra_match_lengths, 4, "field_lz extra match lengths")?;
+
+    let mut header_offset = 0usize;
+    let output_elements = read_var_u64(header, &mut header_offset)?;
+    if header_offset != header.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("field_lz header has trailing bytes")
+        );
+    }
+    let output_elements = usize::try_from(output_elements).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz output size is too large")
+    })?;
+    let output_capacity = output_elements
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_capacity > limits.max_decoded_bytes || output_capacity > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let output_limit = output_base
+        .checked_add(output_capacity)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output.capacity() < output_limit {
+        output
+            .try_reserve_exact(output_limit - output.len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
+            })?;
+    }
 
     let token_count = numeric_element_count(tokens.bytes, 2)?;
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_capacity).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
-    })?;
 
     let min_match = match element_width {
         1 => 4usize,
@@ -2559,8 +3205,8 @@ fn decode_field_lz_node(
             .checked_mul(element_width)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
 
-        append_field_lz_literals(&mut output, literals.bytes, &mut literal_pos, literal_len)?;
-        append_field_lz_match(&mut output, match_offset, match_len, output_capacity)?;
+        append_field_lz_literals(output, literals.bytes, &mut literal_pos, literal_len)?;
+        append_field_lz_match(output, output_base, match_offset, match_len, output_limit)?;
     }
 
     let remaining_literals = literals.bytes.get(literal_pos..).ok_or_else(|| {
@@ -2570,7 +3216,7 @@ fn decode_field_lz_node(
         .len()
         .checked_add(remaining_literals.len())
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if final_len > output_capacity {
+    if final_len > output_limit {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("field_lz output size exceeds header capacity"));
     }
@@ -2584,11 +3230,7 @@ fn decode_field_lz_node(
             .with_detail("field_lz numeric stream was not fully consumed"));
     }
 
-    Ok(OwnedStream {
-        bytes: output,
-        element_width,
-        string_lengths: None,
-    })
+    Ok(element_width)
 }
 
 fn require_numeric_width(stream: &StreamInput<'_>, expected: usize, name: &str) -> Result<()> {
@@ -3751,14 +4393,19 @@ fn append_field_lz_literals(
 
 fn append_field_lz_match(
     output: &mut Vec<u8>,
+    output_base: usize,
     match_offset: usize,
     match_len: usize,
-    output_capacity: usize,
+    output_limit: usize,
 ) -> Result<()> {
     if match_offset == 0 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("field_lz offset is zero"));
     }
-    if match_offset > output.len() {
+    let chunk_len = output
+        .len()
+        .checked_sub(output_base)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if match_offset > chunk_len {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("field_lz offset exceeds decoded prefix")
         );
@@ -3767,7 +4414,7 @@ fn append_field_lz_match(
         .len()
         .checked_add(match_len)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if end > output_capacity {
+    if end > output_limit {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("field_lz match length exceeds output size"));
     }
