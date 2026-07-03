@@ -136,6 +136,13 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
         le_u32_delta_bytes(4 * 1024 * 1024)
     );
     push_case!(
+        "era5-le-i32-sample",
+        "le-i32",
+        None,
+        &["--no-store-on-expansion"],
+        read_upstream_sample("examples/getting_started/sample_inputs/era5_ints.bin")
+    );
+    push_case!(
         "le-u64-timeseries-32m",
         "le-u64",
         None,
@@ -155,6 +162,20 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
         None,
         &["--chunk-size", "4M"],
         csv_timeseries(1_000_000)
+    );
+    push_case!(
+        "csv-pums-sample",
+        "csv",
+        None,
+        &[],
+        read_upstream_sample("examples/getting_started/sample_inputs/csv_samples/0001.csv")
+    );
+    push_case!(
+        "tbl-supplier-pipe",
+        "csv",
+        Some("|".to_owned()),
+        &[],
+        read_upstream_sample("cli/tests/sample_files/tbl/supplier_trunc.tbl")
     );
     push_case!(
         "sao-fixed-5m",
@@ -195,6 +216,20 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
         None,
         &["--chunk-size", "1M"],
         parquet_nested_sample()
+    );
+    push_case!(
+        "lorem-serial-sample",
+        "serial",
+        None,
+        &[],
+        read_upstream_sample("examples/getting_started/sample_inputs/lorem_ipsum.txt")
+    );
+    push_case!(
+        "u16-zigzag-sample",
+        "le-u16",
+        None,
+        &["--no-store-on-expansion"],
+        read_upstream_sample("cli/tests/sample_files/u16/zigzag_1000.bin")
     );
     cases
 }
