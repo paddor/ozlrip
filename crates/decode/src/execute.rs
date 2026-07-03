@@ -30,14 +30,56 @@ pub(crate) fn decode_plan(
 ) -> Result<usize> {
     #[cfg(feature = "zstd")]
     let mut zstd = zrip::DecompressContext::new();
+    let mut scratch = DecodeScratch::new();
     decode_plan_with_context(
         input,
         plan,
         dst,
         limits,
+        &mut scratch,
         #[cfg(feature = "zstd")]
         &mut zstd,
     )
+}
+
+#[derive(Default)]
+pub(crate) struct DecodeScratch {
+    byte_buffers: Vec<Vec<u8>>,
+}
+
+impl DecodeScratch {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn take_byte_buffer(&mut self, capacity: usize, detail: &'static str) -> Result<Vec<u8>> {
+        if let Some(index) = self
+            .byte_buffers
+            .iter()
+            .position(|buffer| buffer.capacity() >= capacity)
+        {
+            let mut buffer = self.byte_buffers.swap_remove(index);
+            buffer.clear();
+            return Ok(buffer);
+        }
+
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(capacity)
+            .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail(detail))?;
+        Ok(buffer)
+    }
+
+    fn recycle_owned_stream(&mut self, stream: OwnedStream) {
+        if stream.recyclable {
+            self.recycle_byte_buffer(stream.bytes);
+        }
+    }
+
+    fn recycle_byte_buffer(&mut self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        self.byte_buffers.push(buffer);
+    }
 }
 
 pub(crate) fn decode_plan_with_context(
@@ -45,6 +87,7 @@ pub(crate) fn decode_plan_with_context(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
     if plan.info.dictionary_bundle_id.is_some() {
@@ -66,6 +109,7 @@ pub(crate) fn decode_plan_with_context(
         plan,
         dst,
         limits,
+        scratch,
         #[cfg(feature = "zstd")]
         zstd,
     )? {
@@ -75,6 +119,7 @@ pub(crate) fn decode_plan_with_context(
         input,
         plan,
         limits,
+        scratch,
         #[cfg(feature = "zstd")]
         zstd,
     )?;
@@ -232,6 +277,7 @@ fn try_decode_plan_appending_to_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
@@ -256,6 +302,7 @@ fn try_decode_plan_appending_to_dst(
         plan,
         dst,
         limits,
+        scratch,
         #[cfg(feature = "zstd")]
         zstd,
     );
@@ -283,6 +330,7 @@ fn decode_plan_appending_to_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
     let start_len = dst.len();
@@ -296,6 +344,7 @@ fn decode_plan_appending_to_dst(
                 plan.info.format_version,
                 limits,
                 dst,
+                scratch,
                 #[cfg(feature = "zstd")]
                 zstd,
             )?;
@@ -320,6 +369,7 @@ fn collect_decoded_output<'a>(
     input: &'a [u8],
     plan: &FramePlan,
     limits: Limits,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<DecodedOutput<'a>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
@@ -339,6 +389,7 @@ fn collect_decoded_output<'a>(
                 chunk,
                 plan.info.format_version,
                 limits,
+                scratch,
                 #[cfg(feature = "zstd")]
                 zstd,
             )?
@@ -376,11 +427,19 @@ fn decode_transform_chunk<'a>(
     chunk: &crate::parse::ChunkPlan,
     format_version: u32,
     limits: Limits,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<DecodedChunk<'a>> {
     let plan = build_chunk_execution_plan(chunk)?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
+    let mut ctx = StandardNodeContext {
+        format_version,
+        limits,
+        scratch,
+        #[cfg(feature = "zstd")]
+        zstd,
+    };
 
     for node in plan.nodes {
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
@@ -397,12 +456,15 @@ fn decode_transform_chunk<'a>(
             &inputs,
             node.variable_inputs,
             header,
-            format_version,
-            limits,
-            #[cfg(feature = "zstd")]
-            zstd,
+            &mut ctx,
         )?;
         drop(inputs);
+        recycle_consumed_owned_streams(
+            &mut streams,
+            node.input_start,
+            node.input_count,
+            ctx.scratch,
+        )?;
         if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("node output count does not match graph"));
@@ -438,6 +500,7 @@ fn decode_transform_chunk_appending(
     format_version: u32,
     limits: Limits,
     dst: &mut Vec<u8>,
+    scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
     let plan = build_chunk_execution_plan(chunk)?;
@@ -446,6 +509,13 @@ fn decode_transform_chunk_appending(
     })?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
+    let mut ctx = StandardNodeContext {
+        format_version,
+        limits,
+        scratch,
+        #[cfg(feature = "zstd")]
+        zstd,
+    };
 
     for (node_index, node) in plan.nodes.iter().enumerate() {
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
@@ -510,12 +580,15 @@ fn decode_transform_chunk_appending(
             &inputs,
             node.variable_inputs,
             header,
-            format_version,
-            limits,
-            #[cfg(feature = "zstd")]
-            zstd,
+            &mut ctx,
         )?;
         drop(inputs);
+        recycle_consumed_owned_streams(
+            &mut streams,
+            node.input_start,
+            node.input_count,
+            ctx.scratch,
+        )?;
         if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("node output count does not match graph"));
@@ -1188,159 +1261,179 @@ fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[u8]> {
     })
 }
 
+struct StandardNodeContext<'a> {
+    format_version: u32,
+    limits: Limits,
+    scratch: &'a mut DecodeScratch,
+    #[cfg(feature = "zstd")]
+    zstd: &'a mut zrip::DecompressContext,
+}
+
 fn execute_standard_node(
     standard_id: u32,
     inputs: &[StreamInput<'_>],
     variable_inputs: u32,
     header: &[u8],
-    format_version: u32,
-    limits: Limits,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    ctx: &mut StandardNodeContext<'_>,
 ) -> Result<SmallVec<[OwnedStream; 2]>> {
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
-            decode_concat_node(inputs, header, limits).map(SmallVec::from_vec)
+            decode_concat_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
         }
-        standard::SPLITN_ID => {
-            one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
-        }
+        standard::SPLITN_ID => one_serial(decode_splitn_node(
+            inputs,
+            variable_inputs,
+            header,
+            ctx.limits,
+        )),
         standard::SPLITN_STRUCT_ID => one_typed(decode_splitn_typed_node(
             inputs,
             variable_inputs,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::SPLIT_BY_STRUCT_ID => one_typed(decode_split_by_struct_node(
             inputs,
             variable_inputs,
             header,
-            limits,
+            ctx.limits,
         )),
-        standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, limits)),
+        standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, ctx.limits)),
         standard::SEPARATE_STRING_COMPONENTS_ID => one_typed(
-            decode_separate_string_components_node(inputs, header, limits),
+            decode_separate_string_components_node(inputs, header, ctx.limits),
         ),
         standard::CONVERT_STRING_TO_SERIAL_ID => one_serial(decode_string_to_serial_node(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::DISPATCH_STRING_ID => one_typed(decode_dispatch_string_node(
             inputs,
             variable_inputs,
             header,
-            format_version,
-            limits,
+            ctx.format_version,
+            ctx.limits,
         )),
         standard::DISPATCH_N_BY_TAG_ID => one_serial(decode_dispatch_n_by_tag_node(
             inputs,
             variable_inputs,
             header,
-            format_version,
-            limits,
+            ctx.format_version,
+            ctx.limits,
         )),
-        standard::SENTINEL_ID => one_typed(decode_sentinel_node(inputs, header, limits)),
+        standard::SENTINEL_ID => one_typed(decode_sentinel_node(inputs, header, ctx.limits)),
         id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
             inputs,
             variable_inputs,
             header,
-            limits,
+            ctx.limits,
+            ctx.scratch,
         )),
-        standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, limits)),
+        standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),
         standard::ZSTD_ID => one_serial(decode_zstd_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
             #[cfg(feature = "zstd")]
-            zstd,
+            ctx.zstd,
         )),
         standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
+            ctx.scratch,
         )),
         standard::BITPACK_INT_ID => one_typed(decode_bitpack_int_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
+            ctx.scratch,
         )),
         standard::CONSTANT_SERIAL_ID => one_serial(decode_constant_serial_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::CONVERT_SERIAL_TO_STRUCT_ID => one_typed(
-            decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, limits),
+            decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, ctx.limits),
         ),
         standard::CONVERT_STRUCT_TO_SERIAL_ID => one_typed(decode_serial_to_struct_chunk(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(
-            decode_num_to_struct_le_chunk(single_stream(inputs)?, header, limits),
+            decode_num_to_struct_le_chunk(single_stream(inputs)?, header, ctx.limits),
         ),
         standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_serial(decode_numeric_to_serial_le_chunk(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::CONVERT_NUM_TO_SERIAL_LE_ID => one_typed(decode_serial_to_numeric_le_chunk(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::MUX_LENGTHS_ID => {
-            decode_mux_lengths_node(inputs, header, limits).map(SmallVec::from_vec)
+            decode_mux_lengths_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
         }
-        standard::LZ_ID => one_serial(decode_lz_node(inputs, header, limits)),
-        standard::FIELD_LZ_ID => one_typed(decode_field_lz_node(inputs, header, limits)),
+        standard::LZ_ID => one_serial(decode_lz_node(inputs, header, ctx.limits)),
+        standard::FIELD_LZ_ID => one_typed(decode_field_lz_node(
+            inputs,
+            header,
+            ctx.limits,
+            ctx.scratch,
+        )),
         standard::ZIGZAG_ID => one_typed(decode_zigzag_numeric_chunk(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
-        standard::DELTA_INT_ID => {
-            one_typed(decode_delta_node(single_stream(inputs)?, header, limits))
-        }
+        standard::DELTA_INT_ID => one_typed(decode_delta_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+            ctx.scratch,
+        )),
         standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::BIT_SPLIT_ID => one_typed(decode_bitsplit_node(
             inputs,
             variable_inputs,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::RANGE_PACK_ID => one_serial(decode_range_pack_serial8_chunk(
             single_input(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
         standard::FSE_NCOUNT_ID => one_typed(decode_fse_ncount_node(
             single_stream(inputs)?,
             header,
-            limits,
+            ctx.limits,
         )),
-        standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, limits)),
-        standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, limits)),
+        standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, ctx.limits)),
+        standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, ctx.limits)),
         standard::QUANTIZE_OFFSETS_ID => one_typed(decode_quantize_node(
             inputs,
             header,
-            limits,
+            ctx.limits,
             &QUANTIZE_OFFSETS,
         )),
         standard::QUANTIZE_LENGTHS_ID => one_typed(decode_quantize_node(
             inputs,
             header,
-            limits,
+            ctx.limits,
             &QUANTIZE_LENGTHS,
         )),
-        standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, limits)),
+        standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, ctx.limits)),
         standard::TOKENIZE_FIXED_ID | standard::TOKENIZE_NUMERIC_ID => {
-            one_typed(decode_tokenize_fixed_node(inputs, header, limits))
+            one_typed(decode_tokenize_fixed_node(inputs, header, ctx.limits))
         }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform graph execution is not implemented yet")),
@@ -1393,6 +1486,26 @@ impl<'a> StreamSlot<'a> {
     }
 }
 
+fn recycle_consumed_owned_streams(
+    streams: &mut [StreamSlot<'_>],
+    input_start: usize,
+    input_count: usize,
+    scratch: &mut DecodeScratch,
+) -> Result<()> {
+    let input_end = input_start
+        .checked_add(input_count)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let input_slots = streams.get_mut(input_start..input_end).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("node input range is out of bounds")
+    })?;
+    for slot in input_slots {
+        if let StreamSlot::Owned(stream) = core::mem::replace(slot, StreamSlot::Empty) {
+            scratch.recycle_owned_stream(stream);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct BorrowedStream<'a> {
     bytes: &'a [u8],
@@ -1411,6 +1524,7 @@ struct OwnedStream {
     bytes: Vec<u8>,
     element_width: usize,
     string_lengths: Option<Vec<u32>>,
+    recyclable: bool,
 }
 
 impl OwnedStream {
@@ -1419,6 +1533,25 @@ impl OwnedStream {
             bytes,
             element_width: 1,
             string_lengths: None,
+            recyclable: false,
+        }
+    }
+
+    fn typed(bytes: Vec<u8>, element_width: usize) -> Self {
+        Self {
+            bytes,
+            element_width,
+            string_lengths: None,
+            recyclable: false,
+        }
+    }
+
+    fn pooled(bytes: Vec<u8>, element_width: usize) -> Self {
+        Self {
+            bytes,
+            element_width,
+            string_lengths: None,
+            recyclable: true,
         }
     }
 }
@@ -1489,6 +1622,7 @@ fn decode_concat_node(
             bytes: output,
             element_width: concatenated.element_width,
             string_lengths: None,
+            recyclable: false,
         });
         consumed_elements = next_elements;
         consumed_bytes = next_bytes;
@@ -1538,6 +1672,7 @@ fn decode_transpose_split_node(
     variable_inputs: u32,
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
@@ -1571,16 +1706,9 @@ fn decode_transpose_split_node(
                 .with_detail("transpose_split lanes have different sizes"));
         }
     }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("transpose allocation failed")
-    })?;
+    let mut output = scratch.take_byte_buffer(output_len, "transpose allocation failed")?;
     fast_transpose::write_transpose_split_output(inputs, output_len, &mut output);
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: width,
-        string_lengths: None,
-    })
+    Ok(OwnedStream::pooled(output, width))
 }
 
 fn decode_flatpack_node(
@@ -1652,6 +1780,7 @@ fn decode_separate_string_components_node(
         bytes: output,
         element_width: 1,
         string_lengths: Some(string_lengths),
+        recyclable: false,
     })
 }
 
@@ -1772,6 +1901,7 @@ fn decode_dispatch_string_node(
         bytes: output,
         element_width: 1,
         string_lengths: Some(output_lengths),
+        recyclable: false,
     })
 }
 
@@ -2191,6 +2321,7 @@ fn decode_sentinel_node(
         bytes: output,
         element_width: exceptions.element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -2312,6 +2443,7 @@ fn decode_splitn_typed_node(
             bytes: Vec::new(),
             element_width,
             string_lengths: None,
+            recyclable: false,
         });
     }
     if !header.is_empty() {
@@ -2357,6 +2489,7 @@ fn decode_splitn_typed_node(
         bytes: output,
         element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -2410,6 +2543,7 @@ fn decode_split_by_struct_node(
         bytes: output,
         element_width: 1,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -2582,11 +2716,13 @@ fn decode_mux_lengths_node(
             bytes: literal_lengths,
             element_width,
             string_lengths: None,
+            recyclable: false,
         },
         OwnedStream {
             bytes: match_lengths,
             element_width,
             string_lengths: None,
+            recyclable: false,
         },
     ])
 }
@@ -2942,11 +3078,7 @@ fn decode_bitsplit_node(
         write_numeric_element(&mut output[output_offset..], output_width, value);
     }
 
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: output_width,
-        string_lengths: None,
-    })
+    Ok(OwnedStream::typed(output, output_width))
 }
 
 fn bitsplit_element_width(bit_width: usize) -> Result<usize> {
@@ -2975,18 +3107,12 @@ fn decode_field_lz_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     let output_capacity = field_lz_output_capacity(inputs, header, limits)?;
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_capacity).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
-    })?;
+    let mut output = scratch.take_byte_buffer(output_capacity, "field_lz allocation failed")?;
     let element_width = decode_field_lz_node_to_output(inputs, header, limits, &mut output, 0)?;
-    Ok(OwnedStream {
-        bytes: output,
-        element_width,
-        string_lengths: None,
-    })
+    Ok(OwnedStream::pooled(output, element_width))
 }
 
 fn field_lz_output_capacity(
@@ -3280,6 +3406,7 @@ fn decode_fse_ncount_node(
         bytes: output,
         element_width: 2,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -3681,6 +3808,7 @@ fn decode_tokenize_fixed_node(
         bytes: output,
         element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -3938,6 +4066,7 @@ fn decode_quantize_node(
         bytes: output,
         element_width: 4,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -4094,6 +4223,7 @@ fn decode_partition_node(
         bytes: output,
         element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -4410,26 +4540,42 @@ fn append_field_lz_match(
     Ok(())
 }
 
-fn decode_bitpack_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+fn decode_bitpack_serial_chunk(
+    stored: &[u8],
+    header: &[u8],
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+) -> Result<Vec<u8>> {
     let parsed = parse_bitpack_header(header, stored.len())?;
     if parsed.element_width != 1 {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only serial byte bitpack output is implemented"));
     }
-    decode_bitpack_chunk(stored, parsed, limits)
+    decode_bitpack_chunk(stored, parsed, limits, scratch)
 }
 
-fn decode_bitpack_int_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<OwnedStream> {
+fn decode_bitpack_int_chunk(
+    stored: &[u8],
+    header: &[u8],
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+) -> Result<OwnedStream> {
     let parsed = parse_bitpack_header(header, stored.len())?;
     let element_width = parsed.element_width;
     Ok(OwnedStream {
-        bytes: decode_bitpack_chunk(stored, parsed, limits)?,
+        bytes: decode_bitpack_chunk(stored, parsed, limits, scratch)?,
         element_width,
         string_lengths: None,
+        recyclable: true,
     })
 }
 
-fn decode_bitpack_chunk(stored: &[u8], parsed: BitpackHeader, limits: Limits) -> Result<Vec<u8>> {
+fn decode_bitpack_chunk(
+    stored: &[u8],
+    parsed: BitpackHeader,
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+) -> Result<Vec<u8>> {
     let output_len = parsed
         .elements
         .checked_mul(parsed.element_width)
@@ -4439,10 +4585,7 @@ fn decode_bitpack_chunk(stored: &[u8], parsed: BitpackHeader, limits: Limits) ->
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitpack allocation failed")
-    })?;
+    let mut output = scratch.take_byte_buffer(output_len, "bitpack allocation failed")?;
     fast_bitpack::unpack_lsb_bits(
         stored,
         parsed.bits,
@@ -4627,6 +4770,7 @@ fn copy_byte_preserving_conversion(
         bytes: output,
         element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -4692,6 +4836,7 @@ fn decode_zigzag_numeric_chunk(
         bytes: output,
         element_width: stored.element_width,
         string_lengths: None,
+        recyclable: false,
     })
 }
 
@@ -4699,6 +4844,7 @@ fn decode_delta_node(
     stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     validate_numeric_stream_width(stored.element_width, "delta input")?;
     let stored_elements = numeric_element_count(stored.bytes, stored.element_width)?;
@@ -4725,15 +4871,13 @@ fn decode_delta_node(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_len)
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("delta allocation failed"))?;
+    let mut output = scratch.take_byte_buffer(output_len, "delta allocation failed")?;
     if output_elements == 0 {
         return Ok(OwnedStream {
             bytes: output,
             element_width: stored.element_width,
             string_lengths: None,
+            recyclable: true,
         });
     }
     fast_delta::decode_delta_elements(
@@ -4743,11 +4887,7 @@ fn decode_delta_node(
         output_len,
         &mut output,
     );
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: stored.element_width,
-        string_lengths: None,
-    })
+    Ok(OwnedStream::pooled(output, stored.element_width))
 }
 
 fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -6080,6 +6220,7 @@ mod tests {
 
     #[test]
     fn decodes_field_lz_node_with_last_literals() {
+        let mut scratch = DecodeScratch::new();
         let output = decode_field_lz_node(
             &[
                 StreamInput {
@@ -6110,6 +6251,7 @@ mod tests {
             ],
             &[6],
             Limits::default(),
+            &mut scratch,
         )
         .unwrap();
 
@@ -6119,6 +6261,7 @@ mod tests {
 
     #[test]
     fn decodes_field_lz_node_with_explicit_offset() {
+        let mut scratch = DecodeScratch::new();
         let token = 3u16 | (3u16 << 2);
         let offset = 3u32.to_le_bytes();
         let output = decode_field_lz_node(
@@ -6151,6 +6294,7 @@ mod tests {
             ],
             &[8],
             Limits::default(),
+            &mut scratch,
         )
         .unwrap();
 

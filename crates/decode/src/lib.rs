@@ -12,6 +12,7 @@ mod standard;
 
 pub struct Decoder {
     limits: Limits,
+    scratch: execute::DecodeScratch,
     #[cfg(feature = "zstd")]
     zstd: zrip::DecompressContext,
 }
@@ -20,6 +21,7 @@ impl Decoder {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
+            scratch: execute::DecodeScratch::new(),
             #[cfg(feature = "zstd")]
             zstd: zrip::DecompressContext::new(),
         }
@@ -46,6 +48,7 @@ impl Decoder {
             &plan,
             dst,
             self.limits,
+            &mut self.scratch,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         )
