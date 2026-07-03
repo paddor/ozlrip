@@ -1375,6 +1375,8 @@ fn execute_standard_node(
             header,
             ctx.limits,
             #[cfg(feature = "zstd")]
+            ctx.scratch,
+            #[cfg(feature = "zstd")]
             ctx.zstd,
         )),
         standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
@@ -5092,6 +5094,7 @@ fn decode_zstd_chunk(
     stored: &[u8],
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
     zstd: &mut zrip::DecompressContext,
 ) -> Result<Vec<u8>> {
     if !header.is_empty() {
@@ -5107,6 +5110,28 @@ fn decode_zstd_chunk(
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    if magicless.len() >= 1024 {
+        let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
+        let written = match zstd.decompress_after_magic_into(
+            magicless,
+            &mut output,
+            limits.max_decoded_bytes,
+        ) {
+            Ok(written) => written,
+            Err(err) => {
+                scratch.recycle_byte_buffer(output);
+                return Err(map_zstd_error(&err));
+            }
+        };
+        debug_assert_eq!(written, output.len());
+        if output.len() > limits.max_buffer_bytes {
+            scratch.recycle_byte_buffer(output);
+            return Err(
+                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+            );
+        }
+        return Ok(output);
+    }
     let output = zstd
         .decompress_after_magic_with_limit(magicless, limits.max_decoded_bytes)
         .map_err(|err| map_zstd_error(&err))?;
