@@ -1,6 +1,7 @@
 use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
+use smallvec::{SmallVec, smallvec};
 use zrip_core::{
     bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
     fse::{
@@ -277,8 +278,15 @@ fn decode_transform_chunk<'a>(
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
 
     for node in plan.nodes {
-        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        if try_execute_single_input_splitn_node(&mut streams, &node, header, limits)? {
+            continue;
+        }
+        if try_execute_byte_preserving_conversion_node(&mut streams, &node, header, limits)? {
+            continue;
+        }
+
+        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
         let outputs = execute_standard_node(
             node.standard_id,
             &inputs,
@@ -289,6 +297,7 @@ fn decode_transform_chunk<'a>(
             #[cfg(feature = "zstd")]
             zstd,
         )?;
+        drop(inputs);
         if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("node output count does not match graph"));
@@ -318,6 +327,234 @@ fn decode_transform_chunk<'a>(
     }
 }
 
+fn try_execute_single_input_splitn_node(
+    streams: &mut [StreamSlot<'_>],
+    node: &NodeExecutionPlan,
+    header: &[u8],
+    limits: Limits,
+) -> Result<bool> {
+    if !matches!(
+        node.standard_id,
+        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID
+    ) || node.input_count != 1
+    {
+        return Ok(false);
+    }
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
+        );
+    }
+
+    let input = single_execution_input(streams, node.input_start)?;
+    if input.element_width == 0 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("splitn element width is zero"));
+    }
+    if !input.bytes.len().is_multiple_of(input.element_width) {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("splitn input has partial element")
+        );
+    }
+    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let output_width = if node.standard_id == standard::SPLITN_ID {
+        1
+    } else {
+        input.element_width
+    };
+    move_stream_to_single_output(streams, node, output_width)
+}
+
+fn try_execute_byte_preserving_conversion_node(
+    streams: &mut [StreamSlot<'_>],
+    node: &NodeExecutionPlan,
+    header: &[u8],
+    limits: Limits,
+) -> Result<bool> {
+    if !is_byte_preserving_conversion(node.standard_id) {
+        return Ok(false);
+    }
+    let Some(output_width) = byte_preserving_conversion_output_width(
+        node.standard_id,
+        node.input_count,
+        single_execution_input(streams, node.input_start)?,
+        header,
+        limits,
+    )?
+    else {
+        return Ok(false);
+    };
+    move_stream_to_single_output(streams, node, output_width)
+}
+
+fn move_stream_to_single_output(
+    streams: &mut [StreamSlot<'_>],
+    node: &NodeExecutionPlan,
+    output_width: usize,
+) -> Result<bool> {
+    let [output_target] = node.output_targets.as_slice() else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("node output count does not match graph"));
+    };
+    if !matches!(streams.get(*output_target), Some(StreamSlot::Empty)) {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("node output overwrites an existing stream"));
+    }
+
+    let input_slot = streams
+        .get_mut(node.input_start)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("node input is missing"))?;
+    let converted = match core::mem::replace(input_slot, StreamSlot::Empty) {
+        StreamSlot::Borrowed(mut stream) => {
+            stream.element_width = output_width;
+            StreamSlot::Borrowed(stream)
+        }
+        StreamSlot::Owned(mut stream) => {
+            stream.element_width = output_width;
+            stream.string_lengths = None;
+            StreamSlot::Owned(stream)
+        }
+        StreamSlot::Empty => {
+            return Err(
+                Error::new(ErrorKind::InvalidGraph).with_detail("node input stream is missing")
+            );
+        }
+    };
+    streams[*output_target] = converted;
+    Ok(true)
+}
+
+fn is_byte_preserving_conversion(standard_id: u32) -> bool {
+    matches!(
+        standard_id,
+        standard::CONVERT_SERIAL_TO_STRUCT_ID
+            | standard::CONVERT_STRUCT_TO_SERIAL_ID
+            | standard::CONVERT_STRING_TO_SERIAL_ID
+            | standard::CONVERT_STRUCT_TO_NUM_LE_ID
+            | standard::CONVERT_NUM_TO_STRUCT_LE_ID
+            | standard::CONVERT_SERIAL_TO_NUM_LE_ID
+            | standard::CONVERT_NUM_TO_SERIAL_LE_ID
+    )
+}
+
+fn single_execution_input<'a>(
+    streams: &'a [StreamSlot<'a>],
+    input_start: usize,
+) -> Result<StreamInput<'a>> {
+    streams
+        .get(input_start)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("node input is missing"))?
+        .as_input()
+}
+
+fn byte_preserving_conversion_output_width(
+    standard_id: u32,
+    input_count: usize,
+    input: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Option<usize>> {
+    let output_width = match standard_id {
+        standard::CONVERT_SERIAL_TO_STRUCT_ID => {
+            if !header.is_empty() {
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("conversion headers are unsupported"));
+            }
+            input.element_width
+        }
+        standard::CONVERT_STRUCT_TO_SERIAL_ID => {
+            let element_width = read_single_conversion_width(header)?;
+            if !input.bytes.len().is_multiple_of(element_width) {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("serial stream size is not a multiple of struct width"));
+            }
+            element_width
+        }
+        standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
+            if !header.is_empty() {
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("convert_num_to_struct_le headers are unsupported"));
+            }
+            input.element_width
+        }
+        standard::CONVERT_STRING_TO_SERIAL_ID => {
+            if !header.is_empty() {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("convert_string_to_serial header must be empty"));
+            }
+            if input.element_width != 1 {
+                return Err(Error::new(ErrorKind::InvalidType)
+                    .with_detail("convert_string_to_serial input must be byte strings"));
+            }
+            let lengths = input.string_lengths.ok_or_else(|| {
+                Error::new(ErrorKind::InvalidType)
+                    .with_detail("convert_string_to_serial input is missing string lengths")
+            })?;
+            if checked_sum_u32(lengths)? != input.bytes.len() {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("convert_string_to_serial lengths do not sum to content size"));
+            }
+            1
+        }
+        standard::CONVERT_SERIAL_TO_NUM_LE_ID => {
+            if !header.is_empty() {
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("convert_serial_to_num_le headers are unsupported"));
+            }
+            1
+        }
+        standard::CONVERT_NUM_TO_SERIAL_LE_ID => {
+            let [int_log] = header else {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("convert_num_to_serial_le header is malformed"));
+            };
+            if *int_log > 3 {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("convert_num_to_serial_le integer width is invalid"));
+            }
+            let int_size = 1usize
+                .checked_shl(u32::from(*int_log))
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            if !input.bytes.len().is_multiple_of(int_size) {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("serial stream size is not a multiple of integer width"));
+            }
+            int_size
+        }
+        _ => return Ok(None),
+    };
+    if input_count != 1 {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("single-input transform received the wrong input count"));
+    }
+    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok(Some(output_width))
+}
+
+fn read_single_conversion_width(header: &[u8]) -> Result<usize> {
+    let mut offset = 0usize;
+    let element_width = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("convert_struct_to_serial header has trailing bytes"));
+    }
+    let element_width = usize::try_from(element_width).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("conversion element width is too large")
+    })?;
+    if element_width == 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("conversion element width must be nonzero"));
+    }
+    Ok(element_width)
+}
+
 struct ChunkExecutionPlan {
     nodes: Vec<NodeExecutionPlan>,
     regen_targets: Vec<bool>,
@@ -327,7 +564,7 @@ struct NodeExecutionPlan {
     standard_id: u32,
     input_start: usize,
     input_count: usize,
-    output_targets: Vec<usize>,
+    output_targets: SmallVec<[usize; 2]>,
     variable_inputs: u32,
     header_start: usize,
     header_size: usize,
@@ -362,7 +599,7 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
         let input_end = stream_cursor
             .checked_add(input_count)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let mut output_targets = Vec::new();
+        let mut output_targets = SmallVec::<[usize; 2]>::new();
         output_targets
             .try_reserve_exact(node.regen_distances().len())
             .map_err(|_| {
@@ -500,14 +737,14 @@ fn collect_node_inputs<'a>(
     streams: &'a [StreamSlot<'a>],
     input_start: usize,
     input_count: usize,
-) -> Result<Vec<StreamInput<'a>>> {
+) -> Result<SmallVec<[StreamInput<'a>; 8]>> {
     let input_end = input_start
         .checked_add(input_count)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let input_slots = streams.get(input_start..input_end).ok_or_else(|| {
         Error::new(ErrorKind::InvalidGraph).with_detail("node input range is out of bounds")
     })?;
-    let mut inputs = Vec::new();
+    let mut inputs = SmallVec::<[StreamInput<'a>; 8]>::new();
     inputs.try_reserve_exact(input_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("node input allocation failed")
     })?;
@@ -534,10 +771,10 @@ fn execute_standard_node(
     format_version: u32,
     limits: Limits,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
-) -> Result<Vec<OwnedStream>> {
+) -> Result<SmallVec<[OwnedStream; 2]>> {
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
-            decode_concat_node(inputs, header, limits)
+            decode_concat_node(inputs, header, limits).map(SmallVec::from_vec)
         }
         standard::SPLITN_ID => {
             one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
@@ -628,7 +865,9 @@ fn execute_standard_node(
             header,
             limits,
         )),
-        standard::MUX_LENGTHS_ID => decode_mux_lengths_node(inputs, header, limits),
+        standard::MUX_LENGTHS_ID => {
+            decode_mux_lengths_node(inputs, header, limits).map(SmallVec::from_vec)
+        }
         standard::LZ_ID => one_serial(decode_lz_node(inputs, header, limits)),
         standard::FIELD_LZ_ID => one_typed(decode_field_lz_node(inputs, header, limits)),
         standard::ZIGZAG_ID => one_typed(decode_zigzag_numeric_chunk(
@@ -683,12 +922,12 @@ fn execute_standard_node(
     }
 }
 
-fn one_serial(result: Result<Vec<u8>>) -> Result<Vec<OwnedStream>> {
-    Ok(vec![OwnedStream::serial(result?)])
+fn one_serial(result: Result<Vec<u8>>) -> Result<SmallVec<[OwnedStream; 2]>> {
+    Ok(smallvec![OwnedStream::serial(result?)])
 }
 
-fn one_typed(result: Result<OwnedStream>) -> Result<Vec<OwnedStream>> {
-    Ok(vec![result?])
+fn one_typed(result: Result<OwnedStream>) -> Result<SmallVec<[OwnedStream; 2]>> {
+    Ok(smallvec![result?])
 }
 
 fn single_input<'a>(inputs: &[StreamInput<'a>]) -> Result<&'a [u8]> {
@@ -1027,8 +1266,8 @@ fn decode_dispatch_string_node(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("dispatch_string indices require string inputs"));
     }
-    let mut per_input_positions = Vec::new();
-    per_input_positions
+    let mut sources = Vec::new();
+    sources
         .try_reserve_exact(string_inputs.len())
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
@@ -1055,28 +1294,7 @@ fn decode_dispatch_string_node(
         total_bytes = total_bytes
             .checked_add(byte_total)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        per_input_positions.push(0usize);
-    }
-    if index_count != total_string_count {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("dispatch_string index count does not match string count"));
-    }
-    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut byte_offsets = Vec::new();
-    byte_offsets
-        .try_reserve_exact(string_inputs.len())
-        .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
-        })?;
-    for input in string_inputs {
         let mut offsets = Vec::new();
-        let lengths = input
-            .string_lengths
-            .expect("validated string lengths exist");
         offsets.try_reserve_exact(lengths.len()).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
         })?;
@@ -1089,7 +1307,21 @@ fn decode_dispatch_string_node(
                 })?)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         }
-        byte_offsets.push(offsets);
+        sources.push(DispatchStringSource {
+            bytes: input.bytes,
+            lengths,
+            offsets,
+            position: 0,
+        });
+    }
+    if index_count != total_string_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatch_string index count does not match string count"));
+    }
+    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
     }
     let mut output = Vec::new();
     output.try_reserve_exact(total_bytes).map_err(|_| {
@@ -1104,9 +1336,7 @@ fn decode_dispatch_string_node(
             for &source in indices.bytes {
                 append_dispatched_string(
                     usize::from(source),
-                    string_inputs,
-                    &byte_offsets,
-                    &mut per_input_positions,
+                    &mut sources,
                     &mut output,
                     &mut output_lengths,
                 )?;
@@ -1116,9 +1346,7 @@ fn decode_dispatch_string_node(
             for source in indices.bytes.chunks_exact(2) {
                 append_dispatched_string(
                     usize::from(u16::from_le_bytes([source[0], source[1]])),
-                    string_inputs,
-                    &byte_offsets,
-                    &mut per_input_positions,
+                    &mut sources,
                     &mut output,
                     &mut output_lengths,
                 )?;
@@ -1126,13 +1354,8 @@ fn decode_dispatch_string_node(
         }
         _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
     }
-    for (position, input) in per_input_positions.iter().zip(string_inputs) {
-        if *position
-            != input
-                .string_lengths
-                .expect("validated string lengths exist")
-                .len()
-        {
+    for source in sources {
+        if source.position != source.lengths.len() {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("dispatch_string did not consume every source string"));
         }
@@ -1144,38 +1367,38 @@ fn decode_dispatch_string_node(
     })
 }
 
+struct DispatchStringSource<'a> {
+    bytes: &'a [u8],
+    lengths: &'a [u32],
+    offsets: Vec<usize>,
+    position: usize,
+}
+
 fn append_dispatched_string(
     source: usize,
-    string_inputs: &[StreamInput<'_>],
-    byte_offsets: &[Vec<usize>],
-    per_input_positions: &mut [usize],
+    sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
     output_lengths: &mut Vec<u32>,
 ) -> Result<()> {
-    let input = string_inputs.get(source).ok_or_else(|| {
+    let source = sources.get_mut(source).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
     })?;
-    let source_position = per_input_positions.get_mut(source).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
-    })?;
-    let lengths = input
-        .string_lengths
-        .expect("validated string lengths exist");
-    let length = *lengths.get(*source_position).ok_or_else(|| {
+    let length = *source.lengths.get(source.position).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
     })?;
-    let offset = byte_offsets[source][*source_position];
+    let offset = source.offsets[source.position];
     let length_usize = usize::try_from(length)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
     let end = offset
         .checked_add(length_usize)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let bytes = input.bytes.get(offset..end).ok_or_else(|| {
+    let bytes = source.bytes.get(offset..end).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
     })?;
     output.extend_from_slice(bytes);
     output_lengths.push(length);
-    *source_position = source_position
+    source.position = source
+        .position
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     Ok(())
@@ -3600,36 +3823,74 @@ fn unpack_lsb_bits(
     element_width: usize,
     output: &mut [u8],
 ) -> Result<()> {
-    let mask = if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    for (index, out) in output.chunks_exact_mut(element_width).enumerate() {
-        let bit_offset = index
-            .checked_mul(bits)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let value = read_packed_value(stored, bit_offset, bits, mask)?;
+    let full_width_bits = element_width
+        .checked_mul(8)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if bits == full_width_bits {
+        let src = stored.get(..output.len()).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+        })?;
+        output.copy_from_slice(src);
+        return Ok(());
+    }
+    if bits <= 56 {
+        return unpack_lsb_bits_u64(stored, bits, element_width, output);
+    }
+
+    let mask = (1u128 << bits) - 1;
+    let mut byte_index = 0usize;
+    let mut bit_buffer = 0u128;
+    let mut available_bits = 0usize;
+
+    for out in output.chunks_exact_mut(element_width) {
+        while available_bits < bits {
+            let byte = *stored.get(byte_index).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+            })?;
+            bit_buffer |= u128::from(byte) << available_bits;
+            available_bits += 8;
+            byte_index = byte_index
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+
+        let value = bit_buffer & mask;
         out.copy_from_slice(&value.to_le_bytes()[..element_width]);
+        bit_buffer >>= bits;
+        available_bits -= bits;
     }
     Ok(())
 }
 
-fn read_packed_value(stored: &[u8], bit_offset: usize, bits: usize, mask: u128) -> Result<u128> {
-    let byte_offset = bit_offset / 8;
-    let bit_shift = bit_offset % 8;
-    let lane_bytes = bit_shift
-        .checked_add(bits)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
-        .div_ceil(8);
-    let mut lane = 0u128;
-    for byte_index in 0..lane_bytes {
-        let byte = stored.get(byte_offset + byte_index).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-        })?;
-        lane |= u128::from(*byte) << (byte_index * 8);
+fn unpack_lsb_bits_u64(
+    stored: &[u8],
+    bits: usize,
+    element_width: usize,
+    output: &mut [u8],
+) -> Result<()> {
+    let mask = (1u64 << bits) - 1;
+    let mut byte_index = 0usize;
+    let mut bit_buffer = 0u64;
+    let mut available_bits = 0usize;
+
+    for out in output.chunks_exact_mut(element_width) {
+        while available_bits < bits {
+            let byte = *stored.get(byte_index).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
+            })?;
+            bit_buffer |= u64::from(byte) << available_bits;
+            available_bits += 8;
+            byte_index = byte_index
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+
+        let value = bit_buffer & mask;
+        out.copy_from_slice(&value.to_le_bytes()[..element_width]);
+        bit_buffer >>= bits;
+        available_bits -= bits;
     }
-    Ok((lane >> bit_shift) & mask)
+    Ok(())
 }
 
 fn decode_constant_serial_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -3878,21 +4139,69 @@ fn decode_delta_node(
             string_lengths: None,
         });
     }
-    output.extend_from_slice(header);
-    let mask = max_numeric_value(stored.element_width)?;
-    let mut previous = read_numeric_element(header, stored.element_width, 0)?;
-    for index in 0..stored_elements {
-        let delta = read_numeric_element(stored.bytes, stored.element_width, index)?;
-        previous = previous.wrapping_add(delta) & mask;
-        let mut encoded = [0u8; 8];
-        write_numeric_element(&mut encoded, stored.element_width, previous);
-        output.extend_from_slice(&encoded[..stored.element_width]);
-    }
+    output.resize(output_len, 0);
+    output[..stored.element_width].copy_from_slice(header);
+    decode_delta_elements(stored.bytes, header, stored.element_width, &mut output)?;
     Ok(OwnedStream {
         bytes: output,
         element_width: stored.element_width,
         string_lengths: None,
     })
+}
+
+fn decode_delta_elements(
+    stored: &[u8],
+    header: &[u8],
+    element_width: usize,
+    output: &mut [u8],
+) -> Result<()> {
+    match element_width {
+        1 => {
+            let mut previous = header[0];
+            for (index, &delta) in stored.iter().enumerate() {
+                previous = previous.wrapping_add(delta);
+                output[index + 1] = previous;
+            }
+        }
+        2 => {
+            let mut previous = u16::from_le_bytes([header[0], header[1]]);
+            for (index, delta) in stored.chunks_exact(2).enumerate() {
+                previous = previous.wrapping_add(u16::from_le_bytes([delta[0], delta[1]]));
+                let offset = (index + 1)
+                    .checked_mul(2)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                output[offset..offset + 2].copy_from_slice(&previous.to_le_bytes());
+            }
+        }
+        4 => {
+            let mut previous = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            for (index, delta) in stored.chunks_exact(4).enumerate() {
+                previous = previous
+                    .wrapping_add(u32::from_le_bytes([delta[0], delta[1], delta[2], delta[3]]));
+                let offset = (index + 1)
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                output[offset..offset + 4].copy_from_slice(&previous.to_le_bytes());
+            }
+        }
+        8 => {
+            let mut previous = u64::from_le_bytes([
+                header[0], header[1], header[2], header[3], header[4], header[5], header[6],
+                header[7],
+            ]);
+            for (index, delta) in stored.chunks_exact(8).enumerate() {
+                previous = previous.wrapping_add(u64::from_le_bytes([
+                    delta[0], delta[1], delta[2], delta[3], delta[4], delta[5], delta[6], delta[7],
+                ]));
+                let offset = (index + 1)
+                    .checked_mul(8)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                output[offset..offset + 8].copy_from_slice(&previous.to_le_bytes());
+            }
+        }
+        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
+    }
+    Ok(())
 }
 
 fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
