@@ -50,12 +50,95 @@ fn write_transpose_split_output_safe(
     output_len: usize,
     output: &mut Vec<u8>,
 ) {
+    match inputs {
+        [lane0, lane1] => {
+            write_2_safe(lane0.bytes, lane1.bytes, output);
+            return;
+        }
+        [lane0, lane1, lane2, lane3] => {
+            write_4_safe(lane0.bytes, lane1.bytes, lane2.bytes, lane3.bytes, output);
+            return;
+        }
+        [lane0, lane1, lane2, lane3, lane4, lane5, lane6, lane7] => {
+            write_8_safe(
+                lane0.bytes,
+                lane1.bytes,
+                lane2.bytes,
+                lane3.bytes,
+                lane4.bytes,
+                lane5.bytes,
+                lane6.bytes,
+                lane7.bytes,
+                output,
+            );
+            return;
+        }
+        _ => {}
+    }
+
     output.resize(output_len, 0);
     let width = inputs.len();
     for (element, out) in output.chunks_exact_mut(width).enumerate() {
         for (byte, lane) in out.iter_mut().zip(inputs) {
             *byte = lane.bytes[element];
         }
+    }
+}
+
+fn write_2_safe(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
+    let len = lane0.len();
+    debug_assert_eq!(lane1.len(), len);
+    output.resize(len * 2, 0);
+    for (index, out) in output.chunks_exact_mut(2).enumerate() {
+        out[0] = lane0[index];
+        out[1] = lane1[index];
+    }
+}
+
+fn write_4_safe(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
+    let len = lane0.len();
+    debug_assert_eq!(lane1.len(), len);
+    debug_assert_eq!(lane2.len(), len);
+    debug_assert_eq!(lane3.len(), len);
+    output.resize(len * 4, 0);
+    for (index, out) in output.chunks_exact_mut(4).enumerate() {
+        out[0] = lane0[index];
+        out[1] = lane1[index];
+        out[2] = lane2[index];
+        out[3] = lane3[index];
+    }
+}
+
+#[expect(clippy::too_many_arguments, reason = "fixed-width lane writer")]
+fn write_8_safe(
+    lane0: &[u8],
+    lane1: &[u8],
+    lane2: &[u8],
+    lane3: &[u8],
+    lane4: &[u8],
+    lane5: &[u8],
+    lane6: &[u8],
+    lane7: &[u8],
+    output: &mut Vec<u8>,
+) {
+    let len = lane0.len();
+    debug_assert_eq!(lane1.len(), len);
+    debug_assert_eq!(lane2.len(), len);
+    debug_assert_eq!(lane3.len(), len);
+    debug_assert_eq!(lane4.len(), len);
+    debug_assert_eq!(lane5.len(), len);
+    debug_assert_eq!(lane6.len(), len);
+    debug_assert_eq!(lane7.len(), len);
+    output.resize(len * 8, 0);
+    for (index, out) in output.chunks_exact_mut(8).enumerate() {
+        out[0] = lane0[index];
+        out[1] = lane1[index];
+        out[2] = lane2[index];
+        out[3] = lane3[index];
+        out[4] = lane4[index];
+        out[5] = lane5[index];
+        out[6] = lane6[index];
+        out[7] = lane7[index];
     }
 }
 

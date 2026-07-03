@@ -478,7 +478,7 @@ fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Erro
 fn bench_limits() -> ozlrip::Limits {
     ozlrip::Limits {
         max_expansion_ratio: 1_000_000,
-        ..ozlrip::Limits::default()
+        ..ozlrip::Limits::strict()
     }
 }
 

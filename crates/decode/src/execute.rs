@@ -20,6 +20,7 @@ mod fast_bitreader;
 mod fast_delta;
 mod fast_dispatch;
 mod fast_split_struct;
+mod fast_tokenize;
 mod fast_transpose;
 
 #[cfg(test)]
@@ -3835,7 +3836,7 @@ fn decode_tokenize_fixed_node(
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("tokenize allocation failed")
     })?;
-    decode_tokenize_indices(
+    fast_tokenize::decode_tokenize_indices(
         alphabet.bytes,
         alphabet_size,
         element_width,
@@ -3849,104 +3850,6 @@ fn decode_tokenize_fixed_node(
         string_lengths: None,
         recyclable: false,
     })
-}
-
-#[expect(
-    clippy::inline_always,
-    reason = "profiled SAO tokenize hot path benefits from inlining this loop"
-)]
-#[inline(always)]
-fn decode_tokenize_indices(
-    alphabet: &[u8],
-    alphabet_size: usize,
-    element_width: usize,
-    indices: &[u8],
-    index_width: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    match index_width {
-        1 => {
-            for &index in indices {
-                append_tokenized_element(
-                    alphabet,
-                    alphabet_size,
-                    element_width,
-                    index.into(),
-                    output,
-                )?;
-            }
-        }
-        2 => {
-            for index in indices.chunks_exact(2) {
-                append_tokenized_element(
-                    alphabet,
-                    alphabet_size,
-                    element_width,
-                    u16::from_le_bytes([index[0], index[1]]).into(),
-                    output,
-                )?;
-            }
-        }
-        4 => {
-            for index in indices.chunks_exact(4) {
-                append_tokenized_element(
-                    alphabet,
-                    alphabet_size,
-                    element_width,
-                    u32::from_le_bytes([index[0], index[1], index[2], index[3]])
-                        .try_into()
-                        .map_err(|_| {
-                            Error::new(ErrorKind::LimitExceeded)
-                                .with_detail("numeric value is too large")
-                        })?,
-                    output,
-                )?;
-            }
-        }
-        8 => {
-            for index in indices.chunks_exact(8) {
-                append_tokenized_element(
-                    alphabet,
-                    alphabet_size,
-                    element_width,
-                    u64::from_le_bytes([
-                        index[0], index[1], index[2], index[3], index[4], index[5], index[6],
-                        index[7],
-                    ])
-                    .try_into()
-                    .map_err(|_| {
-                        Error::new(ErrorKind::LimitExceeded)
-                            .with_detail("numeric value is too large")
-                    })?,
-                    output,
-                )?;
-            }
-        }
-        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
-    }
-    Ok(())
-}
-
-#[expect(
-    clippy::inline_always,
-    reason = "profiled SAO tokenize hot path benefits from inlining this leaf"
-)]
-#[inline(always)]
-fn append_tokenized_element(
-    alphabet: &[u8],
-    alphabet_size: usize,
-    element_width: usize,
-    index: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    if index >= alphabet_size {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed index is out of bounds")
-        );
-    }
-    let start = index * element_width;
-    output.extend_from_slice(&alphabet[start..start + element_width]);
-    Ok(())
 }
 
 struct QuantizeParams {

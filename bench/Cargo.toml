@@ -10,6 +10,7 @@ build = "build.rs"
 [features]
 default = ["ozlrip/default"]
 no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
+paranoid = ["ozlrip/default", "ozlrip/paranoid"]
 
 [dependencies]
 ozlrip = { path = "..", default-features = false }
