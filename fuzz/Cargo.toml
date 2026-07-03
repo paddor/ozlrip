@@ -63,6 +63,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_split_by_struct_node"
+path = "fuzz_targets/decode_split_by_struct_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_dispatch_n_by_tag_node"
+path = "fuzz_targets/decode_dispatch_n_by_tag_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_bitpack_node"
 path = "fuzz_targets/decode_bitpack_node.rs"
 test = false
