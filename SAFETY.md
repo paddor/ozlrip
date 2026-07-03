@@ -18,6 +18,10 @@ Current unsafe leaves:
   delta streams into pre-reserved `Vec<u8>` storage and sets the length after
   all bytes are initialized. The caller validates element width, header size,
   output size, allocation limits, and capacity before entry.
+- `ozlrip-decode::execute::fast_dispatch`: copies validated dispatchN_byTag
+  segments into pre-reserved `Vec<u8>` storage and sets the length after all
+  bytes are initialized. The caller validates tag widths, segment-size widths,
+  source totals, output size, allocation limits, and capacity before entry.
 - `ozlrip-decode::execute::fast_split_struct`: appends validated
   split-by-struct streams into pre-reserved `Vec<u8>` storage and sets the
   length after all bytes are initialized. The caller validates equal element

@@ -17,6 +17,7 @@ use crate::{parse::FramePlan, standard};
 
 mod fast_bitpack;
 mod fast_delta;
+mod fast_dispatch;
 mod fast_split_struct;
 mod fast_transpose;
 
@@ -2055,31 +2056,15 @@ fn decode_dispatch_n_by_tag_node(
         }
     }
 
-    let mut source_positions = vec![0usize; segment_inputs.len()];
     let mut output = Vec::new();
-    output.try_reserve_exact(total_output).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dispatchN_byTag output allocation failed")
-    })?;
-    for segment in 0..segment_count {
-        let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;
-        let size =
-            read_usize_numeric_element(segment_sizes.bytes, segment_sizes.element_width, segment)?;
-        let input = segment_inputs.get(tag).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
-        })?;
-        let position = source_positions.get_mut(tag).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
-        })?;
-        let end = position
-            .checked_add(size)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let segment_bytes = input.bytes.get(*position..end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail("dispatchN_byTag source stream is truncated")
-        })?;
-        output.extend_from_slice(segment_bytes);
-        *position = end;
-    }
+    fast_dispatch::decode_dispatch_n_by_tag_to_output(
+        tags,
+        segment_sizes,
+        segment_inputs,
+        segment_count,
+        total_output,
+        &mut output,
+    )?;
     if output.len() != total_output {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag output size mismatch")
