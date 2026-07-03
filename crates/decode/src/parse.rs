@@ -993,19 +993,28 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
             min_outputs: 1,
             max_outputs: Some(1),
         }),
-        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::TRANSPOSE_SPLIT_ID => {
+        standard::SPLITN_ID
+        | standard::SPLITN_STRUCT_ID
+        | standard::SPLIT_BY_STRUCT_ID
+        | standard::TRANSPOSE_SPLIT_ID => Some(StandardNodeShape {
+            static_inputs: 0,
+            allows_variable_inputs: true,
+            min_outputs: 1,
+            max_outputs: Some(1),
+        }),
+        standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
             Some(StandardNodeShape {
-                static_inputs: 0,
-                allows_variable_inputs: true,
+                static_inputs: 2,
+                allows_variable_inputs: false,
                 min_outputs: 1,
-                max_outputs: Some(1),
+                max_outputs: None,
             })
         }
-        standard::CONCAT_SERIAL_ID => Some(StandardNodeShape {
+        standard::DISPATCH_N_BY_TAG_ID => Some(StandardNodeShape {
             static_inputs: 2,
-            allows_variable_inputs: false,
+            allows_variable_inputs: true,
             min_outputs: 1,
-            max_outputs: None,
+            max_outputs: Some(1),
         }),
         _ => None,
     }

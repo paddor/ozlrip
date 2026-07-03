@@ -368,6 +368,32 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             extra_args: &[],
             relaxed_limits: false,
         },
+        InteropCase {
+            name: "upstream-parquet-simple",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/parquet/simple.parquet"),
+            profile: "parquet",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: true,
+        },
+        InteropCase {
+            name: "upstream-parquet-nested",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/parquet/nested.parquet"),
+            profile: "parquet",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: true,
+        },
+        InteropCase {
+            name: "upstream-sddl2-sample-0",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_0.bin"),
+            profile: "sddl2",
+            profile_arg: Some(
+                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
+            ),
+            extra_args: &[],
+            relaxed_limits: false,
+        },
     ]
 }
 

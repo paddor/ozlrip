@@ -408,8 +408,14 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
 
 fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
     let static_inputs: usize = match standard_id {
-        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::TRANSPOSE_SPLIT_ID => 0,
+        standard::SPLITN_ID
+        | standard::SPLITN_STRUCT_ID
+        | standard::SPLIT_BY_STRUCT_ID
+        | standard::TRANSPOSE_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
+        | standard::CONCAT_NUM_ID
+        | standard::CONCAT_STRUCT_ID
+        | standard::DISPATCH_N_BY_TAG_ID
         | standard::FLATPACK_ID
         | standard::SENTINEL_ID
         | standard::SEPARATE_STRING_COMPONENTS_ID
@@ -528,11 +534,19 @@ fn execute_standard_node(
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<Vec<OwnedStream>> {
     match standard_id {
-        standard::CONCAT_SERIAL_ID => one_serial(decode_concat_serial_node(inputs, header, limits)),
+        standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
+            decode_concat_node(inputs, header, limits)
+        }
         standard::SPLITN_ID => {
             one_serial(decode_splitn_node(inputs, variable_inputs, header, limits))
         }
         standard::SPLITN_STRUCT_ID => one_typed(decode_splitn_typed_node(
+            inputs,
+            variable_inputs,
+            header,
+            limits,
+        )),
+        standard::SPLIT_BY_STRUCT_ID => one_typed(decode_split_by_struct_node(
             inputs,
             variable_inputs,
             header,
@@ -548,6 +562,13 @@ fn execute_standard_node(
             limits,
         )),
         standard::DISPATCH_STRING_ID => one_typed(decode_dispatch_string_node(
+            inputs,
+            variable_inputs,
+            header,
+            format_version,
+            limits,
+        )),
+        standard::DISPATCH_N_BY_TAG_ID => one_serial(decode_dispatch_n_by_tag_node(
             inputs,
             variable_inputs,
             header,
@@ -732,50 +753,101 @@ impl OwnedStream {
     }
 }
 
-fn decode_concat_serial_node(
+fn decode_concat_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<OwnedStream>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("concat_serial transform headers are unsupported"));
+            .with_detail("concat transform headers are unsupported"));
     }
     let [sizes, concatenated] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("concat_serial input count does not match node shape"));
+            .with_detail("concat input count does not match node shape"));
     };
-    let sizes = sizes.bytes;
-    let concatenated = concatenated.bytes;
-    if sizes.len() != 4 {
+    let output_count = concat_size_count(sizes)?;
+    if concatenated.element_width == 0 {
+        return Err(Error::new(ErrorKind::InvalidType).with_detail("concat element width is zero"));
+    }
+    if !concatenated
+        .bytes
+        .len()
+        .is_multiple_of(concatenated.element_width)
+    {
         return Err(
-            Error::new(ErrorKind::Malformed).with_detail("concat_serial size table is malformed")
+            Error::new(ErrorKind::Malformed).with_detail("concat input has partial element")
         );
     }
-    let decoded_size =
-        usize::try_from(u32::from_le_bytes(sizes.try_into().map_err(|_| {
-            Error::new(ErrorKind::Malformed).with_detail("invalid concat size")
-        })?))
-        .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("concat size is too large")
-        })?;
-    if decoded_size != concatenated.len() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("concat_serial size does not match input")
-        );
-    }
-    if decoded_size > limits.max_decoded_bytes || decoded_size > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
+    if output_count == 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("concat size table is empty"));
     }
 
-    let mut output = Vec::new();
-    output.try_reserve_exact(decoded_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+    let total_elements = numeric_element_count(concatenated.bytes, concatenated.element_width)?;
+    let mut consumed_elements = 0usize;
+    let mut consumed_bytes = 0usize;
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("concat output allocation failed")
     })?;
-    output.extend_from_slice(concatenated);
-    Ok(output)
+
+    for output_index in 0..output_count {
+        let output_elements = read_concat_size(sizes, output_index)?;
+        let output_bytes = output_elements
+            .checked_mul(concatenated.element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if output_bytes > limits.max_decoded_bytes || output_bytes > limits.max_buffer_bytes {
+            return Err(
+                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+            );
+        }
+        let next_elements = consumed_elements
+            .checked_add(output_elements)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let next_bytes = consumed_bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if next_elements > total_elements || next_bytes > concatenated.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("concat size exceeds input"));
+        }
+        let mut output = Vec::new();
+        output.try_reserve_exact(output_bytes).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+        })?;
+        output.extend_from_slice(&concatenated.bytes[consumed_bytes..next_bytes]);
+        outputs.push(OwnedStream {
+            bytes: output,
+            element_width: concatenated.element_width,
+            string_lengths: None,
+        });
+        consumed_elements = next_elements;
+        consumed_bytes = next_bytes;
+    }
+
+    if consumed_elements != total_elements || consumed_bytes != concatenated.bytes.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("concat sizes do not consume input")
+        );
+    }
+    Ok(outputs)
+}
+
+fn concat_size_count(sizes: &StreamInput<'_>) -> Result<usize> {
+    match sizes.element_width {
+        1 | 4 => numeric_element_count(sizes.bytes, 4),
+        _ => {
+            Err(Error::new(ErrorKind::InvalidType).with_detail("concat sizes width is unsupported"))
+        }
+    }
+}
+
+fn read_concat_size(sizes: &StreamInput<'_>, index: usize) -> Result<usize> {
+    match sizes.element_width {
+        1 | 4 => read_usize_numeric_element(sizes.bytes, 4, index),
+        _ => {
+            Err(Error::new(ErrorKind::InvalidType).with_detail("concat sizes width is unsupported"))
+        }
+    }
 }
 
 fn is_transpose_split(id: u32) -> bool {
@@ -1067,6 +1139,135 @@ fn decode_dispatch_string_node(
         element_width: 1,
         string_lengths: Some(output_lengths),
     })
+}
+
+fn decode_dispatch_n_by_tag_node(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag header must be empty")
+        );
+    }
+    let variable_inputs = usize::try_from(variable_inputs)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
+    if inputs.len()
+        != variable_inputs
+            .checked_add(2)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("dispatchN_byTag input count does not match node shape"));
+    }
+    let [tags, segment_sizes, segment_inputs @ ..] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("dispatchN_byTag input count does not match node shape"));
+    };
+    if segment_inputs.len() != variable_inputs {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("dispatchN_byTag variable input count does not match node shape"));
+    }
+    let expected_tag_width = if format_version < 20 { 1 } else { 2 };
+    if tags.element_width > expected_tag_width {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatchN_byTag tag width is unsupported"));
+    }
+    validate_numeric_stream_width(tags.element_width, "dispatchN_byTag tags")?;
+    validate_numeric_stream_width(segment_sizes.element_width, "dispatchN_byTag segment sizes")?;
+    let segment_count = numeric_element_count(segment_sizes.bytes, segment_sizes.element_width)?;
+    if numeric_element_count(tags.bytes, tags.element_width)? != segment_count {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatchN_byTag tag count does not match segment count"));
+    }
+    if segment_count != 0 && segment_inputs.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("dispatchN_byTag segments require source streams"));
+    }
+    if format_version < 20 && segment_inputs.len() >= 256 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatchN_byTag source count is unsupported"));
+    }
+    if format_version >= 20 && segment_inputs.len() >= (1usize << 16) {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatchN_byTag source count is unsupported"));
+    }
+
+    let mut source_totals = Vec::new();
+    source_totals
+        .try_reserve_exact(segment_inputs.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dispatchN_byTag allocation failed")
+        })?;
+    let mut total_output = 0usize;
+    for input in segment_inputs {
+        if input.element_width == 0 {
+            return Err(Error::new(ErrorKind::InvalidType)
+                .with_detail("dispatchN_byTag source width is zero"));
+        }
+        source_totals.push(0usize);
+        total_output = total_output
+            .checked_add(input.bytes.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    if total_output > limits.max_decoded_bytes || total_output > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    for segment in 0..segment_count {
+        let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;
+        let size =
+            read_usize_numeric_element(segment_sizes.bytes, segment_sizes.element_width, segment)?;
+        let source_total = source_totals.get_mut(tag).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
+        })?;
+        *source_total = source_total
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    for (total, input) in source_totals.iter().zip(segment_inputs) {
+        if *total != input.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatchN_byTag segment sizes do not consume source stream"));
+        }
+    }
+
+    let mut source_positions = vec![0usize; segment_inputs.len()];
+    let mut output = Vec::new();
+    output.try_reserve_exact(total_output).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dispatchN_byTag output allocation failed")
+    })?;
+    for segment in 0..segment_count {
+        let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;
+        let size =
+            read_usize_numeric_element(segment_sizes.bytes, segment_sizes.element_width, segment)?;
+        let input = segment_inputs.get(tag).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
+        })?;
+        let position = source_positions.get_mut(tag).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
+        })?;
+        let end = position
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let segment_bytes = input.bytes.get(*position..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail("dispatchN_byTag source stream is truncated")
+        })?;
+        output.extend_from_slice(segment_bytes);
+        *position = end;
+    }
+    if output.len() != total_output {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag output size mismatch")
+        );
+    }
+    Ok(output)
 }
 
 fn decode_string_to_serial_node(
@@ -1372,6 +1573,85 @@ fn splitn_empty_element_width(header: &[u8]) -> Result<usize> {
     }
     usize::try_from(element_width)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("splitn width is too large"))
+}
+
+fn decode_split_by_struct_node(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("split_by_struct headers are unsupported"));
+    }
+    let input_count = usize::try_from(variable_inputs).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("too many split_by_struct inputs")
+    })?;
+    if inputs.len() != input_count {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("split_by_struct input count does not match node shape"));
+    }
+    let Some(first) = inputs.first() else {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("split_by_struct requires inputs"));
+    };
+    if first.element_width == 0 {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("split_by_struct field width is zero")
+        );
+    }
+    if !first.bytes.len().is_multiple_of(first.element_width) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("split_by_struct input has partial element"));
+    }
+
+    let element_count = first.bytes.len() / first.element_width;
+    let mut struct_width = 0usize;
+    for input in inputs {
+        if input.element_width == 0 {
+            return Err(Error::new(ErrorKind::InvalidType)
+                .with_detail("split_by_struct field width is zero"));
+        }
+        if !input.bytes.len().is_multiple_of(input.element_width) {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("split_by_struct input has partial element"));
+        }
+        if input.bytes.len() / input.element_width != element_count {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("split_by_struct inputs have mismatched element counts"));
+        }
+        struct_width = struct_width
+            .checked_add(input.element_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    let output_len = element_count
+        .checked_mul(struct_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("split_by_struct allocation failed")
+    })?;
+    for element in 0..element_count {
+        for input in inputs {
+            let start = element
+                .checked_mul(input.element_width)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let end = start
+                .checked_add(input.element_width)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            output.extend_from_slice(&input.bytes[start..end]);
+        }
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 1,
+        string_lengths: None,
+    })
 }
 
 fn decode_mux_lengths_node(
@@ -3941,6 +4221,8 @@ mod tests {
             standard::BITPACK_INT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
+            standard::CONCAT_NUM_ID,
+            standard::CONCAT_STRUCT_ID,
             standard::CONSTANT_SERIAL_ID,
             standard::CONVERT_NUM_TO_SERIAL_LE_ID,
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
@@ -3950,6 +4232,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::DISPATCH_N_BY_TAG_ID,
             standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
             standard::FSE_V2_ID,
@@ -3966,6 +4249,7 @@ mod tests {
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::SPLITN_STRUCT_ID,
+            standard::SPLIT_BY_STRUCT_ID,
             standard::TOKENIZE_FIXED_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -3983,6 +4267,8 @@ mod tests {
             standard::BITPACK_INT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
+            standard::CONCAT_NUM_ID,
+            standard::CONCAT_STRUCT_ID,
             standard::CONSTANT_SERIAL_ID,
             standard::CONVERT_NUM_TO_SERIAL_LE_ID,
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
@@ -3992,6 +4278,7 @@ mod tests {
             standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
+            standard::DISPATCH_N_BY_TAG_ID,
             standard::DISPATCH_STRING_ID,
             standard::FIELD_LZ_ID,
             standard::FSE_V2_ID,
@@ -4008,6 +4295,7 @@ mod tests {
             standard::SEPARATE_STRING_COMPONENTS_ID,
             standard::SPLITN_ID,
             standard::SPLITN_STRUCT_ID,
+            standard::SPLIT_BY_STRUCT_ID,
             standard::TOKENIZE_FIXED_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
@@ -4101,6 +4389,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_concat_typed_outputs() {
+        let outputs = decode_concat_node(
+            &[
+                StreamInput {
+                    bytes: &[2, 0, 0, 0, 1, 0, 0, 0],
+                    element_width: 4,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[1, 0, 2, 0, 3, 0],
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].element_width, 2);
+        assert_eq!(outputs[0].bytes, [1, 0, 2, 0]);
+        assert_eq!(outputs[1].element_width, 2);
+        assert_eq!(outputs[1].bytes, [3, 0]);
+    }
+
+    #[test]
     fn rejects_concat_serial_output_limit_without_mutating_destination() {
         let input = concat_serial_frame(b"openzl concat");
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
@@ -4139,6 +4454,66 @@ mod tests {
 
         assert_eq!(written, 0);
         assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn decodes_split_by_struct_node() {
+        let output = decode_split_by_struct_node(
+            &[
+                StreamInput {
+                    bytes: &[1, 2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[3, 0, 4, 0],
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            2,
+            &[],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 1);
+        assert_eq!(output.bytes, [1, 3, 0, 2, 4, 0]);
+    }
+
+    #[test]
+    fn decodes_dispatch_n_by_tag_node() {
+        let output = decode_dispatch_n_by_tag_node(
+            &[
+                StreamInput {
+                    bytes: &[0, 1, 0],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[2, 3, 1],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"abc",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"XYZ",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            2,
+            &[],
+            21,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output, b"abXYZc");
     }
 
     #[test]
