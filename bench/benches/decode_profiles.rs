@@ -34,7 +34,10 @@ fn main() {
     let mut results = Vec::new();
 
     for case in &cases {
-        if case_filter.as_deref().is_some_and(|filter| filter != case.name) {
+        if case_filter
+            .as_deref()
+            .is_some_and(|filter| filter != case.name)
+        {
             continue;
         }
         let mut ozlrip_mbps = None;
@@ -69,9 +72,7 @@ fn generated_cases(case_filter: Option<&str>) -> Vec<BenchCase> {
         cases.extend(serial_generated_cases(&zli, case_filter));
         cases.extend(zli_generated_cases(&zli, case_filter));
     } else {
-        eprintln!(
-            "skipping benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli"
-        );
+        eprintln!("skipping benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli");
     }
     cases
 }
@@ -256,7 +257,11 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
     if let Some(profile_arg) = &spec.profile_arg {
         command.arg("--profile-arg").arg(profile_arg);
     }
-    command.args(spec.extra_args).arg("-o").arg(&frame_path).arg("-f");
+    command
+        .args(spec.extra_args)
+        .arg("-o")
+        .arg(&frame_path)
+        .arg("-f");
     let output = command.output().expect("run zli compress");
     if !output.status.success() {
         panic!(
@@ -614,6 +619,7 @@ struct BenchResult {
     frame_ratio: f64,
     timestamp_unix: u64,
     git_rev: String,
+    git_dirty: bool,
 }
 
 impl BenchResult {
@@ -634,6 +640,7 @@ impl BenchResult {
             frame_ratio,
             timestamp_unix: timestamp_unix(),
             git_rev: git_rev(),
+            git_dirty: git_dirty(),
         }
     }
 
@@ -644,7 +651,7 @@ impl BenchResult {
                 r#""input_size": {}, "frame_size": {}, "#,
                 r#""frame_ratio": {:.4}, "median_decode_ns": {:.1}, "best_decode_ns": {:.1}, "#,
                 r#""decoded_mbps": {:.1}, "frame_mbps": {:.1}, "#,
-                r#""timestamp_unix": {}, "git_rev": "{}"}}"#
+                r#""timestamp_unix": {}, "git_rev": "{}", "git_dirty": {}}}"#
             ),
             self.impl_name,
             self.input_name,
@@ -658,6 +665,7 @@ impl BenchResult {
             self.frame_mbps,
             self.timestamp_unix,
             self.git_rev,
+            self.git_dirty,
         )
     }
 }
@@ -726,5 +734,15 @@ fn git_rev() -> String {
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
         }
         _ => "unknown".to_owned(),
+    }
+}
+
+fn git_dirty() -> bool {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        _ => true,
     }
 }
