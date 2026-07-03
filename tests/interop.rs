@@ -325,6 +325,22 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "sao-sddl1-synthetic",
+            input: InteropInput::Inline(sao_synthetic()),
+            profile: "sddl",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl"),
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "sao-full-sddl1-synthetic",
+            input: InteropInput::Inline(sao_full_synthetic()),
+            profile: "sddl",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl"),
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "upstream-serial-repeated-string",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
             profile: "serial",
