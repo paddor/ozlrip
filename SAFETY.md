@@ -10,6 +10,10 @@ format validation.
 
 Current unsafe leaves:
 
+- `ozlrip-decode::execute::fast_delta`: reconstructs validated 1/2/4/8-byte
+  delta streams into pre-reserved `Vec<u8>` storage and sets the length after
+  all bytes are initialized. The caller validates element width, header size,
+  output size, allocation limits, and capacity before entry.
 - `ozlrip-decode::execute::fast_transpose`: writes validated 2/4/8-lane
   transpose outputs into pre-reserved `Vec<u8>` storage and sets the length
   after all bytes are initialized. The caller validates equal lane lengths,

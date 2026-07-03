@@ -15,6 +15,7 @@ use zrip_core::{
 use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
+mod fast_delta;
 mod fast_transpose;
 
 #[cfg(test)]
@@ -4173,54 +4174,18 @@ fn decode_delta_node(
             string_lengths: None,
         });
     }
-    output.resize(output_len, 0);
-    output[..stored.element_width].copy_from_slice(header);
-    decode_delta_elements(stored.bytes, header, stored.element_width, &mut output);
+    fast_delta::decode_delta_elements(
+        stored.bytes,
+        header,
+        stored.element_width,
+        output_len,
+        &mut output,
+    );
     Ok(OwnedStream {
         bytes: output,
         element_width: stored.element_width,
         string_lengths: None,
     })
-}
-
-fn decode_delta_elements(stored: &[u8], header: &[u8], element_width: usize, output: &mut [u8]) {
-    match element_width {
-        1 => {
-            let mut previous = header[0];
-            for (index, &delta) in stored.iter().enumerate() {
-                previous = previous.wrapping_add(delta);
-                output[index + 1] = previous;
-            }
-        }
-        2 => {
-            let mut previous = u16::from_le_bytes([header[0], header[1]]);
-            for (out, delta) in output[2..].chunks_exact_mut(2).zip(stored.chunks_exact(2)) {
-                previous = previous.wrapping_add(u16::from_le_bytes([delta[0], delta[1]]));
-                out.copy_from_slice(&previous.to_le_bytes());
-            }
-        }
-        4 => {
-            let mut previous = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            for (out, delta) in output[4..].chunks_exact_mut(4).zip(stored.chunks_exact(4)) {
-                previous = previous
-                    .wrapping_add(u32::from_le_bytes([delta[0], delta[1], delta[2], delta[3]]));
-                out.copy_from_slice(&previous.to_le_bytes());
-            }
-        }
-        8 => {
-            let mut previous = u64::from_le_bytes([
-                header[0], header[1], header[2], header[3], header[4], header[5], header[6],
-                header[7],
-            ]);
-            for (out, delta) in output[8..].chunks_exact_mut(8).zip(stored.chunks_exact(8)) {
-                previous = previous.wrapping_add(u64::from_le_bytes([
-                    delta[0], delta[1], delta[2], delta[3], delta[4], delta[5], delta[6], delta[7],
-                ]));
-                out.copy_from_slice(&previous.to_le_bytes());
-            }
-        }
-        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
-    }
 }
 
 fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
