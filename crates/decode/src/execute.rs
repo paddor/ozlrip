@@ -4484,16 +4484,30 @@ impl<'a> ForwardBitReader<'a> {
                 Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
             );
         }
-        let mut value = 0u64;
-        for bit in 0..bits {
-            let absolute = self
-                .bit_pos
-                .checked_add(bit)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            let byte = self.bytes[absolute / 8];
-            let set = (byte >> (absolute % 8)) & 1;
-            value |= u64::from(set) << bit;
+        let byte_pos = self.bit_pos / 8;
+        let bit_offset = self.bit_pos % 8;
+        let needed_bits = bit_offset
+            .checked_add(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let needed_bytes = needed_bits.div_ceil(8);
+        let byte_end = byte_pos
+            .checked_add(needed_bytes)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let bytes = self.bytes.get(byte_pos..byte_end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
+        })?;
+        let mut value = 0u128;
+        for (shift, &byte) in bytes.iter().enumerate() {
+            value |= u128::from(byte) << (shift * 8);
         }
+        value >>= bit_offset;
+        let mask = if bits == 64 {
+            u128::from(u64::MAX)
+        } else {
+            (1u128 << bits) - 1
+        };
+        let value =
+            u64::try_from(value & mask).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
         self.bit_pos = end;
         Ok(value)
     }
