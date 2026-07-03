@@ -411,7 +411,8 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::SPLITN_ID
         | standard::SPLITN_STRUCT_ID
         | standard::SPLIT_BY_STRUCT_ID
-        | standard::TRANSPOSE_SPLIT_ID => 0,
+        | standard::TRANSPOSE_SPLIT_ID
+        | standard::BIT_SPLIT_ID => 0,
         standard::CONCAT_SERIAL_ID
         | standard::CONCAT_NUM_ID
         | standard::CONCAT_STRUCT_ID
@@ -425,6 +426,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::QUANTIZE_LENGTHS_ID
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
+        | standard::TOKENIZE_NUMERIC_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
@@ -634,13 +636,17 @@ fn execute_standard_node(
             header,
             limits,
         )),
-        standard::DELTA_INT_ID => one_serial(decode_delta_serial8_chunk(
+        standard::DELTA_INT_ID => {
+            one_typed(decode_delta_node(single_stream(inputs)?, header, limits))
+        }
+        standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
             single_input(inputs)?,
             header,
             limits,
         )),
-        standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
-            single_input(inputs)?,
+        standard::BIT_SPLIT_ID => one_typed(decode_bitsplit_node(
+            inputs,
+            variable_inputs,
             header,
             limits,
         )),
@@ -669,7 +675,7 @@ fn execute_standard_node(
             &QUANTIZE_LENGTHS,
         )),
         standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, limits)),
-        standard::TOKENIZE_FIXED_ID => {
+        standard::TOKENIZE_FIXED_ID | standard::TOKENIZE_NUMERIC_ID => {
             one_typed(decode_tokenize_fixed_node(inputs, header, limits))
         }
         _ => Err(Error::new(ErrorKind::Unsupported)
@@ -1922,6 +1928,136 @@ fn numeric_element_count(bytes: &[u8], element_width: usize) -> Result<usize> {
 fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<usize> {
     usize::try_from(read_numeric_element(bytes, element_width, index)?)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large"))
+}
+
+fn decode_bitsplit_node(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let (&output_width, stored_widths) = header.split_first().ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("bitsplit header is missing output width")
+    })?;
+    let output_width = usize::from(output_width);
+    validate_numeric_stream_width(output_width, "bitsplit output")?;
+
+    let mut bit_widths = Vec::new();
+    bit_widths.try_reserve_exact(inputs.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitsplit width allocation failed")
+    })?;
+    let mut stored_sum = 0usize;
+    for &width in stored_widths {
+        if width == 0 {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("bitsplit width is zero"));
+        }
+        let width = usize::from(width);
+        stored_sum = stored_sum
+            .checked_add(width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        bit_widths.push(width);
+    }
+
+    let output_bits = output_width
+        .checked_mul(8)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if stored_sum > output_bits {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("bitsplit widths exceed output width")
+        );
+    }
+    if inputs.len() == stored_widths.len() + 1 {
+        let last_width = output_bits
+            .checked_sub(stored_sum)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if last_width == 0 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("bitsplit inferred width is zero")
+            );
+        }
+        bit_widths.push(last_width);
+    } else if inputs.len() != stored_widths.len() {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("bitsplit input count does not match header"));
+    }
+    if bit_widths.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitsplit has no bit widths"));
+    }
+    if usize::try_from(variable_inputs)
+        .ok()
+        .is_some_and(|count| count != inputs.len())
+    {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("bitsplit variable input count does not match inputs"));
+    }
+
+    let first = inputs
+        .first()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidGraph).with_detail("bitsplit has no inputs"))?;
+    let element_count = numeric_element_count(first.bytes, first.element_width)?;
+    for (input, &bit_width) in inputs.iter().zip(bit_widths.iter()) {
+        validate_numeric_stream_width(input.element_width, "bitsplit input")?;
+        if numeric_element_count(input.bytes, input.element_width)? != element_count {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("bitsplit input counts do not match")
+            );
+        }
+        if bit_width > input.element_width * 8 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("bitsplit width exceeds input width")
+            );
+        }
+        if input.element_width != bitsplit_element_width(bit_width)? {
+            return Err(Error::new(ErrorKind::InvalidType)
+                .with_detail("bitsplit input width does not match bit width"));
+        }
+    }
+
+    let output_len = element_count
+        .checked_mul(output_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("bitsplit allocation failed")
+    })?;
+    output.resize(output_len, 0);
+
+    for element in 0..element_count {
+        let mut value = 0u64;
+        let mut bit_pos = 0usize;
+        for (input, &bit_width) in inputs.iter().zip(bit_widths.iter()) {
+            let part = read_numeric_element(input.bytes, input.element_width, element)?;
+            value |= part << bit_pos;
+            bit_pos = bit_pos
+                .checked_add(bit_width)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+        let output_offset = element
+            .checked_mul(output_width)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        write_numeric_element(&mut output[output_offset..], output_width, value);
+    }
+
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: output_width,
+        string_lengths: None,
+    })
+}
+
+fn bitsplit_element_width(bit_width: usize) -> Result<usize> {
+    match bit_width {
+        1..=8 => Ok(1),
+        9..=16 => Ok(2),
+        17..=32 => Ok(4),
+        33..=64 => Ok(8),
+        _ => Err(Error::new(ErrorKind::Malformed).with_detail("bitsplit bit width is unsupported")),
+    }
 }
 
 fn checked_sum_u32(values: &[u32]) -> Result<usize> {
@@ -3520,23 +3656,31 @@ fn decode_zigzag_numeric_chunk(
     })
 }
 
-fn decode_delta_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
-    let output_len = match header.len() {
-        0 if stored.is_empty() => 0,
+fn decode_delta_node(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    validate_numeric_stream_width(stored.element_width, "delta input")?;
+    let stored_elements = numeric_element_count(stored.bytes, stored.element_width)?;
+    let output_elements = match header.len() {
+        0 if stored_elements == 0 => 0,
         0 => {
             return Err(
                 Error::new(ErrorKind::Malformed).with_detail("delta stream has no first value")
             );
         }
-        1 => stored.len().checked_add(1).ok_or_else(|| {
+        len if len == stored.element_width => stored_elements.checked_add(1).ok_or_else(|| {
             Error::new(ErrorKind::IntegerOverflow).with_detail("delta size overflowed")
         })?,
         _ => {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("delta header must contain one byte")
-            );
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("delta header must contain one element"));
         }
     };
+    let output_len = output_elements
+        .checked_mul(stored.element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
@@ -3546,17 +3690,28 @@ fn decode_delta_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> R
     output
         .try_reserve_exact(output_len)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("delta allocation failed"))?;
-    if output_len == 0 {
-        return Ok(output);
+    if output_elements == 0 {
+        return Ok(OwnedStream {
+            bytes: output,
+            element_width: stored.element_width,
+            string_lengths: None,
+        });
     }
-    output.push(header[0]);
-    for &delta in stored {
-        let previous = *output
-            .last()
-            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("missing delta base"))?;
-        output.push(previous.wrapping_add(delta));
+    output.extend_from_slice(header);
+    let mask = max_numeric_value(stored.element_width)?;
+    let mut previous = read_numeric_element(header, stored.element_width, 0)?;
+    for index in 0..stored_elements {
+        let delta = read_numeric_element(stored.bytes, stored.element_width, index)?;
+        previous = previous.wrapping_add(delta) & mask;
+        let mut encoded = [0u8; 8];
+        write_numeric_element(&mut encoded, stored.element_width, previous);
+        output.extend_from_slice(&encoded[..stored.element_width]);
     }
-    Ok(output)
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: stored.element_width,
+        string_lengths: None,
+    })
 }
 
 fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -4219,6 +4374,7 @@ mod tests {
         let mut supported = vec![
             standard::BITPACK_SERIAL_ID,
             standard::BITPACK_INT_ID,
+            standard::BIT_SPLIT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONCAT_NUM_ID,
@@ -4251,6 +4407,7 @@ mod tests {
             standard::SPLITN_STRUCT_ID,
             standard::SPLIT_BY_STRUCT_ID,
             standard::TOKENIZE_FIXED_ID,
+            standard::TOKENIZE_NUMERIC_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
@@ -4265,6 +4422,7 @@ mod tests {
         let mut covered = vec![
             standard::BITPACK_SERIAL_ID,
             standard::BITPACK_INT_ID,
+            standard::BIT_SPLIT_ID,
             standard::BITUNPACK_ID,
             standard::CONCAT_SERIAL_ID,
             standard::CONCAT_NUM_ID,
@@ -4297,6 +4455,7 @@ mod tests {
             standard::SPLITN_STRUCT_ID,
             standard::SPLIT_BY_STRUCT_ID,
             standard::TOKENIZE_FIXED_ID,
+            standard::TOKENIZE_NUMERIC_ID,
             standard::TRANSPOSE_SPLIT_ID,
             standard::TRANSPOSE_SPLIT2_ID,
             standard::TRANSPOSE_SPLIT4_ID,
@@ -4751,6 +4910,57 @@ mod tests {
                 },
             ],
             &[0x24],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn decodes_bitsplit_bf16_node() {
+        let mantissas = [0x01, 0x7f];
+        let exponents = [0x02, 0xff];
+        let signs = [0x00, 0x01];
+        let output = decode_bitsplit_node(
+            &[
+                StreamInput {
+                    bytes: &mantissas,
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &exponents,
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &signs,
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            3,
+            &[2, 7, 8],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 2);
+        assert_eq!(output.bytes, [0x01, 0x01, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn rejects_bitsplit_mismatched_input_width() {
+        let input = [0u8; 2];
+        let err = decode_bitsplit_node(
+            &[StreamInput {
+                bytes: &input,
+                element_width: 1,
+                string_lengths: None,
+            }],
+            1,
+            &[2, 9],
             Limits::default(),
         )
         .unwrap_err();

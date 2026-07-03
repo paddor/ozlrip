@@ -4,7 +4,7 @@ use std::{
     hint::black_box,
     io::Write,
     os::raw::c_void,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -30,9 +30,9 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_TARGET_MS),
     );
-    let cases = generated_cases();
     let impl_filter = env::var("OZLRIP_BENCH_IMPL").ok();
     let case_filter = env::var("OZLRIP_BENCH_CASE").ok();
+    let cases = generated_cases(case_filter.as_deref());
     let mut results = Vec::new();
 
     for case in &cases {
@@ -50,21 +50,22 @@ fn main() {
             results.push(ozlrip);
         }
 
+        let reference_impl = case.reference.impl_name();
         if impl_filter
             .as_deref()
-            .is_none_or(|filter| filter == OPENZL_C_IMPL)
+            .is_none_or(|filter| filter == reference_impl)
         {
-            let c = bench_openzl_c_ffi(case, target);
-            let relative = ozlrip_mbps.map(|base| base / c.decoded_mbps);
-            print_result(&c, relative);
-            results.push(c);
+            let reference = bench_reference_decoder(case, target);
+            let relative = ozlrip_mbps.map(|base| (OZLRIP_IMPL, base / reference.decoded_mbps));
+            print_result(&reference, relative);
+            results.push(reference);
         }
     }
 
     write_cache(&results);
 }
 
-fn generated_cases() -> Vec<BenchCase> {
+fn generated_cases(case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
     for (name, input) in [
         ("serial-random-4k", high_entropy_bytes(4 * 1024)),
@@ -72,6 +73,9 @@ fn generated_cases() -> Vec<BenchCase> {
         ("serial-repeated-4k", repeated_bytes(4 * 1024)),
         ("serial-sequential-1m", sequential_bytes(1024 * 1024)),
     ] {
+        if case_filter.is_some_and(|filter| filter != name) {
+            continue;
+        }
         let frame = rust_openzl::compress_serial(&input).expect("openzl-c-ffi compress_serial");
         assert_eq!(
             decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
@@ -86,9 +90,147 @@ fn generated_cases() -> Vec<BenchCase> {
             profile: "serial",
             input_size: input.len(),
             frame,
+            reference: ReferenceDecoder::Ffi,
+        });
+    }
+    if let Some(zli) = zli_path() {
+        cases.extend(zli_generated_cases(&zli, case_filter));
+    } else {
+        eprintln!("skipping csv/sao/parquet benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli");
+    }
+    cases
+}
+
+fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
+    let mut cases = Vec::new();
+    for spec in [
+        ZliBenchSpec {
+            name: "csv-timeseries-3m",
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+            input: csv_timeseries(120_000),
+        },
+        ZliBenchSpec {
+            name: "sao-fixed-5m",
+            profile: "sao",
+            profile_arg: None,
+            extra_args: &["--no-store-on-expansion"],
+            input: sao_synthetic_records(200_000),
+        },
+        ZliBenchSpec {
+            name: "parquet-canonical-sample",
+            profile: "parquet",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+            input: parquet_canonical_sample(),
+        },
+    ] {
+        if case_filter.is_some_and(|filter| filter != spec.name) {
+            continue;
+        }
+        let frame = compress_with_zli(zli, &spec);
+        assert_eq!(
+            decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
+            spec.input
+        );
+        assert_eq!(
+            decompress_with_zli(zli, &frame, spec.name).expect("zli decompress generated frame"),
+            spec.input
+        );
+        cases.push(BenchCase {
+            name: spec.name,
+            profile: spec.profile,
+            input_size: spec.input.len(),
+            frame,
+            reference: ReferenceDecoder::ZliCli {
+                zli: zli.to_path_buf(),
+            },
         });
     }
     cases
+}
+
+struct ZliBenchSpec {
+    name: &'static str,
+    profile: &'static str,
+    profile_arg: Option<&'static str>,
+    extra_args: &'static [&'static str],
+    input: Vec<u8>,
+}
+
+fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
+    let dir = workspace_root().join("tmp").join("ozlrip-bench-inputs");
+    fs::create_dir_all(&dir).expect("create benchmark input dir");
+    let input_path = dir.join(format!("{}.input", spec.name));
+    let frame_path = dir.join(format!("{}.zl", spec.name));
+    fs::write(&input_path, &spec.input).expect("write benchmark input");
+
+    let mut command = Command::new(zli);
+    command
+        .arg("compress")
+        .arg(&input_path)
+        .arg("--profile")
+        .arg(spec.profile);
+    if let Some(profile_arg) = spec.profile_arg {
+        command.arg("--profile-arg").arg(profile_arg);
+    }
+    command.args(spec.extra_args).arg("-o").arg(&frame_path).arg("-f");
+    let output = command.output().expect("run zli compress");
+    if !output.status.success() {
+        panic!(
+            "zli compress failed for {}: stdout={} stderr={}",
+            spec.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::read(frame_path).expect("read generated zli frame")
+}
+
+fn decompress_with_zli(zli: &Path, frame: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let dir = workspace_root()
+        .join("tmp")
+        .join("ozlrip-bench-zli-decode")
+        .join(name);
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let frame_path = dir.join(format!("{name}.zl"));
+    let output_path = dir.join(format!("{name}.decoded"));
+    fs::write(&frame_path, frame).map_err(|err| err.to_string())?;
+
+    let output = Command::new(zli)
+        .arg("decompress")
+        .arg(&frame_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("-f")
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "zli decompress failed for {name}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    fs::read(output_path).map_err(|err| err.to_string())
+}
+
+fn zli_path() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("OZLRIP_ZLI").map(PathBuf::from)
+        && path.exists()
+    {
+        return Some(path);
+    }
+    let path = workspace_root().join("tmp/openzl-upstream/zli");
+    path.exists().then_some(path)
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("bench crate lives below workspace root")
+        .to_path_buf()
 }
 
 fn high_entropy_bytes(len: usize) -> Vec<u8> {
@@ -118,6 +260,51 @@ fn sequential_bytes(len: usize) -> Vec<u8> {
         .collect()
 }
 
+fn csv_timeseries(rows: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows * 32);
+    out.extend_from_slice(b"timestamp,sensor,value,status\n");
+    for row in 0..rows {
+        let timestamp = 1_700_000_000u64 + u64::try_from(row).unwrap() * 60;
+        let sensor = row % 64;
+        let value = (row.wrapping_mul(17) + sensor * 13) % 100_000;
+        let status = match row % 11 {
+            0 => "warm",
+            1 => "cold",
+            2 => "idle",
+            _ => "ok",
+        };
+        writeln!(out, "{timestamp},s{sensor:02},{value}.{sensor:02},{status}")
+            .expect("write csv row");
+    }
+    out
+}
+
+fn sao_synthetic_records(records: usize) -> Vec<u8> {
+    let mut out = (0..28).map(|byte| byte as u8).collect::<Vec<u8>>();
+    out.reserve(records * 28);
+    for index in 0..records {
+        let index_f64 = index as f64;
+        let index_i16 = i16::try_from(index % 32_000).unwrap();
+        out.extend_from_slice(&(0.1f64 + index_f64 * 0.0001).to_le_bytes());
+        out.extend_from_slice(&(-0.2f64 - index_f64 * 0.0001).to_le_bytes());
+        out.extend_from_slice(b"G2");
+        out.extend_from_slice(&(100i16 + index_i16).to_le_bytes());
+        out.extend_from_slice(&(0.01f32 * f32::from(index_i16 % 1024)).to_le_bytes());
+        out.extend_from_slice(&(-0.02f32 * f32::from(index_i16 % 1024)).to_le_bytes());
+    }
+    out
+}
+
+fn parquet_canonical_sample() -> Vec<u8> {
+    fs::read(
+        workspace_root()
+            .join("tmp")
+            .join("openzl-upstream")
+            .join("cli/tests/sample_files/parquet/simple.parquet"),
+    )
+    .expect("read upstream parquet sample")
+}
+
 fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
     let mut decoder = ozlrip::Decoder::new(bench_limits());
     let mut dst = Vec::new();
@@ -139,8 +326,15 @@ fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Erro
 
 fn bench_limits() -> ozlrip::Limits {
     ozlrip::Limits {
-        max_expansion_ratio: usize::MAX,
+        max_expansion_ratio: 1_000_000,
         ..ozlrip::Limits::default()
+    }
+}
+
+fn bench_reference_decoder(case: &BenchCase, target: Duration) -> BenchResult {
+    match &case.reference {
+        ReferenceDecoder::Ffi => bench_openzl_c_ffi(case, target),
+        ReferenceDecoder::ZliCli { zli } => bench_openzl_c_cli(case, zli, target),
     }
 }
 
@@ -151,6 +345,18 @@ fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
         black_box(&decoder.dst);
     });
     BenchResult::new(OPENZL_C_IMPL, case, stats)
+}
+
+fn bench_openzl_c_cli(case: &BenchCase, zli: &Path, target: Duration) -> BenchResult {
+    let decoded = decompress_with_zli(zli, &case.frame, case.name)
+        .expect("openzl-c-cli validation decode failed");
+    assert_eq!(decoded.len(), case.input_size);
+    let stats = bench_loop(target, || {
+        let decoded = decompress_with_zli(zli, black_box(&case.frame), case.name)
+            .expect("openzl-c-cli decode failed");
+        black_box(decoded);
+    });
+    BenchResult::new(ReferenceDecoder::ZLI_CLI_IMPL, case, stats)
 }
 
 struct OpenZlCDecoder {
@@ -244,6 +450,24 @@ struct BenchCase {
     profile: &'static str,
     input_size: usize,
     frame: Vec<u8>,
+    reference: ReferenceDecoder,
+}
+
+#[derive(Clone)]
+enum ReferenceDecoder {
+    Ffi,
+    ZliCli { zli: PathBuf },
+}
+
+impl ReferenceDecoder {
+    const ZLI_CLI_IMPL: &'static str = "openzl-c-cli";
+
+    fn impl_name(&self) -> &'static str {
+        match self {
+            Self::Ffi => OPENZL_C_IMPL,
+            Self::ZliCli { .. } => Self::ZLI_CLI_IMPL,
+        }
+    }
 }
 
 struct BenchResult {
@@ -307,8 +531,8 @@ impl BenchResult {
     }
 }
 
-fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
-    if let Some(relative) = relative_to_c {
+fn print_result(result: &BenchResult, relative_to_reference: Option<(&str, f64)>) {
+    if let Some((base_impl, relative)) = relative_to_reference {
         println!(
             "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4} {}/{}={relative:.2}x",
             result.input_name,
@@ -318,8 +542,8 @@ fn print_result(result: &BenchResult, relative_to_c: Option<f64>) {
             result.median_decode_ns,
             result.frame_size,
             result.frame_ratio,
-            OZLRIP_IMPL,
-            OPENZL_C_IMPL
+            base_impl,
+            result.impl_name
         );
     } else {
         println!(

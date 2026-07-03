@@ -979,6 +979,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::QUANTIZE_LENGTHS_ID
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
+        | standard::TOKENIZE_NUMERIC_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::SPARSE_NUM_ID
@@ -996,7 +997,8 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         standard::SPLITN_ID
         | standard::SPLITN_STRUCT_ID
         | standard::SPLIT_BY_STRUCT_ID
-        | standard::TRANSPOSE_SPLIT_ID => Some(StandardNodeShape {
+        | standard::TRANSPOSE_SPLIT_ID
+        | standard::BIT_SPLIT_ID => Some(StandardNodeShape {
             static_inputs: 0,
             allows_variable_inputs: true,
             min_outputs: 1,
