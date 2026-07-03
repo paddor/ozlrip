@@ -1,15 +1,12 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     hint::black_box,
     io::Write,
-    os::raw::c_void,
+    os::raw::{c_char, c_int, c_void},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
-use rust_openzl_sys as sys;
 
 const DEFAULT_TARGET_MS: u64 = 100;
 const ROUNDS: usize = 7;
@@ -67,36 +64,53 @@ fn main() {
 
 fn generated_cases(case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
-    for (name, input) in [
-        ("serial-random-4k", high_entropy_bytes(4 * 1024)),
-        ("serial-random-1m", high_entropy_bytes(1024 * 1024)),
-        ("serial-repeated-4k", repeated_bytes(4 * 1024)),
-        ("serial-sequential-1m", sequential_bytes(1024 * 1024)),
-    ] {
-        if case_filter.is_some_and(|filter| filter != name) {
-            continue;
-        }
-        let frame = rust_openzl::compress_serial(&input).expect("openzl-c-ffi compress_serial");
-        assert_eq!(
-            decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
-            input
-        );
-        assert_eq!(
-            rust_openzl::decompress_serial(&frame).expect("openzl-c-ffi decompress_serial"),
-            input
-        );
-        cases.push(BenchCase {
-            name,
-            profile: "serial",
-            input_size: input.len(),
-            frame,
-            reference: ReferenceDecoder::Ffi,
-        });
-    }
     if let Some(zli) = zli_path() {
+        cases.extend(serial_generated_cases(&zli, case_filter));
         cases.extend(zli_generated_cases(&zli, case_filter));
     } else {
-        eprintln!("skipping csv/sao/parquet benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli");
+        eprintln!(
+            "skipping benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli"
+        );
+    }
+    cases
+}
+
+fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
+    let mut cases = Vec::new();
+    for spec in [
+        ZliBenchSpec {
+            name: "serial-random-4k",
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            input: high_entropy_bytes(4 * 1024),
+        },
+        ZliBenchSpec {
+            name: "serial-random-1m",
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            input: high_entropy_bytes(1024 * 1024),
+        },
+        ZliBenchSpec {
+            name: "serial-repeated-4k",
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            input: repeated_bytes(4 * 1024),
+        },
+        ZliBenchSpec {
+            name: "serial-sequential-1m",
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            input: sequential_bytes(1024 * 1024),
+        },
+    ] {
+        if case_filter.is_some_and(|filter| filter != spec.name) {
+            continue;
+        }
+        cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
     }
     cases
 }
@@ -129,26 +143,32 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
         if case_filter.is_some_and(|filter| filter != spec.name) {
             continue;
         }
-        let frame = compress_with_zli(zli, &spec);
-        assert_eq!(
-            decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
-            spec.input
-        );
-        assert_eq!(
-            decompress_with_zli(zli, &frame, spec.name).expect("zli decompress generated frame"),
-            spec.input
-        );
-        cases.push(BenchCase {
-            name: spec.name,
-            profile: spec.profile,
-            input_size: spec.input.len(),
-            frame,
-            reference: ReferenceDecoder::ZliCli {
-                zli: zli.to_path_buf(),
-            },
-        });
+        cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
     }
     cases
+}
+
+fn generated_case_from_zli(
+    zli: &Path,
+    spec: &ZliBenchSpec,
+    reference: ReferenceDecoder,
+) -> BenchCase {
+    let frame = compress_with_zli(zli, spec);
+    assert_eq!(
+        decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
+        spec.input
+    );
+    assert_eq!(
+        decode_openzl_c_with_bench_limits(&frame, spec.input.len()),
+        spec.input
+    );
+    BenchCase {
+        name: spec.name,
+        profile: spec.profile,
+        input_size: spec.input.len(),
+        frame,
+        reference,
+    }
 }
 
 struct ZliBenchSpec {
@@ -186,34 +206,6 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
         );
     }
     fs::read(frame_path).expect("read generated zli frame")
-}
-
-fn decompress_with_zli(zli: &Path, frame: &[u8], name: &str) -> Result<Vec<u8>, String> {
-    let dir = workspace_root()
-        .join("tmp")
-        .join("ozlrip-bench-zli-decode")
-        .join(name);
-    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-    let frame_path = dir.join(format!("{name}.zl"));
-    let output_path = dir.join(format!("{name}.decoded"));
-    fs::write(&frame_path, frame).map_err(|err| err.to_string())?;
-
-    let output = Command::new(zli)
-        .arg("decompress")
-        .arg(&frame_path)
-        .arg("-o")
-        .arg(&output_path)
-        .arg("-f")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(format!(
-            "zli decompress failed for {name}: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    fs::read(output_path).map_err(|err| err.to_string())
 }
 
 fn zli_path() -> Option<PathBuf> {
@@ -334,12 +326,13 @@ fn bench_limits() -> ozlrip::Limits {
 fn bench_reference_decoder(case: &BenchCase, target: Duration) -> BenchResult {
     match &case.reference {
         ReferenceDecoder::Ffi => bench_openzl_c_ffi(case, target),
-        ReferenceDecoder::ZliCli { zli } => bench_openzl_c_cli(case, zli, target),
     }
 }
 
 fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
     let mut decoder = OpenZlCDecoder::new(case.input_size);
+    decoder.decode(&case.frame);
+    assert_eq!(decoder.dst.len(), case.input_size);
     let stats = bench_loop(target, || {
         decoder.decode(black_box(&case.frame));
         black_box(&decoder.dst);
@@ -347,41 +340,22 @@ fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
     BenchResult::new(OPENZL_C_IMPL, case, stats)
 }
 
-fn bench_openzl_c_cli(case: &BenchCase, zli: &Path, target: Duration) -> BenchResult {
-    let decoded = decompress_with_zli(zli, &case.frame, case.name)
-        .expect("openzl-c-cli validation decode failed");
-    assert_eq!(decoded.len(), case.input_size);
-    let stats = bench_loop(target, || {
-        let decoded = decompress_with_zli(zli, black_box(&case.frame), case.name)
-            .expect("openzl-c-cli decode failed");
-        black_box(decoded);
-    });
-    BenchResult::new(ReferenceDecoder::ZLI_CLI_IMPL, case, stats)
+fn decode_openzl_c_with_bench_limits(frame: &[u8], output_size: usize) -> Vec<u8> {
+    let mut decoder = OpenZlCDecoder::new(output_size);
+    decoder.decode(frame);
+    std::mem::take(&mut decoder.dst)
 }
 
 struct OpenZlCDecoder {
-    dctx: *mut sys::ZL_DCtx,
+    dctx: *mut OpenZlDCtx,
     dst: Vec<u8>,
 }
 
 impl OpenZlCDecoder {
     fn new(output_size: usize) -> Self {
-        let dctx = unsafe { sys::ZL_DCtx_create() };
+        let dctx = unsafe { ozlrip_bench_openzl_dctx_create() };
         assert!(!dctx.is_null(), "ZL_DCtx_create returned null");
-        #[cfg(feature = "no-checksum")]
-        {
-            set_dparam(dctx, sys::ZL_DParam::ZL_DParam_stickyParameters, 1);
-            set_dparam(
-                dctx,
-                sys::ZL_DParam::ZL_DParam_checkCompressedChecksum,
-                sys::ZL_TernaryParam::ZL_TernaryParam_disable as i32,
-            );
-            set_dparam(
-                dctx,
-                sys::ZL_DParam::ZL_DParam_checkContentChecksum,
-                sys::ZL_TernaryParam::ZL_TernaryParam_disable as i32,
-            );
-        }
+        configure_openzl_dctx(dctx);
         Self {
             dctx,
             dst: vec![0; output_size],
@@ -389,30 +363,54 @@ impl OpenZlCDecoder {
     }
 
     fn decode(&mut self, frame: &[u8]) {
-        let report = unsafe {
-            sys::ZL_DCtx_decompress(
+        let mut written = 0usize;
+        let code = unsafe {
+            ozlrip_bench_openzl_decompress_serial(
                 self.dctx,
                 self.dst.as_mut_ptr().cast::<c_void>(),
                 self.dst.len(),
                 frame.as_ptr().cast::<c_void>(),
                 frame.len(),
+                &mut written,
             )
         };
-        assert!(!sys::report_is_error(report), "openzl-c-ffi decode failed");
-        assert_eq!(sys::report_value(report), self.dst.len());
+        assert_openzl_success(code, "openzl-c-ffi decode failed");
+        assert_eq!(written, self.dst.len());
     }
 }
 
 impl Drop for OpenZlCDecoder {
     fn drop(&mut self) {
-        unsafe { sys::ZL_DCtx_free(self.dctx) };
+        unsafe { ozlrip_bench_openzl_dctx_free(self.dctx) };
     }
 }
 
-#[cfg(feature = "no-checksum")]
-fn set_dparam(dctx: *mut sys::ZL_DCtx, param: sys::ZL_DParam, value: i32) {
-    let report = unsafe { sys::ZL_DCtx_setParameter(dctx, param, value) };
-    assert!(!sys::report_is_error(report), "ZL_DCtx_setParameter failed");
+fn configure_openzl_dctx(dctx: *mut OpenZlDCtx) {
+    #[cfg(feature = "no-checksum")]
+    {
+        let code = unsafe { ozlrip_bench_openzl_dctx_disable_checksums(dctx) };
+        assert_openzl_success(code, "ZL_DCtx checksum parameter setup failed");
+    }
+    #[cfg(not(feature = "no-checksum"))]
+    let _ = dctx;
+}
+
+fn assert_openzl_success(code: c_int, message: &str) {
+    if code != 0 {
+        panic!(
+            "{message}: {}",
+            openzl_cstr(unsafe { ozlrip_bench_openzl_last_error() })
+        );
+    }
+}
+
+fn openzl_cstr(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        return "<null>".to_owned();
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> BenchStats {
@@ -456,18 +454,32 @@ struct BenchCase {
 #[derive(Clone)]
 enum ReferenceDecoder {
     Ffi,
-    ZliCli { zli: PathBuf },
 }
 
 impl ReferenceDecoder {
-    const ZLI_CLI_IMPL: &'static str = "openzl-c-cli";
-
     fn impl_name(&self) -> &'static str {
         match self {
             Self::Ffi => OPENZL_C_IMPL,
-            Self::ZliCli { .. } => Self::ZLI_CLI_IMPL,
         }
     }
+}
+
+enum OpenZlDCtx {}
+
+unsafe extern "C" {
+    fn ozlrip_bench_openzl_dctx_create() -> *mut OpenZlDCtx;
+    fn ozlrip_bench_openzl_dctx_free(dctx: *mut OpenZlDCtx);
+    fn ozlrip_bench_openzl_last_error() -> *const c_char;
+    #[cfg(feature = "no-checksum")]
+    fn ozlrip_bench_openzl_dctx_disable_checksums(dctx: *mut OpenZlDCtx) -> c_int;
+    fn ozlrip_bench_openzl_decompress_serial(
+        dctx: *mut OpenZlDCtx,
+        dst: *mut c_void,
+        dst_capacity: usize,
+        src: *const c_void,
+        src_size: usize,
+        written: *mut usize,
+    ) -> c_int;
 }
 
 struct BenchResult {

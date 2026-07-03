@@ -3,6 +3,7 @@ name = "ozlrip-bench"
 version = "0.0.0"
 edition = "2024"
 publish = false
+build = "build.rs"
 
 [workspace]
 
@@ -12,8 +13,9 @@ no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
 
 [dependencies]
 ozlrip = { path = "..", default-features = false }
-rust-openzl = "0.1.0"
-rust-openzl-sys = "0.1.0"
+
+[build-dependencies]
+cc = "1.2"
 
 [[bench]]
 name = "decode_profiles"
