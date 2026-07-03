@@ -283,9 +283,9 @@ fn try_decode_plan_appending_to_dst(
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Ok(None);
     }
-    if !plan.chunks.iter().all(chunk_supports_direct_append) {
+    let Some(chunk_plans) = direct_append_chunk_plans(plan)? else {
         return Ok(None);
-    }
+    };
 
     if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
         let expected = usize::try_from(expected).map_err(|_| {
@@ -300,6 +300,7 @@ fn try_decode_plan_appending_to_dst(
     let result = decode_plan_appending_to_dst(
         input,
         plan,
+        &chunk_plans,
         dst,
         limits,
         scratch,
@@ -315,19 +316,34 @@ fn try_decode_plan_appending_to_dst(
     }
 }
 
-fn chunk_supports_direct_append(chunk: &crate::parse::ChunkPlan) -> bool {
-    if !chunk.has_nodes() {
-        return true;
+fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<Vec<Option<ChunkExecutionPlan>>>> {
+    let mut chunk_plans = Vec::new();
+    chunk_plans
+        .try_reserve_exact(plan.chunks.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail("chunk execution plan allocation failed")
+        })?;
+    for chunk in &plan.chunks {
+        if !chunk.has_nodes() {
+            chunk_plans.push(None);
+            continue;
+        }
+        let Ok(chunk_plan) = build_chunk_execution_plan(chunk) else {
+            return Ok(None);
+        };
+        if direct_append_tail(&chunk_plan).is_none() {
+            return Ok(None);
+        }
+        chunk_plans.push(Some(chunk_plan));
     }
-    let Ok(plan) = build_chunk_execution_plan(chunk) else {
-        return false;
-    };
-    direct_append_tail(&plan).is_some()
+    Ok(Some(chunk_plans))
 }
 
 fn decode_plan_appending_to_dst(
     input: &[u8],
     plan: &FramePlan,
+    chunk_plans: &[Option<ChunkExecutionPlan>],
     dst: &mut Vec<u8>,
     limits: Limits,
     scratch: &mut DecodeScratch,
@@ -335,12 +351,23 @@ fn decode_plan_appending_to_dst(
 ) -> Result<usize> {
     let start_len = dst.len();
     let mut total_len = 0usize;
-    for chunk in &plan.chunks {
+    if chunk_plans.len() != plan.chunks.len() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("chunk execution plan count mismatch")
+        );
+    }
+    for (chunk, chunk_plan) in plan.chunks.iter().zip(chunk_plans.iter()) {
         let chunk_start = dst.len();
         if chunk.has_nodes() {
+            let chunk_plan = chunk_plan.as_ref().ok_or_else(|| {
+                Error::new(ErrorKind::InvalidGraph).with_detail("chunk execution plan is missing")
+            })?;
             decode_transform_chunk_appending(
                 input,
-                chunk,
+                DirectAppendChunk {
+                    chunk,
+                    execution: chunk_plan,
+                },
                 plan.info.format_version,
                 limits,
                 dst,
@@ -496,15 +523,16 @@ fn decode_transform_chunk<'a>(
 
 fn decode_transform_chunk_appending(
     input: &[u8],
-    chunk: &crate::parse::ChunkPlan,
+    chunk: DirectAppendChunk<'_>,
     format_version: u32,
     limits: Limits,
     dst: &mut Vec<u8>,
     scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
-    let plan = build_chunk_execution_plan(chunk)?;
-    let append_tail = direct_append_tail(&plan).ok_or_else(|| {
+    let plan = chunk.execution;
+    let chunk = chunk.chunk;
+    let append_tail = direct_append_tail(plan).ok_or_else(|| {
         Error::new(ErrorKind::InvalidGraph).with_detail("chunk is not direct-appendable")
     })?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
@@ -607,6 +635,12 @@ fn decode_transform_chunk_appending(
     }
 
     Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
+}
+
+#[derive(Clone, Copy)]
+struct DirectAppendChunk<'a> {
+    chunk: &'a crate::parse::ChunkPlan,
+    execution: &'a ChunkExecutionPlan,
 }
 
 #[derive(Clone, Copy)]
