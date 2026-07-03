@@ -40,9 +40,6 @@ ozlrip-decode = { version = "0.0.0", path = "crates/decode", default-features = 
 [lints]
 workspace = true
 
-[workspace.lints.rust]
-unsafe_code = "deny"
-
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"

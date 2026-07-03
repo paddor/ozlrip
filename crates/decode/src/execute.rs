@@ -15,6 +15,8 @@ use zrip_core::{
 use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
+mod fast_transpose;
+
 #[cfg(test)]
 pub(crate) fn decode_plan(
     input: &[u8],
@@ -1150,52 +1152,12 @@ fn decode_transpose_split_node(
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("transpose allocation failed")
     })?;
-    output.resize(output_len, 0);
-    write_transpose_split_output(inputs, &mut output);
+    fast_transpose::write_transpose_split_output(inputs, output_len, &mut output);
     Ok(OwnedStream {
         bytes: output,
         element_width: width,
         string_lengths: None,
     })
-}
-
-fn write_transpose_split_output(inputs: &[StreamInput<'_>], output: &mut [u8]) {
-    match inputs {
-        [lane0, lane1] => {
-            for (index, out) in output.chunks_exact_mut(2).enumerate() {
-                out[0] = lane0.bytes[index];
-                out[1] = lane1.bytes[index];
-            }
-        }
-        [lane0, lane1, lane2, lane3] => {
-            for (index, out) in output.chunks_exact_mut(4).enumerate() {
-                out[0] = lane0.bytes[index];
-                out[1] = lane1.bytes[index];
-                out[2] = lane2.bytes[index];
-                out[3] = lane3.bytes[index];
-            }
-        }
-        [lane0, lane1, lane2, lane3, lane4, lane5, lane6, lane7] => {
-            for (index, out) in output.chunks_exact_mut(8).enumerate() {
-                out[0] = lane0.bytes[index];
-                out[1] = lane1.bytes[index];
-                out[2] = lane2.bytes[index];
-                out[3] = lane3.bytes[index];
-                out[4] = lane4.bytes[index];
-                out[5] = lane5.bytes[index];
-                out[6] = lane6.bytes[index];
-                out[7] = lane7.bytes[index];
-            }
-        }
-        _ => {
-            let width = inputs.len();
-            for (element, out) in output.chunks_exact_mut(width).enumerate() {
-                for (byte, lane) in out.iter_mut().zip(inputs) {
-                    *byte = lane.bytes[element];
-                }
-            }
-        }
-    }
 }
 
 fn decode_flatpack_node(
