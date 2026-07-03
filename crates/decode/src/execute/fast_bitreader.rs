@@ -1,0 +1,39 @@
+#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+
+pub(super) fn read_window(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u128> {
+    #[cfg(not(feature = "paranoid"))]
+    {
+        if let Some(value) = read_window_fast(bytes, byte_pos, needed_bytes) {
+            return Some(value);
+        }
+    }
+    read_window_safe(bytes, byte_pos, needed_bytes)
+}
+
+fn read_window_safe(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u128> {
+    let byte_end = byte_pos.checked_add(needed_bytes)?;
+    let bytes = bytes.get(byte_pos..byte_end)?;
+    let mut value = 0u128;
+    for (shift, &byte) in bytes.iter().enumerate() {
+        value |= u128::from(byte) << (shift * 8);
+    }
+    Some(value)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn read_window_fast(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u128> {
+    let remaining = bytes.len().checked_sub(byte_pos)?;
+    if needed_bytes <= 8 && remaining >= 8 {
+        let ptr = bytes.as_ptr().wrapping_add(byte_pos).cast::<u64>();
+        unsafe {
+            return Some(u128::from(u64::from_le(core::ptr::read_unaligned(ptr))));
+        }
+    }
+    if needed_bytes <= 16 && remaining >= 16 {
+        let ptr = bytes.as_ptr().wrapping_add(byte_pos).cast::<u128>();
+        unsafe {
+            return Some(u128::from_le(core::ptr::read_unaligned(ptr)));
+        }
+    }
+    None
+}

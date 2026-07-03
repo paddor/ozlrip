@@ -16,6 +16,7 @@ use crate::parse::SingleZstdFrame;
 use crate::{parse::FramePlan, standard};
 
 mod fast_bitpack;
+mod fast_bitreader;
 mod fast_delta;
 mod fast_dispatch;
 mod fast_split_struct;
@@ -263,6 +264,10 @@ fn try_decode_single_zstd_into_dst(
 }
 
 #[cfg(not(feature = "zstd"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the zstd-disabled shim keeps the same fallible signature as the zstd implementation"
+)]
 fn try_decode_single_zstd_into_dst(
     _input: &[u8],
     _plan: &FramePlan,
@@ -4490,16 +4495,10 @@ impl<'a> ForwardBitReader<'a> {
             .checked_add(bits)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         let needed_bytes = needed_bits.div_ceil(8);
-        let byte_end = byte_pos
-            .checked_add(needed_bytes)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let bytes = self.bytes.get(byte_pos..byte_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
-        })?;
-        let mut value = 0u128;
-        for (shift, &byte) in bytes.iter().enumerate() {
-            value |= u128::from(byte) << (shift * 8);
-        }
+        let mut value = fast_bitreader::read_window(self.bytes, byte_pos, needed_bytes)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
+            })?;
         value >>= bit_offset;
         let mask = if bits == 64 {
             u128::from(u64::MAX)
