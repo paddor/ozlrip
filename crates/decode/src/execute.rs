@@ -3774,10 +3774,7 @@ fn append_field_lz_match(
     }
     let start = output.len();
     output.resize(end, 0);
-    for index in 0..match_len {
-        let value = output[start + index - match_offset];
-        output[start + index] = value;
-    }
+    copy_lz_match(output, start, match_offset, match_len);
     Ok(())
 }
 
