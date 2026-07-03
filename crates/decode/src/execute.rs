@@ -2111,13 +2111,13 @@ fn append_dispatched_string_2byte_csv_pattern(
     while indices.len() - offset >= CSV_PATTERN.len() {
         if indices[offset..offset + CSV_PATTERN.len()] == CSV_PATTERN {
             append_dispatched_string_source_to_serial(&mut sources[0], output)?;
-            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_single_byte_string_source_to_serial(&mut sources[4], output)?;
             append_dispatched_string_source_to_serial(&mut sources[1], output)?;
-            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_single_byte_string_source_to_serial(&mut sources[4], output)?;
             append_dispatched_string_source_to_serial(&mut sources[2], output)?;
-            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_single_byte_string_source_to_serial(&mut sources[4], output)?;
             append_dispatched_string_source_to_serial(&mut sources[3], output)?;
-            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_single_byte_string_source_to_serial(&mut sources[4], output)?;
             offset += CSV_PATTERN.len();
             continue;
         }
@@ -2190,6 +2190,52 @@ fn append_dispatched_string_source_to_serial(
     let length = *source.lengths.get(source.position).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
     })?;
+    let length = usize::try_from(length)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let offset = source.byte_position;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bytes = source.bytes.get(offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+    })?;
+    output.extend_from_slice(bytes);
+    source.position = source
+        .position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    source.byte_position = end;
+    Ok(())
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV dispatch hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
+fn append_dispatched_single_byte_string_source_to_serial(
+    source: &mut DispatchStringSource<'_>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let length = *source.lengths.get(source.position).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
+    })?;
+    if length == 1 {
+        let byte = *source.bytes.get(source.byte_position).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+        })?;
+        output.push(byte);
+        source.position = source
+            .position
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        source.byte_position = source
+            .byte_position
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        return Ok(());
+    }
+
     let length = usize::try_from(length)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
     let offset = source.byte_position;
