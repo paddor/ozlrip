@@ -78,135 +78,123 @@ fn generated_cases(case_filter: Option<&str>) -> Vec<BenchCase> {
 
 fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
-    for spec in [
-        ZliBenchSpec {
-            name: "serial-random-4k",
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            input: high_entropy_bytes(4 * 1024),
-        },
-        ZliBenchSpec {
-            name: "serial-random-1m",
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            input: high_entropy_bytes(1024 * 1024),
-        },
-        ZliBenchSpec {
-            name: "serial-repeated-4k",
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            input: repeated_bytes(4 * 1024),
-        },
-        ZliBenchSpec {
-            name: "serial-sequential-1m",
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            input: sequential_bytes(1024 * 1024),
-        },
-        ZliBenchSpec {
-            name: "serial-sequential-16m",
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M"],
-            input: sequential_bytes(16 * 1024 * 1024),
-        },
-    ] {
-        if case_filter.is_some_and(|filter| filter != spec.name) {
-            continue;
-        }
-        cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+    macro_rules! push_case {
+        ($name:literal, $extra_args:expr, $input:expr) => {
+            if case_filter.is_none_or(|filter| filter == $name) {
+                let spec = ZliBenchSpec {
+                    name: $name,
+                    profile: "serial",
+                    profile_arg: None,
+                    extra_args: $extra_args,
+                    input: $input,
+                };
+                cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+            }
+        };
     }
+    push_case!("serial-random-4k", &[], high_entropy_bytes(4 * 1024));
+    push_case!("serial-random-1m", &[], high_entropy_bytes(1024 * 1024));
+    push_case!("serial-repeated-4k", &[], repeated_bytes(4 * 1024));
+    push_case!("serial-sequential-1m", &[], sequential_bytes(1024 * 1024));
+    push_case!(
+        "serial-sequential-16m",
+        &["--chunk-size", "4M"],
+        sequential_bytes(16 * 1024 * 1024)
+    );
     cases
 }
 
 fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
-    for spec in [
-        ZliBenchSpec {
-            name: "u8-rle-16m",
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
-            input: u8_runs(16 * 1024 * 1024),
-        },
-        ZliBenchSpec {
-            name: "le-u32-delta-16m",
-            profile: "le-u32",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
-            input: le_u32_delta_bytes(4 * 1024 * 1024),
-        },
-        ZliBenchSpec {
-            name: "le-u64-timeseries-32m",
-            profile: "le-u64",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
-            input: le_u64_timeseries_bytes(4 * 1024 * 1024),
-        },
-        ZliBenchSpec {
-            name: "csv-timeseries-3m",
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            input: csv_timeseries(120_000),
-        },
-        ZliBenchSpec {
-            name: "csv-timeseries-30m",
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M"],
-            input: csv_timeseries(1_000_000),
-        },
-        ZliBenchSpec {
-            name: "sao-fixed-5m",
-            profile: "sao",
-            profile_arg: None,
-            extra_args: &["--no-store-on-expansion"],
-            input: sao_synthetic_records(200_000),
-        },
-        ZliBenchSpec {
-            name: "sao-fixed-28m",
-            profile: "sao",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
-            input: sao_synthetic_records(1_000_000),
-        },
-        ZliBenchSpec {
-            name: "sddl2-sao-silesia-28m",
-            profile: "sddl2",
-            profile_arg: Some(
-                workspace_root()
-                    .join("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl")
-                    .display()
-                    .to_string(),
-            ),
-            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
-            input: sao_synthetic_records(1_000_000),
-        },
-        ZliBenchSpec {
-            name: "parquet-canonical-sample",
-            profile: "parquet",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            input: parquet_canonical_sample(),
-        },
-        ZliBenchSpec {
-            name: "parquet-nested-sample",
-            profile: "parquet",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            input: parquet_nested_sample(),
-        },
-    ] {
-        if case_filter.is_some_and(|filter| filter != spec.name) {
-            continue;
-        }
-        cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+    macro_rules! push_case {
+        ($name:literal, $profile:literal, $profile_arg:expr, $extra_args:expr, $input:expr) => {
+            if case_filter.is_none_or(|filter| filter == $name) {
+                let spec = ZliBenchSpec {
+                    name: $name,
+                    profile: $profile,
+                    profile_arg: $profile_arg,
+                    extra_args: $extra_args,
+                    input: $input,
+                };
+                cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+            }
+        };
     }
+    push_case!(
+        "u8-rle-16m",
+        "u8",
+        None,
+        &["--chunk-size", "4M", "--no-store-on-expansion"],
+        u8_runs(16 * 1024 * 1024)
+    );
+    push_case!(
+        "le-u32-delta-16m",
+        "le-u32",
+        None,
+        &["--chunk-size", "4M", "--no-store-on-expansion"],
+        le_u32_delta_bytes(4 * 1024 * 1024)
+    );
+    push_case!(
+        "le-u64-timeseries-32m",
+        "le-u64",
+        None,
+        &["--chunk-size", "4M", "--no-store-on-expansion"],
+        le_u64_timeseries_bytes(4 * 1024 * 1024)
+    );
+    push_case!(
+        "csv-timeseries-3m",
+        "csv",
+        None,
+        &["--chunk-size", "1M"],
+        csv_timeseries(120_000)
+    );
+    push_case!(
+        "csv-timeseries-30m",
+        "csv",
+        None,
+        &["--chunk-size", "4M"],
+        csv_timeseries(1_000_000)
+    );
+    push_case!(
+        "sao-fixed-5m",
+        "sao",
+        None,
+        &["--no-store-on-expansion"],
+        sao_synthetic_records(200_000)
+    );
+    push_case!(
+        "sao-fixed-28m",
+        "sao",
+        None,
+        &["--chunk-size", "4M", "--no-store-on-expansion"],
+        sao_synthetic_records(1_000_000)
+    );
+    push_case!(
+        "sddl2-sao-silesia-28m",
+        "sddl2",
+        Some(
+            workspace_root()
+                .join("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl")
+                .display()
+                .to_string()
+        ),
+        &["--chunk-size", "4M", "--no-store-on-expansion"],
+        sao_synthetic_records(1_000_000)
+    );
+    push_case!(
+        "parquet-canonical-sample",
+        "parquet",
+        None,
+        &["--chunk-size", "1M"],
+        parquet_canonical_sample()
+    );
+    push_case!(
+        "parquet-nested-sample",
+        "parquet",
+        None,
+        &["--chunk-size", "1M"],
+        parquet_nested_sample()
+    );
     cases
 }
 
