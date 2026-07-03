@@ -31,6 +31,23 @@ fn append_split_by_struct_output_safe(inputs: &[StreamInput<'_>], output: &mut V
 
 #[cfg(not(feature = "paranoid"))]
 fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+    let widths = [
+        inputs[0].element_width,
+        inputs[1].element_width,
+        inputs[2].element_width,
+        inputs[3].element_width,
+        inputs[4].element_width,
+        inputs[5].element_width,
+    ];
+    if widths == [8, 8, 2, 2, 4, 4] {
+        append_6_8_8_2_2_4_4(inputs, output);
+        return;
+    }
+    if widths == [4, 4, 2, 2, 8, 8] {
+        append_6_4_4_2_2_8_8(inputs, output);
+        return;
+    }
+
     let element_count = inputs[0].bytes.len() / inputs[0].element_width;
     let struct_width = inputs
         .iter()
@@ -63,6 +80,70 @@ fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut V
             copy_field(src5.add(element * w5), &mut dst, w5);
         }
         debug_assert_eq!(dst, end);
+        output.set_len(start_len + output_len);
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_6_8_8_2_2_4_4(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+    let element_count = inputs[0].bytes.len() / 8;
+    let output_len = element_count * 28;
+    let start_len = output.len();
+    unsafe {
+        let mut dst = output.as_mut_ptr().add(start_len);
+        let src0 = inputs[0].bytes.as_ptr();
+        let src1 = inputs[1].bytes.as_ptr();
+        let src2 = inputs[2].bytes.as_ptr();
+        let src3 = inputs[3].bytes.as_ptr();
+        let src4 = inputs[4].bytes.as_ptr();
+        let src5 = inputs[5].bytes.as_ptr();
+        for element in 0..element_count {
+            (dst as *mut u64)
+                .write_unaligned((src0.add(element * 8) as *const u64).read_unaligned());
+            (dst.add(8) as *mut u64)
+                .write_unaligned((src1.add(element * 8) as *const u64).read_unaligned());
+            (dst.add(16) as *mut u16)
+                .write_unaligned((src2.add(element * 2) as *const u16).read_unaligned());
+            (dst.add(18) as *mut u16)
+                .write_unaligned((src3.add(element * 2) as *const u16).read_unaligned());
+            (dst.add(20) as *mut u32)
+                .write_unaligned((src4.add(element * 4) as *const u32).read_unaligned());
+            (dst.add(24) as *mut u32)
+                .write_unaligned((src5.add(element * 4) as *const u32).read_unaligned());
+            dst = dst.add(28);
+        }
+        output.set_len(start_len + output_len);
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_6_4_4_2_2_8_8(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+    let element_count = inputs[0].bytes.len() / 4;
+    let output_len = element_count * 28;
+    let start_len = output.len();
+    unsafe {
+        let mut dst = output.as_mut_ptr().add(start_len);
+        let src0 = inputs[0].bytes.as_ptr();
+        let src1 = inputs[1].bytes.as_ptr();
+        let src2 = inputs[2].bytes.as_ptr();
+        let src3 = inputs[3].bytes.as_ptr();
+        let src4 = inputs[4].bytes.as_ptr();
+        let src5 = inputs[5].bytes.as_ptr();
+        for element in 0..element_count {
+            (dst as *mut u32)
+                .write_unaligned((src0.add(element * 4) as *const u32).read_unaligned());
+            (dst.add(4) as *mut u32)
+                .write_unaligned((src1.add(element * 4) as *const u32).read_unaligned());
+            (dst.add(8) as *mut u16)
+                .write_unaligned((src2.add(element * 2) as *const u16).read_unaligned());
+            (dst.add(10) as *mut u16)
+                .write_unaligned((src3.add(element * 2) as *const u16).read_unaligned());
+            (dst.add(12) as *mut u64)
+                .write_unaligned((src4.add(element * 8) as *const u64).read_unaligned());
+            (dst.add(20) as *mut u64)
+                .write_unaligned((src5.add(element * 8) as *const u64).read_unaligned());
+            dst = dst.add(28);
+        }
         output.set_len(start_len + output_len);
     }
 }
