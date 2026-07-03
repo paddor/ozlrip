@@ -1099,35 +1099,32 @@ fn decode_dispatch_string_node(
     output_lengths.try_reserve_exact(index_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dispatch length allocation failed")
     })?;
-    for index in 0..index_count {
-        let source = read_usize_numeric_element(indices.bytes, indices.element_width, index)?;
-        let input = string_inputs.get(source).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
-        })?;
-        let source_position = per_input_positions.get_mut(source).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
-        })?;
-        let lengths = input
-            .string_lengths
-            .expect("validated string lengths exist");
-        let length = *lengths.get(*source_position).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
-        })?;
-        let offset = byte_offsets[source][*source_position];
-        let length_usize = usize::try_from(length).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("string length too large")
-        })?;
-        let end = offset
-            .checked_add(length_usize)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let bytes = input.bytes.get(offset..end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
-        })?;
-        output.extend_from_slice(bytes);
-        output_lengths.push(length);
-        *source_position = source_position
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    match indices.element_width {
+        1 => {
+            for &source in indices.bytes {
+                append_dispatched_string(
+                    usize::from(source),
+                    string_inputs,
+                    &byte_offsets,
+                    &mut per_input_positions,
+                    &mut output,
+                    &mut output_lengths,
+                )?;
+            }
+        }
+        2 => {
+            for source in indices.bytes.chunks_exact(2) {
+                append_dispatched_string(
+                    usize::from(u16::from_le_bytes([source[0], source[1]])),
+                    string_inputs,
+                    &byte_offsets,
+                    &mut per_input_positions,
+                    &mut output,
+                    &mut output_lengths,
+                )?;
+            }
+        }
+        _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
     }
     for (position, input) in per_input_positions.iter().zip(string_inputs) {
         if *position
@@ -1145,6 +1142,43 @@ fn decode_dispatch_string_node(
         element_width: 1,
         string_lengths: Some(output_lengths),
     })
+}
+
+fn append_dispatched_string(
+    source: usize,
+    string_inputs: &[StreamInput<'_>],
+    byte_offsets: &[Vec<usize>],
+    per_input_positions: &mut [usize],
+    output: &mut Vec<u8>,
+    output_lengths: &mut Vec<u32>,
+) -> Result<()> {
+    let input = string_inputs.get(source).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
+    })?;
+    let source_position = per_input_positions.get_mut(source).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
+    })?;
+    let lengths = input
+        .string_lengths
+        .expect("validated string lengths exist");
+    let length = *lengths.get(*source_position).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
+    })?;
+    let offset = byte_offsets[source][*source_position];
+    let length_usize = usize::try_from(length)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let end = offset
+        .checked_add(length_usize)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bytes = input.bytes.get(offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+    })?;
+    output.extend_from_slice(bytes);
+    output_lengths.push(length);
+    *source_position = source_position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    Ok(())
 }
 
 fn decode_dispatch_n_by_tag_node(
@@ -1782,6 +1816,7 @@ fn checked_next_long_pos(long_pos: usize, long_count: usize) -> Result<usize> {
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
+#[inline]
 fn read_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<u64> {
     let start = index
         .checked_mul(element_width)
@@ -1794,6 +1829,7 @@ fn read_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Res
     Ok(u64::from_le_bytes(value))
 }
 
+#[inline]
 fn write_numeric_element(dst: &mut [u8], element_width: usize, value: u64) {
     dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]);
 }
@@ -1925,9 +1961,63 @@ fn numeric_element_count(bytes: &[u8], element_width: usize) -> Result<usize> {
     Ok(bytes.len() / element_width)
 }
 
+#[inline]
 fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<usize> {
-    usize::try_from(read_numeric_element(bytes, element_width, index)?)
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large"))
+    let start = index
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let value = match element_width {
+        1 => usize::from(*bytes.get(start).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("numeric stream is truncated")
+        })?),
+        2 => usize::from(read_u16_element(bytes, index)?),
+        4 => usize::try_from(read_u32_element(bytes, index)?).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
+        })?,
+        8 => {
+            let element = bytes.get(start..start + 8).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("numeric stream is truncated")
+            })?;
+            u64::from_le_bytes([
+                element[0], element[1], element[2], element[3], element[4], element[5], element[6],
+                element[7],
+            ])
+            .try_into()
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
+            })?
+        }
+        _ => {
+            return Err(
+                Error::new(ErrorKind::InvalidType).with_detail("numeric width is unsupported")
+            );
+        }
+    };
+    Ok(value)
+}
+
+#[inline]
+fn read_u16_element(bytes: &[u8], index: usize) -> Result<u16> {
+    let start = index
+        .checked_mul(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let element = bytes.get(start..start + 2).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("numeric stream is truncated")
+    })?;
+    Ok(u16::from_le_bytes([element[0], element[1]]))
+}
+
+#[inline]
+fn read_u32_element(bytes: &[u8], index: usize) -> Result<u32> {
+    let start = index
+        .checked_mul(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let element = bytes.get(start..start + 4).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("numeric stream is truncated")
+    })?;
+    Ok(u32::from_le_bytes([
+        element[0], element[1], element[2], element[3],
+    ]))
 }
 
 fn decode_bitsplit_node(
@@ -2139,17 +2229,18 @@ fn decode_field_lz_node(
     let extra_match_count = numeric_element_count(extra_match_lengths.bytes, 4)?;
 
     for token_index in 0..token_count {
-        let token = read_numeric_element(tokens.bytes, 2, token_index)?;
-        let offset_code =
-            usize::try_from(token & 0x3).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
-        let literal_code = usize::try_from((token >> 2) & 0x0f)
-            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
-        let match_code = usize::try_from((token >> 6) & 0x0f)
-            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        let token = read_u16_element(tokens.bytes, token_index)?;
+        let offset_code = usize::from(token & 0x3);
+        let literal_code = usize::from((token >> 2) & 0x0f);
+        let match_code = usize::from((token >> 6) & 0x0f);
 
         let match_offset = match offset_code {
             3 => {
-                let raw_offset = read_usize_numeric_element(offsets.bytes, 4, offset_pos)?;
+                let raw_offset = usize::try_from(read_u32_element(offsets.bytes, offset_pos)?)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::LimitExceeded)
+                            .with_detail("numeric value is too large")
+                    })?;
                 offset_pos = checked_next_numeric_pos(offset_pos, offset_count)?;
                 let byte_offset = raw_offset
                     .checked_mul(element_width)
@@ -2178,11 +2269,16 @@ fn decode_field_lz_node(
         let mut literal_elements = literal_code;
         if literal_code == 15 {
             literal_elements = literal_elements
-                .checked_add(read_usize_numeric_element(
-                    extra_literal_lengths.bytes,
-                    4,
-                    extra_literal_pos,
-                )?)
+                .checked_add(
+                    usize::try_from(read_u32_element(
+                        extra_literal_lengths.bytes,
+                        extra_literal_pos,
+                    )?)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::LimitExceeded)
+                            .with_detail("numeric value is too large")
+                    })?,
+                )
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             extra_literal_pos = checked_next_numeric_pos(extra_literal_pos, extra_literal_count)?;
         }
@@ -2195,11 +2291,16 @@ fn decode_field_lz_node(
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         if match_code == 15 {
             match_elements = match_elements
-                .checked_add(read_usize_numeric_element(
-                    extra_match_lengths.bytes,
-                    4,
-                    extra_match_pos,
-                )?)
+                .checked_add(
+                    usize::try_from(read_u32_element(
+                        extra_match_lengths.bytes,
+                        extra_match_pos,
+                    )?)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::LimitExceeded)
+                            .with_detail("numeric value is too large")
+                    })?,
+                )
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             extra_match_pos = checked_next_numeric_pos(extra_match_pos, extra_match_count)?;
         }
@@ -2689,27 +2790,107 @@ fn decode_tokenize_fixed_node(
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("tokenize allocation failed")
     })?;
-    for position in 0..output_elements {
-        let index = read_usize_numeric_element(indices.bytes, indices.element_width, position)?;
-        if index >= alphabet_size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("tokenize_fixed index is out of bounds"));
-        }
-        let start = index
-            .checked_mul(element_width)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let end = start
-            .checked_add(element_width)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        output.extend_from_slice(alphabet.bytes.get(start..end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed alphabet is truncated")
-        })?);
-    }
+    decode_tokenize_indices(
+        alphabet.bytes,
+        alphabet_size,
+        element_width,
+        indices.bytes,
+        indices.element_width,
+        &mut output,
+    )?;
     Ok(OwnedStream {
         bytes: output,
         element_width,
         string_lengths: None,
     })
+}
+
+fn decode_tokenize_indices(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    element_width: usize,
+    indices: &[u8],
+    index_width: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    match index_width {
+        1 => {
+            for &index in indices {
+                append_tokenized_element(
+                    alphabet,
+                    alphabet_size,
+                    element_width,
+                    index.into(),
+                    output,
+                )?;
+            }
+        }
+        2 => {
+            for index in indices.chunks_exact(2) {
+                append_tokenized_element(
+                    alphabet,
+                    alphabet_size,
+                    element_width,
+                    u16::from_le_bytes([index[0], index[1]]).into(),
+                    output,
+                )?;
+            }
+        }
+        4 => {
+            for index in indices.chunks_exact(4) {
+                append_tokenized_element(
+                    alphabet,
+                    alphabet_size,
+                    element_width,
+                    u32::from_le_bytes([index[0], index[1], index[2], index[3]])
+                        .try_into()
+                        .map_err(|_| {
+                            Error::new(ErrorKind::LimitExceeded)
+                                .with_detail("numeric value is too large")
+                        })?,
+                    output,
+                )?;
+            }
+        }
+        8 => {
+            for index in indices.chunks_exact(8) {
+                append_tokenized_element(
+                    alphabet,
+                    alphabet_size,
+                    element_width,
+                    u64::from_le_bytes([
+                        index[0], index[1], index[2], index[3], index[4], index[5], index[6],
+                        index[7],
+                    ])
+                    .try_into()
+                    .map_err(|_| {
+                        Error::new(ErrorKind::LimitExceeded)
+                            .with_detail("numeric value is too large")
+                    })?,
+                    output,
+                )?;
+            }
+        }
+        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
+    }
+    Ok(())
+}
+
+fn append_tokenized_element(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    element_width: usize,
+    index: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    if index >= alphabet_size {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed index is out of bounds")
+        );
+    }
+    let start = index * element_width;
+    output.extend_from_slice(&alphabet[start..start + element_width]);
+    Ok(())
 }
 
 struct QuantizeParams {
