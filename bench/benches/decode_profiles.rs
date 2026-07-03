@@ -244,8 +244,16 @@ struct ZliBenchSpec {
 fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
     let dir = workspace_root().join("tmp").join("ozlrip-bench-inputs");
     fs::create_dir_all(&dir).expect("create benchmark input dir");
-    let input_path = dir.join(format!("{}.input", spec.name));
     let frame_path = dir.join(format!("{}.zl", spec.name));
+
+    if let Ok(frame) = fs::read(&frame_path)
+        && decode_ozlrip_with_bench_limits(&frame).is_ok_and(|decoded| decoded == spec.input)
+        && decode_openzl_c_with_bench_limits(&frame, spec.input.len()) == spec.input
+    {
+        return frame;
+    }
+
+    let input_path = dir.join(format!("{}.input", spec.name));
     fs::write(&input_path, &spec.input).expect("write benchmark input");
 
     let mut command = Command::new(zli);
