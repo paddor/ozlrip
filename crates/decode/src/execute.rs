@@ -4416,6 +4416,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_concat_typed_size_mismatch() {
+        let err = decode_concat_node(
+            &[
+                StreamInput {
+                    bytes: &[2, 0, 0, 0],
+                    element_width: 4,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[1, 0, 2, 0, 3, 0],
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            &[],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
     fn rejects_concat_serial_output_limit_without_mutating_destination() {
         let input = concat_serial_frame(b"openzl concat");
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
@@ -4482,6 +4505,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_split_by_struct_mismatched_element_counts() {
+        let err = decode_split_by_struct_node(
+            &[
+                StreamInput {
+                    bytes: &[1, 2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[3, 0],
+                    element_width: 2,
+                    string_lengths: None,
+                },
+            ],
+            2,
+            &[],
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
     fn decodes_dispatch_n_by_tag_node() {
         let output = decode_dispatch_n_by_tag_node(
             &[
@@ -4514,6 +4561,66 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, b"abXYZc");
+    }
+
+    #[test]
+    fn rejects_dispatch_n_by_tag_invalid_tag() {
+        let err = decode_dispatch_n_by_tag_node(
+            &[
+                StreamInput {
+                    bytes: &[2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[1],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"a",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            1,
+            &[],
+            21,
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn rejects_dispatch_n_by_tag_size_mismatch() {
+        let err = decode_dispatch_n_by_tag_node(
+            &[
+                StreamInput {
+                    bytes: &[0],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[2],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"a",
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            1,
+            &[],
+            21,
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 
     #[test]
