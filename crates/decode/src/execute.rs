@@ -4180,7 +4180,7 @@ fn decode_delta_node(
     }
     output.resize(output_len, 0);
     output[..stored.element_width].copy_from_slice(header);
-    decode_delta_elements(stored.bytes, header, stored.element_width, &mut output)?;
+    decode_delta_elements(stored.bytes, header, stored.element_width, &mut output);
     Ok(OwnedStream {
         bytes: output,
         element_width: stored.element_width,
@@ -4188,12 +4188,7 @@ fn decode_delta_node(
     })
 }
 
-fn decode_delta_elements(
-    stored: &[u8],
-    header: &[u8],
-    element_width: usize,
-    output: &mut [u8],
-) -> Result<()> {
+fn decode_delta_elements(stored: &[u8], header: &[u8], element_width: usize, output: &mut [u8]) {
     match element_width {
         1 => {
             let mut previous = header[0];
@@ -4204,23 +4199,17 @@ fn decode_delta_elements(
         }
         2 => {
             let mut previous = u16::from_le_bytes([header[0], header[1]]);
-            for (index, delta) in stored.chunks_exact(2).enumerate() {
+            for (out, delta) in output[2..].chunks_exact_mut(2).zip(stored.chunks_exact(2)) {
                 previous = previous.wrapping_add(u16::from_le_bytes([delta[0], delta[1]]));
-                let offset = (index + 1)
-                    .checked_mul(2)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                output[offset..offset + 2].copy_from_slice(&previous.to_le_bytes());
+                out.copy_from_slice(&previous.to_le_bytes());
             }
         }
         4 => {
             let mut previous = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            for (index, delta) in stored.chunks_exact(4).enumerate() {
+            for (out, delta) in output[4..].chunks_exact_mut(4).zip(stored.chunks_exact(4)) {
                 previous = previous
                     .wrapping_add(u32::from_le_bytes([delta[0], delta[1], delta[2], delta[3]]));
-                let offset = (index + 1)
-                    .checked_mul(4)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                output[offset..offset + 4].copy_from_slice(&previous.to_le_bytes());
+                out.copy_from_slice(&previous.to_le_bytes());
             }
         }
         8 => {
@@ -4228,19 +4217,15 @@ fn decode_delta_elements(
                 header[0], header[1], header[2], header[3], header[4], header[5], header[6],
                 header[7],
             ]);
-            for (index, delta) in stored.chunks_exact(8).enumerate() {
+            for (out, delta) in output[8..].chunks_exact_mut(8).zip(stored.chunks_exact(8)) {
                 previous = previous.wrapping_add(u64::from_le_bytes([
                     delta[0], delta[1], delta[2], delta[3], delta[4], delta[5], delta[6], delta[7],
                 ]));
-                let offset = (index + 1)
-                    .checked_mul(8)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                output[offset..offset + 8].copy_from_slice(&previous.to_le_bytes());
+                out.copy_from_slice(&previous.to_le_bytes());
             }
         }
         _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
     }
-    Ok(())
 }
 
 fn decode_bitunpack_serial8_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {

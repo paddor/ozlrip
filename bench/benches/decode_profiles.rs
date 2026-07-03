@@ -2,6 +2,7 @@ use std::{
     env, fs,
     hint::black_box,
     io::Write,
+    mem::size_of,
     os::raw::{c_char, c_int, c_void},
     path::{Path, PathBuf},
     process::Command,
@@ -106,6 +107,13 @@ fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCas
             extra_args: &[],
             input: sequential_bytes(1024 * 1024),
         },
+        ZliBenchSpec {
+            name: "serial-sequential-16m",
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M"],
+            input: sequential_bytes(16 * 1024 * 1024),
+        },
     ] {
         if case_filter.is_some_and(|filter| filter != spec.name) {
             continue;
@@ -119,11 +127,39 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
     let mut cases = Vec::new();
     for spec in [
         ZliBenchSpec {
+            name: "u8-rle-16m",
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
+            input: u8_runs(16 * 1024 * 1024),
+        },
+        ZliBenchSpec {
+            name: "le-u32-delta-16m",
+            profile: "le-u32",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
+            input: le_u32_delta_bytes(4 * 1024 * 1024),
+        },
+        ZliBenchSpec {
+            name: "le-u64-timeseries-32m",
+            profile: "le-u64",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
+            input: le_u64_timeseries_bytes(4 * 1024 * 1024),
+        },
+        ZliBenchSpec {
             name: "csv-timeseries-3m",
             profile: "csv",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
             input: csv_timeseries(120_000),
+        },
+        ZliBenchSpec {
+            name: "csv-timeseries-30m",
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M"],
+            input: csv_timeseries(1_000_000),
         },
         ZliBenchSpec {
             name: "sao-fixed-5m",
@@ -133,11 +169,37 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
             input: sao_synthetic_records(200_000),
         },
         ZliBenchSpec {
+            name: "sao-fixed-28m",
+            profile: "sao",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
+            input: sao_synthetic_records(1_000_000),
+        },
+        ZliBenchSpec {
+            name: "sddl2-sao-silesia-28m",
+            profile: "sddl2",
+            profile_arg: Some(
+                workspace_root()
+                    .join("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl")
+                    .display()
+                    .to_string(),
+            ),
+            extra_args: &["--chunk-size", "4M", "--no-store-on-expansion"],
+            input: sao_synthetic_records(1_000_000),
+        },
+        ZliBenchSpec {
             name: "parquet-canonical-sample",
             profile: "parquet",
             profile_arg: None,
             extra_args: &["--chunk-size", "1M"],
             input: parquet_canonical_sample(),
+        },
+        ZliBenchSpec {
+            name: "parquet-nested-sample",
+            profile: "parquet",
+            profile_arg: None,
+            extra_args: &["--chunk-size", "1M"],
+            input: parquet_nested_sample(),
         },
     ] {
         if case_filter.is_some_and(|filter| filter != spec.name) {
@@ -174,7 +236,7 @@ fn generated_case_from_zli(
 struct ZliBenchSpec {
     name: &'static str,
     profile: &'static str,
-    profile_arg: Option<&'static str>,
+    profile_arg: Option<String>,
     extra_args: &'static [&'static str],
     input: Vec<u8>,
 }
@@ -192,7 +254,7 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
         .arg(&input_path)
         .arg("--profile")
         .arg(spec.profile);
-    if let Some(profile_arg) = spec.profile_arg {
+    if let Some(profile_arg) = &spec.profile_arg {
         command.arg("--profile-arg").arg(profile_arg);
     }
     command.args(spec.extra_args).arg("-o").arg(&frame_path).arg("-f");
@@ -252,6 +314,33 @@ fn sequential_bytes(len: usize) -> Vec<u8> {
         .collect()
 }
 
+fn u8_runs(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    for index in 0..len {
+        out.push(u8::try_from((index / 257) & 0xff).expect("masked to byte"));
+    }
+    out
+}
+
+fn le_u32_delta_bytes(values: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values * size_of::<u32>());
+    for index in 0..values {
+        let value = 1_000_000u32.wrapping_add(u32::try_from(index).unwrap() * 3);
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn le_u64_timeseries_bytes(values: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values * size_of::<u64>());
+    for index in 0..values {
+        let trend = u64::try_from(index).unwrap() * 1_000;
+        let jitter = u64::try_from(index % 17).unwrap() * 13;
+        out.extend_from_slice(&(1_700_000_000_000u64 + trend + jitter).to_le_bytes());
+    }
+    out
+}
+
 fn csv_timeseries(rows: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows * 32);
     out.extend_from_slice(b"timestamp,sensor,value,status\n");
@@ -288,13 +377,21 @@ fn sao_synthetic_records(records: usize) -> Vec<u8> {
 }
 
 fn parquet_canonical_sample() -> Vec<u8> {
+    read_upstream_sample("cli/tests/sample_files/parquet/simple.parquet")
+}
+
+fn parquet_nested_sample() -> Vec<u8> {
+    read_upstream_sample("cli/tests/sample_files/parquet/nested.parquet")
+}
+
+fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
     fs::read(
         workspace_root()
             .join("tmp")
             .join("openzl-upstream")
-            .join("cli/tests/sample_files/parquet/simple.parquet"),
+            .join(relative_path),
     )
-    .expect("read upstream parquet sample")
+    .expect("read upstream sample")
 }
 
 fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
