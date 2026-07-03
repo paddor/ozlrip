@@ -1374,6 +1374,11 @@ struct DispatchStringSource<'a> {
     position: usize,
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV dispatch hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
 fn append_dispatched_string(
     source: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -2184,7 +2189,11 @@ fn numeric_element_count(bytes: &[u8], element_width: usize) -> Result<usize> {
     Ok(bytes.len() / element_width)
 }
 
-#[inline]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV dispatch/tag hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
 fn read_usize_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Result<usize> {
     let start = index
         .checked_mul(element_width)
@@ -3028,6 +3037,11 @@ fn decode_tokenize_fixed_node(
     })
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled SAO tokenize hot path benefits from inlining this loop"
+)]
+#[inline(always)]
 fn decode_tokenize_indices(
     alphabet: &[u8],
     alphabet_size: usize,
@@ -3099,6 +3113,11 @@ fn decode_tokenize_indices(
     Ok(())
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled SAO tokenize hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
 fn append_tokenized_element(
     alphabet: &[u8],
     alphabet_size: usize,
