@@ -233,8 +233,11 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
     let dir = workspace_root().join("tmp").join("ozlrip-bench-inputs");
     fs::create_dir_all(&dir).expect("create benchmark input dir");
     let frame_path = dir.join(format!("{}.zl", spec.name));
+    let meta_path = dir.join(format!("{}.zl.meta", spec.name));
+    let signature = zli_cache_signature(spec);
 
     if let Ok(frame) = fs::read(&frame_path)
+        && fs::read_to_string(&meta_path).is_ok_and(|cached| cached == signature)
         && decode_ozlrip_with_bench_limits(&frame).is_ok_and(|decoded| decoded == spec.input)
         && decode_openzl_c_with_bench_limits(&frame, spec.input.len()) == spec.input
     {
@@ -263,7 +266,30 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    fs::read(frame_path).expect("read generated zli frame")
+    let frame = fs::read(frame_path).expect("read generated zli frame");
+    fs::write(meta_path, signature).expect("write generated zli metadata");
+    frame
+}
+
+fn zli_cache_signature(spec: &ZliBenchSpec) -> String {
+    format!(
+        "v2\nname={}\nprofile={}\nprofile_arg={}\nextra_args={}\ninput_len={}\ninput_hash={:016x}\n",
+        spec.name,
+        spec.profile,
+        spec.profile_arg.as_deref().unwrap_or(""),
+        spec.extra_args.join("\x1f"),
+        spec.input.len(),
+        fnv1a64(&spec.input)
+    )
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn zli_path() -> Option<PathBuf> {
