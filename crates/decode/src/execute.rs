@@ -2077,12 +2077,16 @@ fn decode_dispatch_string_node_to_serial_output(
             }
         }
         2 => {
-            for source in indices.bytes.chunks_exact(2) {
-                append_dispatched_string_to_serial(
-                    usize::from(u16::from_le_bytes([source[0], source[1]])),
-                    &mut sources,
-                    output,
-                )?;
+            if sources.len() == 5 {
+                append_dispatched_string_2byte_csv_pattern(indices.bytes, &mut sources, output)?;
+            } else {
+                for source in indices.bytes.chunks_exact(2) {
+                    append_dispatched_string_to_serial(
+                        usize::from(u16::from_le_bytes([source[0], source[1]])),
+                        &mut sources,
+                        output,
+                    )?;
+                }
             }
         }
         _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
@@ -2093,6 +2097,50 @@ fn decode_dispatch_string_node_to_serial_output(
                 .with_detail("dispatch_string did not consume every source string"));
         }
     }
+    Ok(())
+}
+
+fn append_dispatched_string_2byte_csv_pattern(
+    indices: &[u8],
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    const CSV_PATTERN: [u8; 16] = [0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 4, 0, 3, 0, 4, 0];
+
+    let mut offset = 0usize;
+    while indices.len() - offset >= CSV_PATTERN.len() {
+        if indices[offset..offset + CSV_PATTERN.len()] == CSV_PATTERN {
+            append_dispatched_string_source_to_serial(&mut sources[0], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[1], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[2], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[3], output)?;
+            append_dispatched_string_source_to_serial(&mut sources[4], output)?;
+            offset += CSV_PATTERN.len();
+            continue;
+        }
+
+        let source = &indices[offset..offset + 2];
+        append_dispatched_string_to_serial(
+            usize::from(u16::from_le_bytes([source[0], source[1]])),
+            sources,
+            output,
+        )?;
+        offset += 2;
+    }
+
+    while offset < indices.len() {
+        let source = &indices[offset..offset + 2];
+        append_dispatched_string_to_serial(
+            usize::from(u16::from_le_bytes([source[0], source[1]])),
+            sources,
+            output,
+        )?;
+        offset += 2;
+    }
+
     Ok(())
 }
 
@@ -2109,6 +2157,36 @@ fn append_dispatched_string_to_serial(
     let source = sources.get_mut(source).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source index is invalid")
     })?;
+    let length = *source.lengths.get(source.position).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
+    })?;
+    let length = usize::try_from(length)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let offset = source.byte_position;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bytes = source.bytes.get(offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+    })?;
+    output.extend_from_slice(bytes);
+    source.position = source
+        .position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    source.byte_position = end;
+    Ok(())
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV dispatch hot path benefits from inlining this leaf"
+)]
+#[inline(always)]
+fn append_dispatched_string_source_to_serial(
+    source: &mut DispatchStringSource<'_>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
     let length = *source.lengths.get(source.position).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("dispatch_string source is exhausted")
     })?;
