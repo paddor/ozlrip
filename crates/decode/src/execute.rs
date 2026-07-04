@@ -6067,6 +6067,15 @@ fn decode_zigzag_numeric_chunk(
     output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("zigzag allocation failed")
     })?;
+    #[cfg(not(feature = "paranoid"))]
+    if decode_zigzag_numeric_fast(stored.bytes, stored.element_width, &mut output) {
+        return Ok(OwnedStream {
+            bytes: output,
+            element_width: stored.element_width,
+            string_lengths: None,
+            recyclable: false,
+        });
+    }
     match stored.element_width {
         1 => {
             for &encoded in stored.bytes {
@@ -6106,6 +6115,88 @@ fn decode_zigzag_numeric_chunk(
         string_lengths: None,
         recyclable: false,
     })
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn decode_zigzag_numeric_fast(input: &[u8], element_width: usize, output: &mut Vec<u8>) -> bool {
+    match element_width {
+        2 => decode_zigzag_u16_fast(input, output),
+        4 => decode_zigzag_u32_fast(input, output),
+        8 => decode_zigzag_u64_fast(input, output),
+        _ => false,
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn decode_zigzag_u16_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
+    if !input.len().is_multiple_of(2) {
+        return false;
+    }
+    debug_assert!(output.len() + input.len() <= output.capacity());
+    let start = output.len();
+    unsafe {
+        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
+        // width validation above ensures exact 2-byte chunks.
+        let dst = output.as_mut_ptr().add(start);
+        for (index, encoded) in input.chunks_exact(2).enumerate() {
+            let value = u16::from_le_bytes([encoded[0], encoded[1]]);
+            let mask = 0u16.wrapping_sub(value & 1);
+            dst.add(index * 2)
+                .cast::<u16>()
+                .write_unaligned(((value >> 1) ^ mask).to_le());
+        }
+        output.set_len(start + input.len());
+    }
+    true
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn decode_zigzag_u32_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
+    if !input.len().is_multiple_of(4) {
+        return false;
+    }
+    debug_assert!(output.len() + input.len() <= output.capacity());
+    let start = output.len();
+    unsafe {
+        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
+        // width validation above ensures exact 4-byte chunks.
+        let dst = output.as_mut_ptr().add(start);
+        for (index, encoded) in input.chunks_exact(4).enumerate() {
+            let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+            let mask = 0u32.wrapping_sub(value & 1);
+            dst.add(index * 4)
+                .cast::<u32>()
+                .write_unaligned(((value >> 1) ^ mask).to_le());
+        }
+        output.set_len(start + input.len());
+    }
+    true
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn decode_zigzag_u64_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
+    if !input.len().is_multiple_of(8) {
+        return false;
+    }
+    debug_assert!(output.len() + input.len() <= output.capacity());
+    let start = output.len();
+    unsafe {
+        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
+        // width validation above ensures exact 8-byte chunks.
+        let dst = output.as_mut_ptr().add(start);
+        for (index, encoded) in input.chunks_exact(8).enumerate() {
+            let value = u64::from_le_bytes([
+                encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5], encoded[6],
+                encoded[7],
+            ]);
+            let mask = 0u64.wrapping_sub(value & 1);
+            dst.add(index * 8)
+                .cast::<u64>()
+                .write_unaligned(((value >> 1) ^ mask).to_le());
+        }
+        output.set_len(start + input.len());
+    }
+    true
 }
 
 fn decode_delta_node(
