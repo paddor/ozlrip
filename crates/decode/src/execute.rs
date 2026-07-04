@@ -4468,7 +4468,13 @@ fn read_var_u64_from_slice(bytes: &mut &[u8]) -> Result<u64> {
 }
 
 fn write_numeric_element_vec(output: &mut Vec<u8>, element_width: usize, value: u64) {
-    output.extend_from_slice(&value.to_le_bytes()[..element_width]);
+    match element_width {
+        1 => output.push(value as u8),
+        2 => output.extend_from_slice(&(value as u16).to_le_bytes()),
+        4 => output.extend_from_slice(&(value as u32).to_le_bytes()),
+        8 => output.extend_from_slice(&value.to_le_bytes()),
+        _ => unreachable!("numeric element width was validated"),
+    }
 }
 
 struct ForwardBitReader<'a> {
