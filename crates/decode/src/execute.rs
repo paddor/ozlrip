@@ -9037,6 +9037,30 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
     }
 
+    #[cfg(feature = "checksum")]
+    #[test]
+    fn rejects_compressed_checksum_before_decoded_checksum() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push((1 << 0) | (1 << 1));
+        input.push(1);
+        input.push(4);
+        let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
+        input.push(header_checksum);
+        input.push(1);
+        input.push(1);
+        input.push(3);
+        input.extend_from_slice(&[7, 8, 9]);
+        input.extend_from_slice(&0u32.to_le_bytes());
+        input.extend_from_slice(&0u32.to_le_bytes());
+        input.push(0);
+
+        let err = parse_frame_plan(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
+        assert!(err.detail().unwrap().contains("compressed"));
+    }
+
     #[test]
     fn decodes_fse_ncount_node() {
         let distribution = [15, 8, 4, 3, 1, 1];

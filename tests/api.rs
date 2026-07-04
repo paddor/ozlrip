@@ -56,6 +56,15 @@ fn bundled_stored_frame(bytes: &[u8]) -> Vec<u8> {
     input
 }
 
+fn unknown_size_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(0);
+    input
+}
+
 #[test]
 fn inspect_rejects_non_openzl_input() {
     let err = ozlrip::inspect(b"not-openzl").unwrap_err();
@@ -97,6 +106,19 @@ fn decode_into_preserves_destination_on_dictionary_bundle() {
             .as_deref(),
         Some(&[1, 2][..])
     );
+}
+
+#[test]
+fn inspect_and_decode_reject_unknown_output_size() {
+    let frame = unknown_size_frame();
+    let inspect_err = ozlrip::inspect(&frame).unwrap_err();
+    let mut dst = vec![1, 2, 3];
+
+    let decode_err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+
+    assert_eq!(inspect_err.kind(), ErrorKind::Unsupported);
+    assert_eq!(decode_err.kind(), ErrorKind::Unsupported);
+    assert_eq!(dst, [1, 2, 3]);
 }
 
 #[test]

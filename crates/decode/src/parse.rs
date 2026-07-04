@@ -20,6 +20,7 @@ const CHUNK_VERSION_MIN: u32 = 21;
 const COMMENT_VERSION_MIN: u32 = 22;
 const MATERIALIZED_DICT_VERSION_MIN: u32 = 25;
 const UNIQUE_ID_BYTES: usize = 32;
+const MAX_DICTS_PER_BUNDLE: u32 = 0xffff;
 const MAX_HEADER_COMMENT_BYTES: u64 = 10_000;
 
 pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
@@ -144,8 +145,8 @@ pub(crate) fn parse_single_zstd_frame(
     check_limit(outputs, limits.max_streams, ErrorKind::LimitExceeded)?;
     let first_size = reader.peek_byte()?;
     let decoded_bytes = if first_size == 0 {
-        let _ = reader.read_byte()?;
-        None
+        return Err(Error::at(ErrorKind::Unsupported, reader.offset())
+            .with_detail("unknown OpenZL output sizes are unsupported"));
     } else {
         let encoded = reader.read_var_u64()?;
         let size = encoded
@@ -500,14 +501,8 @@ fn read_output_sizes(
 
     let first = reader.peek_byte()?;
     if first == 0 {
-        let _ = reader.read_byte()?;
-        sizes.resize(outputs, None);
-        elements.resize(outputs, None);
-        return Ok(OutputSizes {
-            sizes,
-            elements,
-            decoded_bytes: None,
-        });
+        return Err(Error::at(ErrorKind::Unsupported, reader.offset())
+            .with_detail("unknown OpenZL output sizes are unsupported"));
     }
 
     let mut total = 0usize;
@@ -1183,12 +1178,7 @@ fn read_one_transform_header_size(reader: &mut Reader<'_>) -> Result<u32> {
     let mut size = read_bitpacked_single_u32(reader, 1)?;
     if size != 0 {
         let decoded = reader.read_var_u64()?;
-        size = u32::try_from(
-            decoded
-                .checked_add(1)
-                .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
-        )
-        .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+        size = read_shifted_u32(decoded, 1, reader.offset(), u64::from(u32::MAX - 1))?;
     }
     Ok(size)
 }
@@ -1243,7 +1233,7 @@ fn read_one_dict_index(reader: &mut Reader<'_>) -> Result<Option<u32>> {
             .with_detail("dict index bit width is too large"));
     }
     let value = read_bitpacked_single_u32(reader, bits)?;
-    if value > 0xffff {
+    if value > MAX_DICTS_PER_BUNDLE {
         return Err(Error::new(ErrorKind::Malformed).with_detail("dict index is too large"));
     }
     Ok(Some(value))
@@ -1399,12 +1389,7 @@ fn read_transform_header_sizes(reader: &mut Reader<'_>, transforms: usize) -> Re
     for size in &mut sizes {
         if *size != 0 {
             let decoded = reader.read_var_u64()?;
-            *size = u32::try_from(
-                decoded
-                    .checked_add(1)
-                    .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?,
-            )
-            .map_err(|_| Error::at(ErrorKind::Malformed, reader.offset()))?;
+            *size = read_shifted_u32(decoded, 1, reader.offset(), u64::from(u32::MAX - 1))?;
         }
     }
     Ok(sizes)
@@ -1490,7 +1475,7 @@ fn read_dict_indexes(
             out.push(None);
         } else {
             let value = values[value_index];
-            if value > 0xffff {
+            if value > MAX_DICTS_PER_BUNDLE {
                 return Err(Error::new(ErrorKind::Malformed).with_detail("dict index is too large"));
             }
             out.push(Some(value));
@@ -1498,6 +1483,19 @@ fn read_dict_indexes(
         }
     }
     Ok(out)
+}
+
+fn read_shifted_u32(raw: u64, shift: u32, offset: usize, max_raw: u64) -> Result<u32> {
+    if raw >= max_raw {
+        return Err(
+            Error::at(ErrorKind::Malformed, offset).with_detail("shifted u32 field is too large")
+        );
+    }
+    u32::try_from(
+        raw.checked_add(u64::from(shift))
+            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, offset))?,
+    )
+    .map_err(|_| Error::at(ErrorKind::Malformed, offset))
 }
 
 fn read_stored_stream_sizes(
@@ -2081,6 +2079,42 @@ mod tests {
         out.push(u8::try_from(value).unwrap());
     }
 
+    fn push_v21_output_sizes(out: &mut Vec<u8>, outputs: usize) {
+        for _ in 0..outputs {
+            out.push(1);
+        }
+    }
+
+    fn v21_header_with_outputs(outputs: usize) -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        if outputs <= 14 {
+            input.push(u8::try_from(outputs).unwrap());
+            if outputs > 2 {
+                input.resize(input.len() + (outputs - 2).div_ceil(4), 0);
+            }
+        } else {
+            let encoded = outputs - 15;
+            let high = encoded & 0x0f;
+            let next = encoded >> 4;
+            input.push(0x0f | u8::try_from(high << 4).unwrap());
+            input.push(u8::try_from(next).unwrap());
+            input.resize(input.len() + outputs.div_ceil(4), 0);
+        }
+        push_v21_output_sizes(&mut input, outputs);
+        input
+    }
+
+    fn assert_truncations_fail(input: &[u8], first_truncated_len: usize) {
+        for end in first_truncated_len..input.len() {
+            assert!(
+                inspect_frame(&input[..end], Limits::default()).is_err(),
+                "prefix len {end} unexpectedly parsed"
+            );
+        }
+    }
+
     #[test]
     fn rejects_truncated_magic() {
         let err = inspect_frame(&[0xd5, 0xa5], Limits::default()).unwrap_err();
@@ -2129,18 +2163,83 @@ mod tests {
     }
 
     #[test]
-    fn parses_v21_unknown_sizes() {
+    fn rejects_v21_unknown_output_size() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));
         input.push(0);
         input.push(1);
         input.push(0);
 
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.detail().unwrap().contains("unknown"));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_unknown_output_size_before_zstd_fast_path() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(0);
+
+        let err = parse_single_zstd_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.detail().unwrap().contains("unknown"));
+    }
+
+    #[test]
+    fn parses_v14_single_typed_output_header() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(14));
+        input.push(2);
+        input.extend_from_slice(&4u32.to_le_bytes());
+
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
-        assert_eq!(info.decoded_bytes, None);
-        assert_eq!(info.output_sizes, [None]);
+        assert_eq!(info.format_version, 14);
+        assert_eq!(info.header_bytes, input.len());
+        assert_eq!(info.output_types, [FrameValueType::Numeric]);
+        assert_eq!(info.output_sizes, [Some(4)]);
         assert_eq!(info.output_elements, [None]);
+    }
+
+    #[test]
+    fn parses_v20_single_serial_32_bit_output_size() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(20));
+        input.push(0);
+        input.extend_from_slice(&3u32.to_le_bytes());
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(info.format_version, 20);
+        assert_eq!(info.output_types, [FrameValueType::Serial]);
+        assert_eq!(info.output_sizes, [Some(3)]);
+        assert_eq!(info.output_elements, [Some(3)]);
+    }
+
+    #[test]
+    fn parses_v21_output_count_boundaries() {
+        for outputs in [1, 2, 14, 15] {
+            let input = v21_header_with_outputs(outputs);
+            let info = inspect_frame(&input, Limits::default()).unwrap();
+            assert_eq!(info.inputs, outputs);
+            assert_eq!(info.output_types.len(), outputs);
+            assert_eq!(info.output_sizes.len(), outputs);
+        }
+    }
+
+    #[test]
+    fn rejects_v21_output_count_above_runtime_limit() {
+        let input = v21_header_with_outputs(2049);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
     }
 
     #[test]
@@ -2529,6 +2628,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_transform_header_size_at_upstream_u32_sentinel() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(1);
+        push_var_u64(&mut input, u64::from(u32::MAX - 1));
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
     fn enforces_stored_stream_buffer_limit() {
         let mut input = Vec::new();
         input.extend_from_slice(&magic(21));
@@ -2557,7 +2675,7 @@ mod tests {
         input.extend_from_slice(&magic(21));
         input.push(0);
         input.push(1);
-        input.push(0);
+        input.push(1);
         input.push(1);
         input.push(2);
         push_var_u64(&mut input, encoded_size);
@@ -2653,6 +2771,121 @@ mod tests {
         let err = inspect_frame(&input, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn rejects_dict_index_bit_width_above_bundle_limit_encoding() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(25));
+        input.push(1 << 3);
+        input.push(1);
+        input.push(1);
+        input.push(1);
+        input.push(4);
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(22);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(1);
+        input.push(17);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+    }
+
+    #[test]
+    fn rejects_committed_section_truncations_in_representative_frames() {
+        let stored = {
+            let mut input = Vec::new();
+            input.extend_from_slice(&magic(21));
+            input.push(0);
+            input.push(1);
+            input.push(4);
+            input.push(1);
+            input.push(1);
+            input.push(3);
+            input.extend_from_slice(&[1, 2, 3]);
+            input.push(0);
+            input
+        };
+        let transform = {
+            let mut input = Vec::new();
+            input.extend_from_slice(&magic(21));
+            input.push(0);
+            input.push(1);
+            input.push(4);
+            input.push(2);
+            input.push(1);
+            input.push(0);
+            input.push(22);
+            input.push(0);
+            input.push(0);
+            input.push(0);
+            input.push(0);
+            input.push(3);
+            input.extend_from_slice(&[1, 2, 3]);
+            input.push(0);
+            input
+        };
+        let comment = {
+            let mut input = Vec::new();
+            input.extend_from_slice(&magic(22));
+            input.push(1 << 2);
+            input.push(1);
+            input.push(4);
+            input.push(3);
+            input.extend_from_slice(b"abc");
+            input
+        };
+        let bundle = {
+            let mut input = Vec::new();
+            input.extend_from_slice(&magic(25));
+            input.push(1 << 3);
+            input.push(2);
+            input.extend_from_slice(&[1, 2]);
+            input.push(1);
+            input.push(4);
+            input
+        };
+        #[allow(unused_mut)]
+        let mut frames = vec![(stored, 8), (transform, 8)];
+        #[cfg(feature = "checksum")]
+        {
+            let mut input = Vec::new();
+            input.extend_from_slice(&magic(21));
+            input.push(1 << 1);
+            input.push(1);
+            input.push(4);
+            let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
+            input.push(header_checksum);
+            input.push(1);
+            input.push(1);
+            input.push(3);
+            input.extend_from_slice(&[1, 2, 3]);
+            let checksum_start = 8;
+            let checksum =
+                (xxhash_rust::xxh3::xxh3_64(&input[checksum_start..]) & 0xffff_ffff) as u32;
+            input.extend_from_slice(&checksum.to_le_bytes());
+            input.push(0);
+            frames.push((input, 9));
+        }
+
+        for (input, first_truncated_len) in frames {
+            inspect_frame(&input, Limits::default()).unwrap();
+            assert_truncations_fail(&input, first_truncated_len);
+        }
+
+        inspect_frame(&comment, Limits::default()).unwrap();
+        let err = inspect_frame(&comment[..comment.len() - 1], Limits::default()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Truncated);
+
+        inspect_frame(&bundle, Limits::default()).unwrap();
+        let err = inspect_frame(&bundle[..bundle.len() - 1], Limits::default()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Truncated);
     }
 
     #[test]
