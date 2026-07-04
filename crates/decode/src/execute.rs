@@ -2245,11 +2245,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
 ) -> Result<bool> {
     const CSV_PATTERN: [u8; 16] = [0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 4, 0, 3, 0, 4, 0];
 
-    if !indices.len().is_multiple_of(CSV_PATTERN.len())
-        || !indices
-            .chunks_exact(CSV_PATTERN.len())
-            .all(|chunk| chunk == CSV_PATTERN)
-    {
+    if !indices.len().is_multiple_of(CSV_PATTERN.len()) {
         return Ok(false);
     }
 
@@ -2288,7 +2284,10 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     let capacity = output.capacity();
     let output_ptr = output.as_mut_ptr();
 
-    for _ in 0..rows {
+    for index_chunk in indices.chunks_exact(CSV_PATTERN.len()) {
+        if index_chunk != CSV_PATTERN {
+            return Ok(false);
+        }
         append_csv_pattern_field_unchecked(
             0,
             sources,
