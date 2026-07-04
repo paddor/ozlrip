@@ -1756,13 +1756,13 @@ struct OutputSizes {
     decoded_bytes: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FramePlan {
     pub(crate) info: FramePlanInfo,
     pub(crate) chunks: ChunkPlans,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct FramePlanInfo {
     pub(crate) format_version: u32,
     pub(crate) frame_bytes: usize,

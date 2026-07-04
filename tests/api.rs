@@ -134,6 +134,21 @@ fn reusable_decoder_appends_outputs() {
 }
 
 #[test]
+fn reusable_decoder_rejects_mutated_cached_frame_buffer() {
+    let mut frame = stored_serial_frame(&[7, 8, 9]);
+    let mut decoder = ozlrip::Decoder::new(Limits::default());
+    let mut dst = Vec::new();
+
+    let written = decoder.decode_into(&frame, &mut dst).unwrap();
+    frame[..4].copy_from_slice(b"nope");
+    let err = decoder.decode_into(&frame, &mut dst).unwrap_err();
+
+    assert_eq!(written, 3);
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(dst, [7, 8, 9]);
+}
+
+#[test]
 fn inspect_reports_stored_serial_metadata() {
     let frame = stored_serial_frame(&[7, 8, 9]);
 

@@ -10,11 +10,19 @@ mod execute;
 mod parse;
 mod standard;
 
+const PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
+
 pub struct Decoder {
     limits: Limits,
     scratch: execute::DecodeScratch,
+    plan_cache: Option<CachedFramePlan>,
     #[cfg(feature = "zstd")]
     zstd: zrip::DecompressContext,
+}
+
+struct CachedFramePlan {
+    frame: Vec<u8>,
+    plan: parse::FramePlan,
 }
 
 impl Decoder {
@@ -22,6 +30,7 @@ impl Decoder {
         Self {
             limits,
             scratch: execute::DecodeScratch::new(),
+            plan_cache: None,
             #[cfg(feature = "zstd")]
             zstd: zrip::DecompressContext::new(),
         }
@@ -42,7 +51,14 @@ impl Decoder {
                 &mut self.zstd,
             );
         }
-        let plan = parse::parse_frame_plan(input, self.limits)?;
+        let plan = match self.cached_frame_plan(input) {
+            Some(plan) => plan,
+            None => {
+                let plan = parse::parse_frame_plan(input, self.limits)?;
+                self.remember_frame_plan(input, &plan);
+                plan
+            }
+        };
         execute::decode_plan_with_context(
             input,
             &plan,
@@ -52,6 +68,33 @@ impl Decoder {
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         )
+    }
+
+    fn cached_frame_plan(&self, input: &[u8]) -> Option<parse::FramePlan> {
+        let cached = self.plan_cache.as_ref()?;
+        if cached.frame == input {
+            Some(cached.plan.clone())
+        } else {
+            None
+        }
+    }
+
+    fn remember_frame_plan(&mut self, input: &[u8], plan: &parse::FramePlan) {
+        if input.len() > PLAN_CACHE_MAX_FRAME_BYTES {
+            self.plan_cache = None;
+            return;
+        }
+
+        let mut frame = Vec::new();
+        if frame.try_reserve_exact(input.len()).is_err() {
+            self.plan_cache = None;
+            return;
+        }
+        frame.extend_from_slice(input);
+        self.plan_cache = Some(CachedFramePlan {
+            frame,
+            plan: plan.clone(),
+        });
     }
 
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {
