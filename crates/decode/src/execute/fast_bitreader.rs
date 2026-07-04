@@ -31,6 +31,12 @@ pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize
 
 #[cfg(feature = "paranoid")]
 pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u32> {
+    if needed_bytes <= 4 {
+        if let Some(bytes) = bytes.get(byte_pos..byte_pos.checked_add(4)?) {
+            return Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+    }
+
     let byte_end = byte_pos.checked_add(needed_bytes)?;
     let bytes = bytes.get(byte_pos..byte_end)?;
     let mut value = 0u32;
