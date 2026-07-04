@@ -4803,15 +4803,23 @@ fn decode_partition_u32_node(
         Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
     })?;
 
+    let mut base_table = [0u64; 256];
+    let mut bit_table = [u8::MAX; 256];
+    for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
+        base_table[bucket] = base;
+        bit_table[bucket] = bit_width;
+    }
+
     let mut out_pos = 0usize;
     for &bucket in buckets {
         let bucket = usize::from(bucket);
-        let base = *bases.get(bucket).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
-        })?;
-        let bit_width = *bits.get(bucket).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
-        })?;
+        let bit_width = bit_table[bucket];
+        if bit_width == u8::MAX {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+            );
+        }
+        let base = base_table[bucket];
         let offset = reader.read_u64(usize::from(bit_width))?;
         let value = base
             .checked_add(offset)
