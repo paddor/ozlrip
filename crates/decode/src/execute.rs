@@ -4611,8 +4611,19 @@ fn append_field_lz_match(
             .with_detail("field_lz match length exceeds output size"));
     }
     let start = output.len();
-    output.resize(end, 0);
-    copy_lz_match(output, start, match_offset, match_len);
+    let src_start = start - match_offset;
+    if match_len <= match_offset {
+        output.extend_from_within(src_start..src_start + match_len);
+        return Ok(());
+    }
+
+    output.extend_from_within(src_start..start);
+    let mut copied = match_offset;
+    while copied < match_len {
+        let len = copied.min(match_len - copied);
+        output.extend_from_within(start..start + len);
+        copied += len;
+    }
     Ok(())
 }
 
