@@ -3008,9 +3008,19 @@ fn read_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Res
     Ok(u64::from_le_bytes(value))
 }
 
-#[inline]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled numeric decode paths pay measurable call overhead"
+)]
+#[inline(always)]
 fn write_numeric_element(dst: &mut [u8], element_width: usize, value: u64) {
-    dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]);
+    match element_width {
+        1 => dst[0] = value as u8,
+        2 => dst[..2].copy_from_slice(&(value as u16).to_le_bytes()),
+        4 => dst[..4].copy_from_slice(&(value as u32).to_le_bytes()),
+        8 => dst[..8].copy_from_slice(&value.to_le_bytes()),
+        _ => dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]),
+    }
 }
 
 fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
@@ -4703,6 +4713,11 @@ fn read_var_u64_from_slice(bytes: &mut &[u8]) -> Result<u64> {
     Ok(value)
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled numeric decode paths pay measurable call overhead"
+)]
+#[inline(always)]
 fn write_numeric_element_vec(output: &mut Vec<u8>, element_width: usize, value: u64) {
     match element_width {
         1 => output.push(value as u8),
