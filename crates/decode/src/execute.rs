@@ -2173,6 +2173,14 @@ fn decode_dispatch_string_node_to_serial_output(
         }
         2 => {
             if sources.len() == 5 {
+                #[cfg(not(feature = "paranoid"))]
+                if append_dispatched_string_2byte_csv_pattern_fast(
+                    indices.bytes,
+                    &mut sources,
+                    output,
+                )? {
+                    return Ok(());
+                }
                 append_dispatched_string_2byte_csv_pattern(indices.bytes, &mut sources, output)?;
             } else {
                 for source in indices.bytes.chunks_exact(2) {
@@ -2192,6 +2200,220 @@ fn decode_dispatch_string_node_to_serial_output(
                 .with_detail("dispatch_string did not consume every source string"));
         }
     }
+    Ok(())
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_dispatched_string_2byte_csv_pattern_fast(
+    indices: &[u8],
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<bool> {
+    const CSV_PATTERN: [u8; 16] = [0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 4, 0, 3, 0, 4, 0];
+
+    if !indices.len().is_multiple_of(CSV_PATTERN.len())
+        || !indices
+            .chunks_exact(CSV_PATTERN.len())
+            .all(|chunk| chunk == CSV_PATTERN)
+    {
+        return Ok(false);
+    }
+
+    let rows = indices.len() / CSV_PATTERN.len();
+    for source in &sources[..4] {
+        if source.lengths.len().saturating_sub(source.position) != rows {
+            return Ok(false);
+        }
+    }
+    let delimiter_count = rows
+        .checked_mul(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if sources[4].lengths.len().saturating_sub(sources[4].position) != delimiter_count
+        || !sources[4].lengths[sources[4].position..]
+            .iter()
+            .all(|&length| length == 1)
+    {
+        return Ok(false);
+    }
+
+    let mut positions = [
+        sources[0].position,
+        sources[1].position,
+        sources[2].position,
+        sources[3].position,
+        sources[4].position,
+    ];
+    let mut byte_positions = [
+        sources[0].byte_position,
+        sources[1].byte_position,
+        sources[2].byte_position,
+        sources[3].byte_position,
+        sources[4].byte_position,
+    ];
+    let mut out_pos = output.len();
+    let capacity = output.capacity();
+    let output_ptr = output.as_mut_ptr();
+
+    for _ in 0..rows {
+        append_csv_pattern_field_unchecked(
+            0,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_field_unchecked(
+            1,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_field_unchecked(
+            2,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_field_unchecked(
+            3,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+            capacity,
+        )?;
+    }
+
+    for index in 0..5 {
+        sources[index].position = positions[index];
+        sources[index].byte_position = byte_positions[index];
+    }
+    debug_assert!(out_pos <= output.capacity());
+    unsafe {
+        // SAFETY: every write above checked `out_pos` against the reserved
+        // capacity, and all bytes below the new length have been initialized.
+        output.set_len(out_pos);
+    }
+    Ok(true)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_csv_pattern_field_unchecked(
+    source_index: usize,
+    sources: &[DispatchStringSource<'_>],
+    positions: &mut [usize; 5],
+    byte_positions: &mut [usize; 5],
+    output_ptr: *mut u8,
+    out_pos: &mut usize,
+    capacity: usize,
+) -> Result<()> {
+    let source = &sources[source_index];
+    let length = usize::try_from(source.lengths[positions[source_index]])
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let src_start = byte_positions[source_index];
+    let src_end = src_start
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if src_end > source.bytes.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+        );
+    }
+    let dst_end = out_pos
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if dst_end > capacity {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+    debug_assert!(src_end <= source.bytes.len());
+    debug_assert!(dst_end <= capacity);
+    unsafe {
+        // SAFETY: `src_end` was checked against the source slice and `dst_end`
+        // against the output capacity. The caller sets `Vec::len` only after
+        // the complete exact-pattern append succeeds.
+        core::ptr::copy_nonoverlapping(
+            source.bytes.as_ptr().add(src_start),
+            output_ptr.add(*out_pos),
+            length,
+        );
+    }
+    positions[source_index] += 1;
+    byte_positions[source_index] = src_end;
+    *out_pos = dst_end;
+    Ok(())
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_csv_pattern_delimiter_unchecked(
+    sources: &[DispatchStringSource<'_>],
+    positions: &mut [usize; 5],
+    byte_positions: &mut [usize; 5],
+    output_ptr: *mut u8,
+    out_pos: &mut usize,
+    capacity: usize,
+) -> Result<()> {
+    let source = &sources[4];
+    let src_pos = byte_positions[4];
+    let &byte = source.bytes.get(src_pos).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
+    })?;
+    if *out_pos == capacity {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+    debug_assert!(*out_pos < capacity);
+    unsafe {
+        // SAFETY: source access used `get`, and destination has at least one
+        // spare byte. The caller publishes the new length after all writes.
+        *output_ptr.add(*out_pos) = byte;
+    }
+    positions[4] += 1;
+    byte_positions[4] = src_pos + 1;
+    *out_pos += 1;
     Ok(())
 }
 
@@ -7284,6 +7506,64 @@ mod tests {
             output.string_lengths.as_deref(),
             Some([1, 1, 1, 1].as_slice())
         );
+    }
+
+    #[test]
+    fn decodes_dispatch_string_csv_pattern_to_serial_output() {
+        let row_pattern = [0u16, 4, 1, 4, 2, 4, 3, 4]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let indices = [row_pattern.as_slice(), row_pattern.as_slice()].concat();
+        let first_lengths = [2, 2];
+        let second_lengths = [1, 2];
+        let third_lengths = [2, 1];
+        let fourth_lengths = [1, 3];
+        let delimiter_lengths = [1; 8];
+        let mut output = b"pre".to_vec();
+
+        decode_dispatch_string_node_to_serial_output(
+            &[
+                StreamInput {
+                    bytes: &indices,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"aaBB",
+                    element_width: 1,
+                    string_lengths: Some(&first_lengths),
+                },
+                StreamInput {
+                    bytes: b"xYZ",
+                    element_width: 1,
+                    string_lengths: Some(&second_lengths),
+                },
+                StreamInput {
+                    bytes: b"12q",
+                    element_width: 1,
+                    string_lengths: Some(&third_lengths),
+                },
+                StreamInput {
+                    bytes: b"kLMN",
+                    element_width: 1,
+                    string_lengths: Some(&fourth_lengths),
+                },
+                StreamInput {
+                    bytes: b",,;\n,,;\n",
+                    element_width: 1,
+                    string_lengths: Some(&delimiter_lengths),
+                },
+            ],
+            5,
+            &[],
+            21,
+            Limits::default(),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"preaa,x,12;k\nBB,YZ,q;LMN\n");
     }
 
     #[test]
