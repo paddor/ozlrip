@@ -4754,6 +4754,16 @@ fn decode_partition_node(
     if element_width == 4 {
         return decode_partition_u32_node(buckets.bytes, offsets.bytes, &bases, &bits, output_len);
     }
+    #[cfg(feature = "paranoid")]
+    if element_width == 4 {
+        return decode_partition_u32_node_safe(
+            buckets.bytes,
+            offsets.bytes,
+            &bases,
+            &bits,
+            output_len,
+        );
+    }
 
     let max_value = max_numeric_value(element_width)?;
     let mut reader = ForwardBitReader::new(offsets.bytes);
@@ -4784,6 +4794,67 @@ fn decode_partition_node(
     Ok(OwnedStream {
         bytes: output,
         element_width,
+        string_lengths: None,
+        recyclable: false,
+    })
+}
+
+#[cfg(feature = "paranoid")]
+fn decode_partition_u32_node_safe(
+    buckets: &[u8],
+    offset_bits: &[u8],
+    bases: &[u64],
+    bits: &[u8],
+    output_len: usize,
+) -> Result<OwnedStream> {
+    let mut reader = ForwardBitReader::new(offset_bits);
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+    })?;
+    output.resize(output_len, 0);
+
+    let mut base_table = [0u64; 256];
+    let mut bit_table = [u8::MAX; 256];
+    let mut mask_table = [0u32; 256];
+    for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
+        base_table[bucket] = base;
+        bit_table[bucket] = bit_width;
+        if bit_width <= 32 {
+            mask_table[bucket] = bit_mask_u32(bit_width);
+        }
+    }
+
+    let mut out_pos = 0usize;
+    for &bucket in buckets {
+        let bucket = usize::from(bucket);
+        let bit_width = bit_table[bucket];
+        if bit_width == u8::MAX {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+            );
+        }
+        let base = base_table[bucket];
+        let bit_width = usize::from(bit_width);
+        let offset = if bit_width <= 32 {
+            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
+        } else {
+            reader.read_u64(bit_width)?
+        };
+        let value = base
+            .checked_add(offset)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let value = u32::try_from(value).map_err(|_| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail("partition value exceeds output element width")
+        })?;
+        output[out_pos..out_pos + 4].copy_from_slice(&value.to_le_bytes());
+        out_pos += 4;
+    }
+
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 4,
         string_lengths: None,
         recyclable: false,
     })
@@ -4868,7 +4939,6 @@ unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
     }
 }
 
-#[cfg(not(feature = "paranoid"))]
 fn bit_mask_u32(bits: u8) -> u32 {
     if bits == 32 {
         u32::MAX
@@ -5133,7 +5203,6 @@ impl<'a> ForwardBitReader<'a> {
         Ok(value)
     }
 
-    #[cfg(not(feature = "paranoid"))]
     fn read_u32_window(&mut self, bits: usize, mask: u32) -> Result<u32> {
         debug_assert!(bits <= 32);
         let end = self

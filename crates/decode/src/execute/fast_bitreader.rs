@@ -29,6 +29,17 @@ pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize
     Some(value)
 }
 
+#[cfg(feature = "paranoid")]
+pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u32> {
+    let byte_end = byte_pos.checked_add(needed_bytes)?;
+    let bytes = bytes.get(byte_pos..byte_end)?;
+    let mut value = 0u32;
+    for (shift, &byte) in bytes.iter().enumerate() {
+        value |= u32::from(byte) << (shift * 8);
+    }
+    Some(value)
+}
+
 fn read_window_safe(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u128> {
     let byte_end = byte_pos.checked_add(needed_bytes)?;
     let bytes = bytes.get(byte_pos..byte_end)?;
