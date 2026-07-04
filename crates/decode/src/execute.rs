@@ -4672,6 +4672,11 @@ struct OpenZlFseState<'a> {
 }
 
 impl<'a> OpenZlFseState<'a> {
+    #[expect(
+        clippy::inline_always,
+        reason = "profiled FSE v2 loops benefit from inlining state setup"
+    )]
+    #[inline(always)]
     fn new(
         table: &'a [FseDecodeEntry],
         accuracy_log: u8,
@@ -4683,6 +4688,11 @@ impl<'a> OpenZlFseState<'a> {
         Ok(Self { table, state })
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "profiled FSE v2 loops pay measurable call overhead"
+    )]
+    #[inline(always)]
     fn symbol(self) -> Result<u8> {
         let index = usize::try_from(self.state).map_err(|_| Error::new(ErrorKind::Malformed))?;
         Ok(self
@@ -4692,6 +4702,11 @@ impl<'a> OpenZlFseState<'a> {
             .symbol)
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "disassembly showed standalone update calls in the FSE hot loop"
+    )]
+    #[inline(always)]
     fn update(&mut self, reader: &mut ReverseBitReader<'_>) -> Result<()> {
         let index = usize::try_from(self.state).map_err(|_| Error::new(ErrorKind::Malformed))?;
         let entry = self
@@ -4717,32 +4732,112 @@ fn decode_fse_symbols(
 ) -> Result<Vec<u8>> {
     let mut reader = ReverseBitReader::new(bits)
         .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
-    let mut states = Vec::new();
-    states.try_reserve_exact(nb_states).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("fse state allocation failed")
-    })?;
-    for _ in 0..nb_states {
-        states.push(OpenZlFseState::new(table, accuracy_log, &mut reader)?);
-    }
 
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("fse output allocation failed")
     })?;
-    for index in 0..output_len {
-        let state_index = index % nb_states;
-        let state = states
-            .get_mut(state_index)
-            .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("fse state is missing"))?;
-        output.push(state.symbol()?);
-        if index + nb_states < output_len {
-            state.update(&mut reader)?;
+    match nb_states {
+        2 => {
+            let mut states = [
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+            ];
+            decode_fse_symbols_2(&mut reader, &mut states, output_len, &mut output)?;
+        }
+        4 => {
+            let mut states = [
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
+            ];
+            decode_fse_symbols_4(&mut reader, &mut states, output_len, &mut output)?;
+        }
+        _ => {
+            return Err(
+                Error::new(ErrorKind::Unsupported).with_detail("fse_v2 state count is unsupported")
+            );
         }
     }
     if reader.bits_remaining() != 0 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("fse_v2 input has trailing bits"));
     }
     Ok(output)
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "profiled FSE v2 fixed-state loop benefits from inlining"
+)]
+#[inline(always)]
+fn decode_fse_symbols_2(
+    reader: &mut ReverseBitReader<'_>,
+    states: &mut [OpenZlFseState<'_>; 2],
+    output_len: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let update_len = output_len - 2;
+    let mut index = 0usize;
+    while index < update_len {
+        output.push(states[0].symbol()?);
+        states[0].update(reader)?;
+        index += 1;
+        if index >= update_len {
+            break;
+        }
+        output.push(states[1].symbol()?);
+        states[1].update(reader)?;
+        index += 1;
+    }
+    while index < output_len {
+        output.push(states[index & 1].symbol()?);
+        index += 1;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "profiled FSE v2 fixed-state loop benefits from inlining"
+)]
+#[inline(always)]
+fn decode_fse_symbols_4(
+    reader: &mut ReverseBitReader<'_>,
+    states: &mut [OpenZlFseState<'_>; 4],
+    output_len: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let update_len = output_len - 4;
+    let mut index = 0usize;
+    while index < update_len {
+        output.push(states[0].symbol()?);
+        states[0].update(reader)?;
+        index += 1;
+        if index >= update_len {
+            break;
+        }
+        output.push(states[1].symbol()?);
+        states[1].update(reader)?;
+        index += 1;
+        if index >= update_len {
+            break;
+        }
+        output.push(states[2].symbol()?);
+        states[2].update(reader)?;
+        index += 1;
+        if index >= update_len {
+            break;
+        }
+        output.push(states[3].symbol()?);
+        states[3].update(reader)?;
+        index += 1;
+    }
+    while index < output_len {
+        output.push(states[index & 3].symbol()?);
+        index += 1;
+    }
+    Ok(())
 }
 
 fn decode_huffman_v2_node(
