@@ -162,6 +162,9 @@ unsafe fn write_lz_unchecked(
     let literal_ptr = literals.as_ptr();
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
+    let mut pending_lit_start = 0usize;
+    let mut pending_out_start = output_base;
+    let mut pending_lit_len = 0usize;
     unsafe {
         output.set_len(output_limit);
     }
@@ -172,15 +175,22 @@ unsafe fn write_lz_unchecked(
         let match_offset = usize::from(offsets[sequence]);
         let match_len = read_u16_usize(match_lengths, length_offset);
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                literal_ptr.add(lit_pos),
-                output_ptr.add(out_pos),
-                literal_len,
-            );
-        }
+        pending_lit_len += literal_len;
         lit_pos += literal_len;
         out_pos += literal_len;
+        if match_len == 0 {
+            continue;
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                literal_ptr.add(pending_lit_start),
+                output_ptr.add(pending_out_start),
+                pending_lit_len,
+            );
+        }
+        pending_lit_start = lit_pos;
+        pending_lit_len = 0;
 
         unsafe {
             copy_lz_match(
@@ -190,13 +200,15 @@ unsafe fn write_lz_unchecked(
             );
         }
         out_pos += match_len;
+        pending_out_start = out_pos;
     }
 
+    let remaining_literals = literals.len() - lit_pos;
     unsafe {
         core::ptr::copy_nonoverlapping(
-            literal_ptr.add(lit_pos),
-            output_ptr.add(out_pos),
-            literals.len() - lit_pos,
+            literal_ptr.add(pending_lit_start),
+            output_ptr.add(pending_out_start),
+            pending_lit_len + remaining_literals,
         );
     }
 }
