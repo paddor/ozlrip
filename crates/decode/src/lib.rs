@@ -23,6 +23,7 @@ pub struct Decoder {
 struct CachedFramePlan {
     frame: Vec<u8>,
     plan: parse::FramePlan,
+    direct_append_plans: Option<execute::DirectAppendChunkPlans>,
 }
 
 impl Decoder {
@@ -54,6 +55,18 @@ impl Decoder {
         if let Some(cached) = self.plan_cache.as_ref()
             && cached.frame == input
         {
+            if let Some(direct_append_plans) = cached.direct_append_plans.as_ref() {
+                return execute::decode_plan_with_cached_direct_append_plans(
+                    input,
+                    &cached.plan,
+                    direct_append_plans,
+                    dst,
+                    self.limits,
+                    &mut self.scratch,
+                    #[cfg(feature = "zstd")]
+                    &mut self.zstd,
+                );
+            }
             return execute::decode_plan_with_context(
                 input,
                 &cached.plan,
@@ -90,9 +103,13 @@ impl Decoder {
             return;
         }
         frame.extend_from_slice(input);
+        let direct_append_plans = execute::prepare_direct_append_chunk_plans(plan)
+            .ok()
+            .flatten();
         self.plan_cache = Some(CachedFramePlan {
             frame,
             plan: plan.clone(),
+            direct_append_plans,
         });
     }
 

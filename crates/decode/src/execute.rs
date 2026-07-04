@@ -102,6 +102,48 @@ pub(crate) fn decode_plan_with_context(
     scratch: &mut DecodeScratch,
     #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
 ) -> Result<usize> {
+    decode_plan_with_optional_direct_append_plans(
+        input,
+        plan,
+        None,
+        dst,
+        limits,
+        scratch,
+        #[cfg(feature = "zstd")]
+        zstd,
+    )
+}
+
+pub(crate) fn decode_plan_with_cached_direct_append_plans(
+    input: &[u8],
+    plan: &FramePlan,
+    direct_append_plans: &DirectAppendChunkPlans,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
+    decode_plan_with_optional_direct_append_plans(
+        input,
+        plan,
+        Some(direct_append_plans),
+        dst,
+        limits,
+        scratch,
+        #[cfg(feature = "zstd")]
+        zstd,
+    )
+}
+
+fn decode_plan_with_optional_direct_append_plans(
+    input: &[u8],
+    plan: &FramePlan,
+    direct_append_plans: Option<&DirectAppendChunkPlans>,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
     if plan.info.dictionary_bundle_id.is_some() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("dictionary bundle materialization is not implemented"));
@@ -115,6 +157,18 @@ pub(crate) fn decode_plan_with_context(
         zstd,
     )? {
         return Ok(written);
+    }
+    if let Some(chunk_plans) = direct_append_plans {
+        return decode_plan_appending_to_dst_with_rollback(
+            input,
+            plan,
+            chunk_plans,
+            dst,
+            limits,
+            scratch,
+            #[cfg(feature = "zstd")]
+            zstd,
+        );
     }
     if let Some(written) = try_decode_plan_appending_to_dst(
         input,
@@ -302,18 +356,7 @@ fn try_decode_plan_appending_to_dst(
     let Some(chunk_plans) = direct_append_chunk_plans(plan)? else {
         return Ok(None);
     };
-
-    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
-        let expected = usize::try_from(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
-        })?;
-        dst.try_reserve_exact(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-        })?;
-    }
-
-    let start_len = dst.len();
-    let result = decode_plan_appending_to_dst(
+    decode_plan_appending_to_dst_with_rollback(
         input,
         plan,
         &chunk_plans,
@@ -322,17 +365,16 @@ fn try_decode_plan_appending_to_dst(
         scratch,
         #[cfg(feature = "zstd")]
         zstd,
-    );
-    match result {
-        Ok(written) => Ok(Some(written)),
-        Err(err) => {
-            dst.truncate(start_len);
-            Err(err)
-        }
-    }
+    )
+    .map(Some)
 }
 
-fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<Vec<Option<ChunkExecutionPlan>>>> {
+#[derive(Clone)]
+pub(crate) struct DirectAppendChunkPlans {
+    chunk_plans: Vec<Option<ChunkExecutionPlan>>,
+}
+
+fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<DirectAppendChunkPlans>> {
     let mut chunk_plans = Vec::new();
     chunk_plans
         .try_reserve_exact(plan.chunks.len())
@@ -353,7 +395,45 @@ fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<Vec<Option<Chunk
         }
         chunk_plans.push(Some(chunk_plan));
     }
-    Ok(Some(chunk_plans))
+    Ok(Some(DirectAppendChunkPlans { chunk_plans }))
+}
+
+fn decode_plan_appending_to_dst_with_rollback(
+    input: &[u8],
+    plan: &FramePlan,
+    chunk_plans: &DirectAppendChunkPlans,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+) -> Result<usize> {
+    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
+        let expected = usize::try_from(expected).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
+        })?;
+        dst.try_reserve_exact(expected).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+        })?;
+    }
+
+    let start_len = dst.len();
+    let result = decode_plan_appending_to_dst(
+        input,
+        plan,
+        &chunk_plans.chunk_plans,
+        dst,
+        limits,
+        scratch,
+        #[cfg(feature = "zstd")]
+        zstd,
+    );
+    match result {
+        Ok(written) => Ok(written),
+        Err(err) => {
+            dst.truncate(start_len);
+            Err(err)
+        }
+    }
 }
 
 fn decode_plan_appending_to_dst(
@@ -1029,6 +1109,12 @@ fn is_byte_preserving_conversion(standard_id: u32) -> bool {
     )
 }
 
+pub(crate) fn prepare_direct_append_chunk_plans(
+    plan: &FramePlan,
+) -> Result<Option<DirectAppendChunkPlans>> {
+    direct_append_chunk_plans(plan)
+}
+
 fn single_execution_input<'a>(
     streams: &'a [StreamSlot<'a>],
     input_start: usize,
@@ -1156,11 +1242,13 @@ fn validate_conversion_numeric_width(element_width: usize) -> Result<()> {
     }
 }
 
+#[derive(Clone)]
 struct ChunkExecutionPlan {
     nodes: Vec<NodeExecutionPlan>,
     regen_targets: Vec<bool>,
 }
 
+#[derive(Clone)]
 struct NodeExecutionPlan {
     standard_id: u32,
     input_start: usize,
