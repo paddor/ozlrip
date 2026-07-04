@@ -2304,6 +2304,22 @@ fn decode_dispatch_string_node_to_serial_output(
                     return Ok(());
                 }
                 append_dispatched_string_2byte_csv_pattern(indices.bytes, &mut sources, output)?;
+            } else if sources.len() == 6 {
+                #[cfg(not(feature = "paranoid"))]
+                if append_dispatched_string_2byte_csv_header_pattern_fast(
+                    indices.bytes,
+                    &mut sources,
+                    output,
+                )? {
+                    return Ok(());
+                }
+                for source in indices.bytes.chunks_exact(2) {
+                    append_dispatched_string_to_serial(
+                        usize::from(u16::from_le_bytes([source[0], source[1]])),
+                        &mut sources,
+                        output,
+                    )?;
+                }
             } else {
                 for source in indices.bytes.chunks_exact(2) {
                     append_dispatched_string_to_serial(
@@ -2480,6 +2496,222 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
         output.set_len(out_pos);
     }
     Ok(true)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_dispatched_string_2byte_csv_header_pattern_fast(
+    indices: &[u8],
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<bool> {
+    const HEADER_SOURCE: u16 = 5;
+    const HEADER_FIELDS: usize = 7;
+    const ROW_PATTERN: [u8; 16] = [4, 0, 0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 4, 0, 3, 0];
+    const TRAILING_DELIMITER: [u8; 2] = [4, 0];
+
+    let header_bytes = HEADER_FIELDS
+        .checked_mul(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if indices.len() < header_bytes + TRAILING_DELIMITER.len()
+        || !(indices.len() - header_bytes - TRAILING_DELIMITER.len())
+            .is_multiple_of(ROW_PATTERN.len())
+    {
+        return Ok(false);
+    }
+    if !indices[..header_bytes]
+        .chunks_exact(2)
+        .all(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) == HEADER_SOURCE)
+    {
+        return Ok(false);
+    }
+    let row_bytes_end = indices.len() - TRAILING_DELIMITER.len();
+    if indices[row_bytes_end..] != TRAILING_DELIMITER {
+        return Ok(false);
+    }
+    if indices[header_bytes..row_bytes_end]
+        .chunks_exact(ROW_PATTERN.len())
+        .any(|chunk| chunk != ROW_PATTERN)
+    {
+        return Ok(false);
+    }
+
+    let rows = (row_bytes_end - header_bytes) / ROW_PATTERN.len();
+    for source in &sources[..4] {
+        if source.lengths.len().saturating_sub(source.position) != rows {
+            return Ok(false);
+        }
+        let remaining_len =
+            source.lengths[source.position..]
+                .iter()
+                .try_fold(0usize, |sum, &length| {
+                    sum.checked_add(length as usize)
+                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+                })?;
+        if source.bytes.len().saturating_sub(source.byte_position) != remaining_len {
+            return Ok(false);
+        }
+    }
+
+    let delimiter_count = rows
+        .checked_mul(4)
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if sources[4].lengths.len().saturating_sub(sources[4].position) != delimiter_count
+        || !sources[4].lengths[sources[4].position..]
+            .iter()
+            .all(|&length| length == 1)
+    {
+        return Ok(false);
+    }
+    if sources[4]
+        .bytes
+        .len()
+        .saturating_sub(sources[4].byte_position)
+        != delimiter_count
+    {
+        return Ok(false);
+    }
+
+    if sources[5].lengths.len().saturating_sub(sources[5].position) != HEADER_FIELDS {
+        return Ok(false);
+    }
+    let header_len =
+        sources[5].lengths[sources[5].position..]
+            .iter()
+            .try_fold(0usize, |sum, &length| {
+                sum.checked_add(length as usize)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+            })?;
+    if sources[5]
+        .bytes
+        .len()
+        .saturating_sub(sources[5].byte_position)
+        != header_len
+    {
+        return Ok(false);
+    }
+
+    for _ in 0..HEADER_FIELDS {
+        append_dispatched_string_to_serial(5, sources, output)?;
+    }
+    append_csv_header_pattern_rows_fast(rows, sources, output)?;
+    Ok(true)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_csv_header_pattern_rows_fast(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let mut positions = [
+        sources[0].position,
+        sources[1].position,
+        sources[2].position,
+        sources[3].position,
+        sources[4].position,
+    ];
+    let mut byte_positions = [
+        sources[0].byte_position,
+        sources[1].byte_position,
+        sources[2].byte_position,
+        sources[3].byte_position,
+        sources[4].byte_position,
+    ];
+    let mut out_pos = output.len();
+    let capacity = output.capacity();
+    let final_out_pos = sources[..5].iter().try_fold(out_pos, |sum, source| {
+        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if final_out_pos > capacity {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+    let output_ptr = output.as_mut_ptr();
+
+    for _ in 0..rows {
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_field_prevalidated_unchecked(
+            0,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_field_prevalidated_unchecked(
+            1,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_field_prevalidated_unchecked(
+            2,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        append_csv_pattern_field_prevalidated_unchecked(
+            3,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+    }
+    append_csv_pattern_delimiter_unchecked(
+        sources,
+        &mut positions,
+        &mut byte_positions,
+        output_ptr,
+        &mut out_pos,
+    );
+
+    for index in 0..5 {
+        sources[index].position = positions[index];
+        sources[index].byte_position = byte_positions[index];
+    }
+    debug_assert!(out_pos <= output.capacity());
+    unsafe {
+        // SAFETY: every write above checked `out_pos` against the reserved
+        // capacity, and all bytes below the new length have been initialized.
+        output.set_len(out_pos);
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -3830,6 +4062,18 @@ fn decode_lz_node_to_output_generic(
 }
 
 #[cfg(feature = "paranoid")]
+#[expect(
+    clippy::inline_always,
+    reason = "paranoid LZ fallback keeps the safe copy loop visible to callers"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments are split stream slices from the validated LZ node shape"
+)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "sequence index addresses parallel byte streams with different widths"
+)]
 #[inline(always)]
 fn decode_lz_u8_u16_u16_to_output_safe(
     literals: &[u8],
@@ -7989,6 +8233,81 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, b"preaa,x,12;k\nBB,YZ,q;LMN\n");
+    }
+
+    #[test]
+    fn decodes_dispatch_string_csv_header_pattern_to_serial_output() {
+        let header_pattern = [5u16; 7]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let row_pattern = [4u16, 0, 4, 1, 4, 2, 4, 3]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let trailing_delimiter = 4u16.to_le_bytes();
+        let indices = [
+            header_pattern.as_slice(),
+            row_pattern.as_slice(),
+            row_pattern.as_slice(),
+            trailing_delimiter.as_slice(),
+        ]
+        .concat();
+        let first_lengths = [2, 2];
+        let second_lengths = [1, 2];
+        let third_lengths = [2, 1];
+        let fourth_lengths = [1, 3];
+        let delimiter_lengths = [1; 9];
+        let header_lengths = [1; 7];
+        let mut output = b"pre".to_vec();
+
+        decode_dispatch_string_node_to_serial_output(
+            &[
+                StreamInput {
+                    bytes: &indices,
+                    element_width: 2,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: b"aaBB",
+                    element_width: 1,
+                    string_lengths: Some(&first_lengths),
+                },
+                StreamInput {
+                    bytes: b"xYZ",
+                    element_width: 1,
+                    string_lengths: Some(&second_lengths),
+                },
+                StreamInput {
+                    bytes: b"12q",
+                    element_width: 1,
+                    string_lengths: Some(&third_lengths),
+                },
+                StreamInput {
+                    bytes: b"kLMN",
+                    element_width: 1,
+                    string_lengths: Some(&fourth_lengths),
+                },
+                StreamInput {
+                    bytes: b"\n,,;\n,,;\n",
+                    element_width: 1,
+                    string_lengths: Some(&delimiter_lengths),
+                },
+                StreamInput {
+                    bytes: b"ABCDEFG",
+                    element_width: 1,
+                    string_lengths: Some(&header_lengths),
+                },
+            ],
+            6,
+            &[],
+            21,
+            Limits::default(),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"preABCDEFG\naa,x,12;k\nBB,YZ,q;LMN\n");
     }
 
     #[test]

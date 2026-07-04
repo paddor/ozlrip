@@ -333,6 +333,10 @@ fn unpack_lsb_bits_u128_safe(
 }
 
 #[cfg(feature = "paranoid")]
+#[expect(
+    clippy::inline_always,
+    reason = "paranoid bitpack fallback writes one tiny scalar per decoded value"
+)]
 #[inline(always)]
 fn write_value_safe(out: &mut [u8], value: u64, element_width: usize) {
     let bytes = value.to_le_bytes();
