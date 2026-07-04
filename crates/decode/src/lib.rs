@@ -51,13 +51,22 @@ impl Decoder {
                 &mut self.zstd,
             );
         }
-        let plan = if let Some(plan) = self.cached_frame_plan(input) {
-            plan
-        } else {
-            let plan = parse::parse_frame_plan(input, self.limits)?;
-            self.remember_frame_plan(input, &plan);
-            plan
-        };
+        if let Some(cached) = self.plan_cache.as_ref()
+            && cached.frame == input
+        {
+            return execute::decode_plan_with_context(
+                input,
+                &cached.plan,
+                dst,
+                self.limits,
+                &mut self.scratch,
+                #[cfg(feature = "zstd")]
+                &mut self.zstd,
+            );
+        }
+
+        let plan = parse::parse_frame_plan(input, self.limits)?;
+        self.remember_frame_plan(input, &plan);
         execute::decode_plan_with_context(
             input,
             &plan,
@@ -67,15 +76,6 @@ impl Decoder {
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         )
-    }
-
-    fn cached_frame_plan(&self, input: &[u8]) -> Option<parse::FramePlan> {
-        let cached = self.plan_cache.as_ref()?;
-        if cached.frame == input {
-            Some(cached.plan.clone())
-        } else {
-            None
-        }
     }
 
     fn remember_frame_plan(&mut self, input: &[u8], plan: &parse::FramePlan) {
