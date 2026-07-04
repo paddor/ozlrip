@@ -4820,7 +4820,12 @@ fn decode_partition_u32_node(
             );
         }
         let base = base_table[bucket];
-        let offset = reader.read_u64(usize::from(bit_width))?;
+        let bit_width = usize::from(bit_width);
+        let offset = if bit_width <= 32 {
+            u64::from(reader.read_u32_window(bit_width)?)
+        } else {
+            reader.read_u64(bit_width)?
+        };
         let value = base
             .checked_add(offset)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -5113,6 +5118,43 @@ impl<'a> ForwardBitReader<'a> {
             u64::try_from(value & mask).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
         self.bit_pos = end;
         Ok(value)
+    }
+
+    #[cfg(not(feature = "paranoid"))]
+    fn read_u32_window(&mut self, bits: usize) -> Result<u32> {
+        debug_assert!(bits <= 32);
+        let end = self
+            .bit_pos
+            .checked_add(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let total_bits = self
+            .bytes
+            .len()
+            .checked_mul(8)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if end > total_bits {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
+            );
+        }
+        let byte_pos = self.bit_pos / 8;
+        let bit_offset = self.bit_pos % 8;
+        let needed_bits = bit_offset
+            .checked_add(bits)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let needed_bytes = needed_bits.div_ceil(8);
+        let mut value = fast_bitreader::read_window_u32(self.bytes, byte_pos, needed_bytes)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
+            })?;
+        value >>= bit_offset;
+        let mask = if bits == 32 {
+            u32::MAX
+        } else {
+            (1u32 << bits) - 1
+        };
+        self.bit_pos = end;
+        Ok(value & mask)
     }
 
     fn finish_zero_padding(&self) -> Result<()> {
