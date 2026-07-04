@@ -3446,26 +3446,19 @@ fn decode_lz_u32_u16_u16_to_output(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
-    for sequence in 0..sequence_count {
-        let length_offset = sequence * 2;
-        let offset_offset = sequence * 4;
-        let literal_len = usize::from(u16::from_le_bytes([
-            literal_lengths[length_offset],
-            literal_lengths[length_offset + 1],
-        ]));
+    for ((offset, literal_len), match_len) in offsets
+        .chunks_exact(4)
+        .zip(literal_lengths.chunks_exact(2))
+        .zip(match_lengths.chunks_exact(2))
+    {
+        let literal_len = usize::from(u16::from_le_bytes([literal_len[0], literal_len[1]]));
         let match_offset = usize::try_from(u32::from_le_bytes([
-            offsets[offset_offset],
-            offsets[offset_offset + 1],
-            offsets[offset_offset + 2],
-            offsets[offset_offset + 3],
+            offset[0], offset[1], offset[2], offset[3],
         ]))
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
         })?;
-        let match_len = usize::from(u16::from_le_bytes([
-            match_lengths[length_offset],
-            match_lengths[length_offset + 1],
-        ]));
+        let match_len = usize::from(u16::from_le_bytes([match_len[0], match_len[1]]));
 
         let literal_end = lit_pos
             .checked_add(literal_len)
