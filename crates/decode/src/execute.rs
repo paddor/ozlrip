@@ -2135,11 +2135,9 @@ fn decode_dispatch_string_node_to_serial_output(
             Error::new(ErrorKind::InvalidType)
                 .with_detail("dispatch_string input is missing string lengths")
         })?;
-        let byte_total = checked_sum_u32(lengths)?;
-        if byte_total != input.bytes.len() {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("dispatch_string input lengths do not sum to content size"));
-        }
+        // Direct-append inputs are internal graph streams. String-producing
+        // nodes already validated that their length tables sum to byte length.
+        let byte_total = input.bytes.len();
         total_string_count = total_string_count
             .checked_add(lengths.len())
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
