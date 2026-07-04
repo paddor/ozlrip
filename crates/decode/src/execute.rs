@@ -4314,8 +4314,6 @@ fn decode_field_lz_node_to_output(
             })?;
     }
 
-    let token_count = numeric_element_count(tokens.bytes, 2)?;
-
     let min_match = match element_width {
         1 => 4usize,
         2 => 2usize,
@@ -4323,27 +4321,27 @@ fn decode_field_lz_node_to_output(
     };
     let mut reps = [element_width, element_width * 2, element_width * 4];
     let mut literal_pos = 0usize;
-    let mut offset_pos = 0usize;
-    let mut extra_literal_pos = 0usize;
-    let mut extra_match_pos = 0usize;
-    let offset_count = numeric_element_count(offsets.bytes, 4)?;
-    let extra_literal_count = numeric_element_count(extra_literal_lengths.bytes, 4)?;
-    let extra_match_count = numeric_element_count(extra_match_lengths.bytes, 4)?;
+    let mut offset_values = offsets.bytes.chunks_exact(4);
+    let mut extra_literal_values = extra_literal_lengths.bytes.chunks_exact(4);
+    let mut extra_match_values = extra_match_lengths.bytes.chunks_exact(4);
 
-    for token_index in 0..token_count {
-        let token = read_u16_element(tokens.bytes, token_index)?;
+    for token_bytes in tokens.bytes.chunks_exact(2) {
+        let token = u16::from_le_bytes([token_bytes[0], token_bytes[1]]);
         let offset_code = usize::from(token & 0x3);
         let literal_code = usize::from((token >> 2) & 0x0f);
         let match_code = usize::from((token >> 6) & 0x0f);
 
         let match_offset = match offset_code {
             3 => {
-                let raw_offset = usize::try_from(read_u32_element(offsets.bytes, offset_pos)?)
-                    .map_err(|_| {
-                        Error::new(ErrorKind::LimitExceeded)
-                            .with_detail("numeric value is too large")
-                    })?;
-                offset_pos = checked_next_numeric_pos(offset_pos, offset_count)?;
+                let offset_bytes = offset_values.next().ok_or_else(|| {
+                    Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+                })?;
+                let raw_offset = u32::from_le_bytes([
+                    offset_bytes[0],
+                    offset_bytes[1],
+                    offset_bytes[2],
+                    offset_bytes[3],
+                ]) as usize;
                 let byte_offset = raw_offset
                     .checked_mul(element_width)
                     .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -4370,19 +4368,18 @@ fn decode_field_lz_node_to_output(
 
         let mut literal_elements = literal_code;
         if literal_code == 15 {
+            let extra_bytes = extra_literal_values.next().ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+            })?;
+            let extra = u32::from_le_bytes([
+                extra_bytes[0],
+                extra_bytes[1],
+                extra_bytes[2],
+                extra_bytes[3],
+            ]) as usize;
             literal_elements = literal_elements
-                .checked_add(
-                    usize::try_from(read_u32_element(
-                        extra_literal_lengths.bytes,
-                        extra_literal_pos,
-                    )?)
-                    .map_err(|_| {
-                        Error::new(ErrorKind::LimitExceeded)
-                            .with_detail("numeric value is too large")
-                    })?,
-                )
+                .checked_add(extra)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            extra_literal_pos = checked_next_numeric_pos(extra_literal_pos, extra_literal_count)?;
         }
         let literal_len = literal_elements
             .checked_mul(element_width)
@@ -4392,19 +4389,18 @@ fn decode_field_lz_node_to_output(
             .checked_add(min_match)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         if match_code == 15 {
+            let extra_bytes = extra_match_values.next().ok_or_else(|| {
+                Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+            })?;
+            let extra = u32::from_le_bytes([
+                extra_bytes[0],
+                extra_bytes[1],
+                extra_bytes[2],
+                extra_bytes[3],
+            ]) as usize;
             match_elements = match_elements
-                .checked_add(
-                    usize::try_from(read_u32_element(
-                        extra_match_lengths.bytes,
-                        extra_match_pos,
-                    )?)
-                    .map_err(|_| {
-                        Error::new(ErrorKind::LimitExceeded)
-                            .with_detail("numeric value is too large")
-                    })?,
-                )
+                .checked_add(extra)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            extra_match_pos = checked_next_numeric_pos(extra_match_pos, extra_match_count)?;
         }
         let match_len = match_elements
             .checked_mul(element_width)
@@ -4427,9 +4423,7 @@ fn decode_field_lz_node_to_output(
     }
     output.extend_from_slice(remaining_literals);
 
-    if offset_pos != offset_count
-        || extra_literal_pos != extra_literal_count
-        || extra_match_pos != extra_match_count
+    if offset_values.len() != 0 || extra_literal_values.len() != 0 || extra_match_values.len() != 0
     {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("field_lz numeric stream was not fully consumed"));
@@ -5689,15 +5683,6 @@ impl<'a> ForwardBitReader<'a> {
         }
         Ok(())
     }
-}
-
-fn checked_next_numeric_pos(position: usize, count: usize) -> Result<usize> {
-    if position >= count {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted"));
-    }
-    position
-        .checked_add(1)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
 fn append_field_lz_literals(
