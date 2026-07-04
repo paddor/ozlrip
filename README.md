@@ -16,6 +16,36 @@ let info = ozlrip::inspect(frame)?;
 For reusable allocation state, create `ozlrip::Decoder` and call
 `Decoder::decode_into`.
 
+## Current Scope
+
+- [x] Defensive frame parsing, inspection, limits, and typed errors
+- [x] Whole-graph validation before execution
+- [x] Stored streams, checksums, zstd via `zrip`, lz4 via `lz4rip`
+- [x] Core graph transforms: concat, splitN, split-by-struct, transpose split,
+  bit split, mux lengths, dispatch string, dispatchN-byTag
+- [x] Numeric/table transforms: endian conversion, delta, zigzag, bitpack,
+  bitunpack, range-pack, flatpack, sparse num, partition, quantize
+- [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
+- [x] `paranoid` safe-code baseline
+- [ ] Dictionary bundle materialization
+- [ ] External/custom codecs
+- [ ] Custom transform execution
+- [ ] Broad release-tag interop matrix
+- [ ] Committed fixture coverage for every standard node variant
+- [ ] Some unobserved transform header variants
+
+## Performance
+
+- Baseline: in-process `openzl-c-ffi`, not the `zli` CLI.
+- Default features: about `1.26x` mean, `1.14x` median OpenZL C on the current
+  generated corpus.
+- Default representative range: about `1.0x-1.3x` on CSV/numeric/table cases;
+  stored/serial outliers can be higher.
+- `paranoid`: about `0.75x-1.0x` OpenZL C on focused guards.
+- `paranoid` representative range: CSV/numeric samples around `0.78x-0.82x`,
+  SAO-style bitpack around `0.9x`, LZ-heavy serial near parity.
+- Noisy/shape-sensitive rows: PUMS CSV, ERA5-shaped data, large RLE output.
+
 ## Benchmarking
 
 Decode benchmarks report decoded MB/s and append JSONL results under
