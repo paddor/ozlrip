@@ -65,32 +65,21 @@ fn append_6_8_8_2_2_4_4_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 8;
     let start_len = output.len();
     output.resize(start_len + element_count * 28, 0);
-    let output = &mut output[start_len..];
-    for (element, out) in output.chunks_exact_mut(28).enumerate() {
-        copy_8(
-            &mut out[0..8],
-            &inputs[0].bytes[element * 8..element * 8 + 8],
-        );
-        copy_8(
-            &mut out[8..16],
-            &inputs[1].bytes[element * 8..element * 8 + 8],
-        );
-        copy_2(
-            &mut out[16..18],
-            &inputs[2].bytes[element * 2..element * 2 + 2],
-        );
-        copy_2(
-            &mut out[18..20],
-            &inputs[3].bytes[element * 2..element * 2 + 2],
-        );
-        copy_4(
-            &mut out[20..24],
-            &inputs[4].bytes[element * 4..element * 4 + 4],
-        );
-        copy_4(
-            &mut out[24..28],
-            &inputs[5].bytes[element * 4..element * 4 + 4],
-        );
+    for ((((((out, src0), src1), src2), src3), src4), src5) in output[start_len..]
+        .chunks_exact_mut(28)
+        .zip(inputs[0].bytes.chunks_exact(8))
+        .zip(inputs[1].bytes.chunks_exact(8))
+        .zip(inputs[2].bytes.chunks_exact(2))
+        .zip(inputs[3].bytes.chunks_exact(2))
+        .zip(inputs[4].bytes.chunks_exact(4))
+        .zip(inputs[5].bytes.chunks_exact(4))
+    {
+        copy_8(&mut out[0..8], src0);
+        copy_8(&mut out[8..16], src1);
+        copy_2(&mut out[16..18], src2);
+        copy_2(&mut out[18..20], src3);
+        copy_4(&mut out[20..24], src4);
+        copy_4(&mut out[24..28], src5);
     }
 }
 
@@ -98,32 +87,21 @@ fn append_6_4_4_2_2_8_8_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 4;
     let start_len = output.len();
     output.resize(start_len + element_count * 28, 0);
-    let output = &mut output[start_len..];
-    for (element, out) in output.chunks_exact_mut(28).enumerate() {
-        copy_4(
-            &mut out[0..4],
-            &inputs[0].bytes[element * 4..element * 4 + 4],
-        );
-        copy_4(
-            &mut out[4..8],
-            &inputs[1].bytes[element * 4..element * 4 + 4],
-        );
-        copy_2(
-            &mut out[8..10],
-            &inputs[2].bytes[element * 2..element * 2 + 2],
-        );
-        copy_2(
-            &mut out[10..12],
-            &inputs[3].bytes[element * 2..element * 2 + 2],
-        );
-        copy_8(
-            &mut out[12..20],
-            &inputs[4].bytes[element * 8..element * 8 + 8],
-        );
-        copy_8(
-            &mut out[20..28],
-            &inputs[5].bytes[element * 8..element * 8 + 8],
-        );
+    for ((((((out, src0), src1), src2), src3), src4), src5) in output[start_len..]
+        .chunks_exact_mut(28)
+        .zip(inputs[0].bytes.chunks_exact(4))
+        .zip(inputs[1].bytes.chunks_exact(4))
+        .zip(inputs[2].bytes.chunks_exact(2))
+        .zip(inputs[3].bytes.chunks_exact(2))
+        .zip(inputs[4].bytes.chunks_exact(8))
+        .zip(inputs[5].bytes.chunks_exact(8))
+    {
+        copy_4(&mut out[0..4], src0);
+        copy_4(&mut out[4..8], src1);
+        copy_2(&mut out[8..10], src2);
+        copy_2(&mut out[10..12], src3);
+        copy_8(&mut out[12..20], src4);
+        copy_8(&mut out[20..28], src5);
     }
 }
 
