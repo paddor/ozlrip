@@ -4721,6 +4721,7 @@ struct PartitionParams {
     sizes: Vec<u64>,
 }
 
+#[inline(never)]
 fn decode_partition_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
@@ -4749,6 +4750,11 @@ fn decode_partition_node(
 
     let bases = partition_bases(&params)?;
     let bits = partition_bits(&params)?;
+    #[cfg(not(feature = "paranoid"))]
+    if element_width == 4 {
+        return decode_partition_u32_node(buckets.bytes, offsets.bytes, &bases, &bits, output_len);
+    }
+
     let max_value = max_numeric_value(element_width)?;
     let mut reader = ForwardBitReader::new(offsets.bytes);
     let mut output = Vec::new();
@@ -4781,6 +4787,68 @@ fn decode_partition_node(
         string_lengths: None,
         recyclable: false,
     })
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn decode_partition_u32_node(
+    buckets: &[u8],
+    offset_bits: &[u8],
+    bases: &[u64],
+    bits: &[u8],
+    output_len: usize,
+) -> Result<OwnedStream> {
+    let mut reader = ForwardBitReader::new(offset_bits);
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+    })?;
+
+    let mut out_pos = 0usize;
+    for &bucket in buckets {
+        let bucket = usize::from(bucket);
+        let base = *bases.get(bucket).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+        })?;
+        let bit_width = *bits.get(bucket).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
+        })?;
+        let offset = reader.read_u64(usize::from(bit_width))?;
+        let value = base
+            .checked_add(offset)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let value = u32::try_from(value).map_err(|_| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail("partition value exceeds output element width")
+        })?;
+        debug_assert!(out_pos + 4 <= output.capacity());
+        unsafe {
+            write_u32_le_spare(&mut output, out_pos, value);
+        }
+        out_pos += 4;
+    }
+
+    debug_assert_eq!(out_pos, output_len);
+    unsafe {
+        output.set_len(output_len);
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 4,
+        string_lengths: None,
+        recyclable: false,
+    })
+}
+
+#[cfg(not(feature = "paranoid"))]
+unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
+    debug_assert!(offset + 4 <= output.capacity());
+    debug_assert!(output.len() <= offset);
+    unsafe {
+        core::ptr::write_unaligned(
+            output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),
+            value.to_le_bytes(),
+        );
+    }
 }
 
 fn parse_partition_header(header: &[u8]) -> Result<(PartitionParams, usize)> {
@@ -7665,6 +7733,36 @@ mod tests {
             [1u16, 2, 7]
                 .into_iter()
                 .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn decodes_partition_u32_node() {
+        let output = decode_partition_node(
+            &[
+                StreamInput {
+                    bytes: &[0, 1],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+                StreamInput {
+                    bytes: &[0x15],
+                    element_width: 1,
+                    string_lengths: None,
+                },
+            ],
+            &[0x0a, 4, 8],
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(output.element_width, 4);
+        assert_eq!(
+            output.bytes,
+            [1u32, 9]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
                 .collect::<Vec<_>>()
         );
     }
