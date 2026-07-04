@@ -7959,6 +7959,89 @@ mod tests {
     }
 
     #[test]
+    fn decodes_dispatch_string_pums_style_wide_header_pattern_to_serial_output() {
+        const DATA_SOURCES: usize = 78;
+        let delimiter_source = DATA_SOURCES as u16;
+        let header_source = DATA_SOURCES as u16 + 1;
+        let header_fields = DATA_SOURCES * 2 - 1;
+
+        let mut indices = Vec::new();
+        for _ in 0..header_fields {
+            indices.extend_from_slice(&header_source.to_le_bytes());
+        }
+        for source in 0..DATA_SOURCES as u16 {
+            indices.extend_from_slice(&delimiter_source.to_le_bytes());
+            indices.extend_from_slice(&source.to_le_bytes());
+        }
+        indices.extend_from_slice(&delimiter_source.to_le_bytes());
+
+        let field_lengths = vec![[2u32]; DATA_SOURCES];
+        let field_bytes = (0..DATA_SOURCES)
+            .map(|source| format!("{source:02}").into_bytes())
+            .collect::<Vec<_>>();
+        let delimiter_lengths = vec![1u32; DATA_SOURCES + 1];
+        let delimiter_bytes = {
+            let mut bytes = Vec::with_capacity(DATA_SOURCES + 1);
+            bytes.push(b'\n');
+            bytes.extend(core::iter::repeat_n(b',', DATA_SOURCES - 1));
+            bytes.push(b'\n');
+            bytes
+        };
+        let header_lengths = vec![1u32; header_fields];
+        let header_bytes = (0..header_fields)
+            .map(|field| b'A' + (field % 26) as u8)
+            .collect::<Vec<_>>();
+
+        let mut inputs = Vec::with_capacity(DATA_SOURCES + 3);
+        inputs.push(StreamInput {
+            bytes: &indices,
+            element_width: 2,
+            string_lengths: None,
+        });
+        for source in 0..DATA_SOURCES {
+            inputs.push(StreamInput {
+                bytes: &field_bytes[source],
+                element_width: 1,
+                string_lengths: Some(&field_lengths[source]),
+            });
+        }
+        inputs.push(StreamInput {
+            bytes: &delimiter_bytes,
+            element_width: 1,
+            string_lengths: Some(&delimiter_lengths),
+        });
+        inputs.push(StreamInput {
+            bytes: &header_bytes,
+            element_width: 1,
+            string_lengths: Some(&header_lengths),
+        });
+
+        let mut expected = b"pre".to_vec();
+        expected.extend_from_slice(&header_bytes);
+        expected.push(b'\n');
+        for (source, field) in field_bytes.iter().enumerate() {
+            if source > 0 {
+                expected.push(b',');
+            }
+            expected.extend_from_slice(field);
+        }
+        expected.push(b'\n');
+
+        let mut output = b"pre".to_vec();
+        decode_dispatch_string_node_to_serial_output(
+            &inputs,
+            (DATA_SOURCES + 2) as u32,
+            &[],
+            21,
+            Limits::default(),
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn rejects_dispatch_string_invalid_source_index() {
         let indices = 2u16.to_le_bytes();
         let lengths = [1];
