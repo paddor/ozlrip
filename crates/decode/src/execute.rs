@@ -3238,6 +3238,29 @@ fn decode_lz_node_to_output_validated(
         );
     }
 
+    decode_lz_node_to_output_generic(
+        literals,
+        offsets,
+        literal_lengths,
+        match_lengths,
+        sequence_count,
+        output_limit,
+        output,
+        output_base,
+    )
+}
+
+#[inline(never)]
+fn decode_lz_node_to_output_generic(
+    literals: &StreamInput<'_>,
+    offsets: &StreamInput<'_>,
+    literal_lengths: &StreamInput<'_>,
+    match_lengths: &StreamInput<'_>,
+    sequence_count: usize,
+    output_limit: usize,
+    output: &mut Vec<u8>,
+    output_base: usize,
+) -> Result<()> {
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
     for sequence in 0..sequence_count {
