@@ -1,4 +1,9 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::ptr_as_ptr,
+    reason = "non-paranoid bitpack fast paths validate bit widths before unchecked writes"
+)]
 
 use alloc::vec::Vec;
 

@@ -51,13 +51,12 @@ impl Decoder {
                 &mut self.zstd,
             );
         }
-        let plan = match self.cached_frame_plan(input) {
-            Some(plan) => plan,
-            None => {
-                let plan = parse::parse_frame_plan(input, self.limits)?;
-                self.remember_frame_plan(input, &plan);
-                plan
-            }
+        let plan = if let Some(plan) = self.cached_frame_plan(input) {
+            plan
+        } else {
+            let plan = parse::parse_frame_plan(input, self.limits)?;
+            self.remember_frame_plan(input, &plan);
+            plan
         };
         execute::decode_plan_with_context(
             input,

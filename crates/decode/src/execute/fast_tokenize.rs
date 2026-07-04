@@ -1,4 +1,9 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![allow(
+    clippy::inline_always,
+    clippy::ptr_as_ptr,
+    reason = "tokenize fast paths use validated unaligned typed element copies"
+)]
 
 use alloc::vec::Vec;
 

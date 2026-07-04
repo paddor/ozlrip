@@ -1,4 +1,8 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![allow(
+    clippy::ptr_as_ptr,
+    reason = "non-paranoid delta fast paths use unaligned numeric pointer accesses"
+)]
 
 use alloc::vec::Vec;
 

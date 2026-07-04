@@ -3228,6 +3228,10 @@ fn decode_mux_lengths_node(
     ])
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "validated mux length streams fit the u16 output width"
+)]
 fn decode_mux_lengths_u16(
     muxed_lengths: &[u8],
     long_lengths: &[u8],
@@ -3321,6 +3325,7 @@ fn read_numeric_element(bytes: &[u8], element_width: usize, index: usize) -> Res
 }
 
 #[expect(
+    clippy::cast_possible_truncation,
     clippy::inline_always,
     reason = "profiled numeric decode paths pay measurable call overhead"
 )]
@@ -3442,6 +3447,10 @@ fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> 
     Ok(output)
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled LZ decode paths pay measurable validation call overhead"
+)]
 #[inline(always)]
 fn validate_lz_node(
     inputs: &[StreamInput<'_>],
@@ -3498,6 +3507,10 @@ fn decode_lz_node_to_output(
     decode_lz_node_to_output_validated(inputs, sequence_count, output_len, output, output_base)
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled LZ decode paths pay measurable dispatch call overhead"
+)]
 #[inline(always)]
 fn decode_lz_node_to_output_validated(
     inputs: &[StreamInput<'_>],
@@ -3577,6 +3590,10 @@ fn decode_lz_node_to_output_validated(
 }
 
 #[inline(never)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "LZ fallback keeps validated stream arguments split to avoid packing overhead"
+)]
 fn decode_lz_node_to_output_generic(
     literals: &StreamInput<'_>,
     offsets: &StreamInput<'_>,
@@ -3737,6 +3754,11 @@ fn decode_lz_u8_u16_u16_to_output_safe(
     Ok(())
 }
 
+#[expect(
+    clippy::inline_always,
+    clippy::too_many_arguments,
+    reason = "profiled LZ specialization keeps stream arguments split and inlined"
+)]
 #[inline(always)]
 fn decode_lz_u32_u16_u16_to_output(
     literals: &[u8],
@@ -5434,6 +5456,7 @@ fn read_var_u64_from_slice(bytes: &mut &[u8]) -> Result<u64> {
 }
 
 #[expect(
+    clippy::cast_possible_truncation,
     clippy::inline_always,
     reason = "profiled numeric decode paths pay measurable call overhead"
 )]

@@ -1,4 +1,10 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![allow(
+    clippy::inline_always,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    reason = "profiled LZ fast paths keep validated stream arguments split and indexed"
+)]
 
 #[cfg(not(feature = "paranoid"))]
 use alloc::vec::Vec;

@@ -1,4 +1,8 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![allow(
+    clippy::cast_ptr_alignment,
+    reason = "fast bit readers use read_unaligned on byte-derived pointers"
+)]
 
 pub(super) fn read_window(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u128> {
     #[cfg(not(feature = "paranoid"))]
