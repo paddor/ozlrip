@@ -2265,6 +2265,14 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     {
         return Ok(false);
     }
+    if sources[4]
+        .bytes
+        .len()
+        .saturating_sub(sources[4].byte_position)
+        != delimiter_count
+    {
+        return Ok(false);
+    }
 
     let mut positions = [
         sources[0].position,
@@ -2304,7 +2312,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
             output_ptr,
             &mut out_pos,
             capacity,
-        )?;
+        );
         append_csv_pattern_field_unchecked(
             1,
             sources,
@@ -2321,7 +2329,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
             output_ptr,
             &mut out_pos,
             capacity,
-        )?;
+        );
         append_csv_pattern_field_unchecked(
             2,
             sources,
@@ -2338,7 +2346,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
             output_ptr,
             &mut out_pos,
             capacity,
-        )?;
+        );
         append_csv_pattern_field_unchecked(
             3,
             sources,
@@ -2355,7 +2363,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
             output_ptr,
             &mut out_pos,
             capacity,
-        )?;
+        );
     }
 
     for index in 0..5 {
@@ -2427,27 +2435,21 @@ fn append_csv_pattern_delimiter_unchecked(
     output_ptr: *mut u8,
     out_pos: &mut usize,
     capacity: usize,
-) -> Result<()> {
+) {
     let source = &sources[4];
     let src_pos = byte_positions[4];
-    let &byte = source.bytes.get(src_pos).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
-    })?;
-    if *out_pos == capacity {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    debug_assert!(src_pos < source.bytes.len());
     debug_assert!(*out_pos < capacity);
     unsafe {
-        // SAFETY: source access used `get`, and destination has at least one
-        // spare byte. The caller publishes the new length after all writes.
+        // SAFETY: the caller prevalidated that the delimiter source has
+        // exactly one byte per remaining delimiter and reserved full output
+        // capacity before entering the fast path.
+        let byte = *source.bytes.as_ptr().add(src_pos);
         *output_ptr.add(*out_pos) = byte;
     }
     positions[4] += 1;
     byte_positions[4] = src_pos + 1;
     *out_pos += 1;
-    Ok(())
 }
 
 fn append_dispatched_string_2byte_csv_pattern(
