@@ -5830,6 +5830,11 @@ impl<'a> ForwardBitReader<'a> {
     }
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled field-LZ token loop pays measurable append call overhead"
+)]
+#[inline(always)]
 fn append_field_lz_literals(
     output: &mut Vec<u8>,
     literals: &[u8],
@@ -5847,6 +5852,11 @@ fn append_field_lz_literals(
     Ok(())
 }
 
+#[expect(
+    clippy::inline_always,
+    reason = "profiled field-LZ token loop pays measurable match append call overhead"
+)]
+#[inline(always)]
 fn append_field_lz_match(
     output: &mut Vec<u8>,
     output_base: usize,
