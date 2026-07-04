@@ -19,6 +19,7 @@ mod fast_bitpack;
 mod fast_bitreader;
 mod fast_delta;
 mod fast_dispatch;
+mod fast_lengths;
 mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
@@ -1874,12 +1875,7 @@ fn decode_string_component_lengths(
     let mut total = 0usize;
     match field_sizes.element_width {
         1 => {
-            for &size in field_sizes.bytes {
-                total = total
-                    .checked_add(usize::from(size))
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                string_lengths.push(u32::from(size));
-            }
+            fast_lengths::decode_u8_lengths(field_sizes.bytes, &mut string_lengths, &mut total)?;
         }
         2 => {
             for size in field_sizes.bytes.chunks_exact(2) {
