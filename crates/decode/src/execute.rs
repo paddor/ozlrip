@@ -17,13 +17,16 @@ use crate::{parse::FramePlan, standard};
 
 mod fast_bitpack;
 mod fast_bitreader;
+mod fast_csv;
 mod fast_delta;
 mod fast_dispatch;
 mod fast_lengths;
 mod fast_lz;
+mod fast_partition;
 mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
+mod fast_zigzag;
 mod parse_int;
 
 #[cfg(test)]
@@ -2439,7 +2442,7 @@ fn append_dispatched_string_2byte_csv_wide_header_pattern_fast(
         return Ok(false);
     }
 
-    append_csv_wide_header_pattern_unchecked(
+    fast_csv::append_wide_header_pattern(
         rows,
         data_sources,
         delimiter_source,
@@ -2482,163 +2485,6 @@ fn csv_wide_header_row_indices_match(
         }
     }
     true
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_wide_header_pattern_unchecked(
-    rows: usize,
-    data_sources: usize,
-    delimiter_source: usize,
-    header_source: usize,
-    sources: &mut [DispatchStringSource<'_>],
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let mut positions = sources
-        .iter()
-        .map(|source| source.position)
-        .collect::<Vec<_>>();
-    let mut byte_positions = sources
-        .iter()
-        .map(|source| source.byte_position)
-        .collect::<Vec<_>>();
-    let mut out_pos = output.len();
-    let final_out_pos = sources.iter().try_fold(out_pos, |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
-    let output_ptr = output.as_mut_ptr();
-
-    append_csv_wide_remaining_source_bytes_unchecked(
-        &sources[header_source],
-        &mut positions,
-        &mut byte_positions,
-        header_source,
-        output_ptr,
-        &mut out_pos,
-    );
-    for _ in 0..rows {
-        for source_index in 0..data_sources {
-            append_csv_wide_delimiter_unchecked(
-                &sources[delimiter_source],
-                &mut positions,
-                &mut byte_positions,
-                delimiter_source,
-                output_ptr,
-                &mut out_pos,
-            );
-            append_csv_wide_source_bytes_unchecked(
-                &sources[source_index],
-                &mut positions,
-                &mut byte_positions,
-                source_index,
-                output_ptr,
-                &mut out_pos,
-            );
-        }
-    }
-    append_csv_wide_delimiter_unchecked(
-        &sources[delimiter_source],
-        &mut positions,
-        &mut byte_positions,
-        delimiter_source,
-        output_ptr,
-        &mut out_pos,
-    );
-
-    for (source, (position, byte_position)) in sources
-        .iter_mut()
-        .zip(positions.into_iter().zip(byte_positions.into_iter()))
-    {
-        source.position = position;
-        source.byte_position = byte_position;
-    }
-    debug_assert!(out_pos <= output.capacity());
-    unsafe {
-        // SAFETY: validation checked every source range and total output
-        // capacity. The append helpers initialized all bytes below `out_pos`.
-        output.set_len(out_pos);
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_wide_remaining_source_bytes_unchecked(
-    source: &DispatchStringSource<'_>,
-    positions: &mut [usize],
-    byte_positions: &mut [usize],
-    source_index: usize,
-    output_ptr: *mut u8,
-    out_pos: &mut usize,
-) {
-    let src_start = byte_positions[source_index];
-    let length = source.bytes.len() - src_start;
-    let dst_end = *out_pos + length;
-    unsafe {
-        // SAFETY: caller prevalidated that all remaining source bytes belong
-        // to this dispatch span and that output spare capacity is sufficient.
-        core::ptr::copy_nonoverlapping(
-            source.bytes.as_ptr().add(src_start),
-            output_ptr.add(*out_pos),
-            length,
-        );
-    }
-    positions[source_index] = source.lengths.len();
-    byte_positions[source_index] = source.bytes.len();
-    *out_pos = dst_end;
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_wide_source_bytes_unchecked(
-    source: &DispatchStringSource<'_>,
-    positions: &mut [usize],
-    byte_positions: &mut [usize],
-    source_index: usize,
-    output_ptr: *mut u8,
-    out_pos: &mut usize,
-) {
-    let length = source.lengths[positions[source_index]] as usize;
-    let src_start = byte_positions[source_index];
-    let src_end = src_start + length;
-    let dst_end = *out_pos + length;
-    debug_assert!(src_end <= source.bytes.len());
-    unsafe {
-        // SAFETY: caller prevalidated source length tables, source byte
-        // ranges, and output spare capacity for the whole dispatch node.
-        copy_short_csv_field_unchecked(
-            source.bytes.as_ptr().add(src_start),
-            output_ptr.add(*out_pos),
-            length,
-        );
-    }
-    positions[source_index] += 1;
-    byte_positions[source_index] = src_end;
-    *out_pos = dst_end;
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_wide_delimiter_unchecked(
-    source: &DispatchStringSource<'_>,
-    positions: &mut [usize],
-    byte_positions: &mut [usize],
-    source_index: usize,
-    output_ptr: *mut u8,
-    out_pos: &mut usize,
-) {
-    let src_pos = byte_positions[source_index];
-    debug_assert!(src_pos < source.bytes.len());
-    unsafe {
-        // SAFETY: caller prevalidated that every remaining delimiter string is
-        // exactly one byte and that the output has enough spare capacity.
-        *output_ptr.add(*out_pos) = *source.bytes.as_ptr().add(src_pos);
-    }
-    positions[source_index] += 1;
-    byte_positions[source_index] = src_pos + 1;
-    *out_pos += 1;
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -2688,33 +2534,6 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
         return Ok(false);
     }
 
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
-    let mut out_pos = output.len();
-    let capacity = output.capacity();
-    let final_out_pos = sources.iter().try_fold(out_pos, |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > capacity {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
-    let output_ptr = output.as_mut_ptr();
-
     if indices
         .chunks_exact(CSV_PATTERN.len())
         .any(|chunk| chunk != CSV_PATTERN)
@@ -2722,79 +2541,7 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
         return Ok(false);
     }
 
-    for _ in 0..rows {
-        append_csv_pattern_field_prevalidated_unchecked(
-            0,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            1,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            2,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            3,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-    }
-
-    for index in 0..5 {
-        sources[index].position = positions[index];
-        sources[index].byte_position = byte_positions[index];
-    }
-    debug_assert!(out_pos <= output.capacity());
-    unsafe {
-        // SAFETY: every write above checked `out_pos` against the reserved
-        // capacity, and all bytes below the new length have been initialized.
-        output.set_len(out_pos);
-    }
+    fast_csv::append_2byte_csv_pattern_rows(rows, sources, output)?;
     Ok(true)
 }
 
@@ -2894,227 +2641,8 @@ fn append_dispatched_string_2byte_csv_header_pattern_fast(
     for _ in 0..HEADER_FIELDS {
         append_dispatched_string_to_serial(5, sources, output)?;
     }
-    append_csv_header_pattern_rows_fast(rows, sources, output)?;
+    fast_csv::append_2byte_csv_header_pattern_rows(rows, sources, output)?;
     Ok(true)
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_header_pattern_rows_fast(
-    rows: usize,
-    sources: &mut [DispatchStringSource<'_>],
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
-    let mut out_pos = output.len();
-    let capacity = output.capacity();
-    let final_out_pos = sources[..5].iter().try_fold(out_pos, |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > capacity {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
-    let output_ptr = output.as_mut_ptr();
-
-    for _ in 0..rows {
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            0,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            1,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            2,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_delimiter_unchecked(
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-        append_csv_pattern_field_prevalidated_unchecked(
-            3,
-            sources,
-            &mut positions,
-            &mut byte_positions,
-            output_ptr,
-            &mut out_pos,
-        );
-    }
-    append_csv_pattern_delimiter_unchecked(
-        sources,
-        &mut positions,
-        &mut byte_positions,
-        output_ptr,
-        &mut out_pos,
-    );
-
-    for index in 0..5 {
-        sources[index].position = positions[index];
-        sources[index].byte_position = byte_positions[index];
-    }
-    debug_assert!(out_pos <= output.capacity());
-    unsafe {
-        // SAFETY: every write above checked `out_pos` against the reserved
-        // capacity, and all bytes below the new length have been initialized.
-        output.set_len(out_pos);
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_pattern_field_prevalidated_unchecked(
-    source_index: usize,
-    sources: &[DispatchStringSource<'_>],
-    positions: &mut [usize; 5],
-    byte_positions: &mut [usize; 5],
-    output_ptr: *mut u8,
-    out_pos: &mut usize,
-) {
-    let source = &sources[source_index];
-    let length = source.lengths[positions[source_index]] as usize;
-    let src_start = byte_positions[source_index];
-    let src_end = src_start + length;
-    let dst_end = *out_pos + length;
-    debug_assert!(src_end <= source.bytes.len());
-    unsafe {
-        // SAFETY: the caller prevalidated that remaining source lengths match
-        // remaining source bytes and that the output has enough spare capacity.
-        // The caller sets `Vec::len` only after the full append succeeds.
-        copy_short_csv_field_unchecked(
-            source.bytes.as_ptr().add(src_start),
-            output_ptr.add(*out_pos),
-            length,
-        );
-    }
-    positions[source_index] += 1;
-    byte_positions[source_index] = src_end;
-    *out_pos = dst_end;
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::inline_always,
-    reason = "profiled CSV row loop pays measurable call overhead for tiny fields"
-)]
-#[inline(always)]
-unsafe fn copy_short_csv_field_unchecked(src: *const u8, dst: *mut u8, length: usize) {
-    match length {
-        0 => {}
-        1 => unsafe {
-            // SAFETY: caller guarantees `src..src+length` is readable and
-            // `dst..dst+length` is writable.
-            core::ptr::write(dst, core::ptr::read(src));
-        },
-        2 => unsafe {
-            // SAFETY: caller guarantees both 2-byte ranges are valid.
-            core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
-        },
-        3..=4 => unsafe {
-            // SAFETY: first and last 2-byte chunks stay within the field.
-            core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
-            core::ptr::write_unaligned(
-                dst.add(length - 2).cast::<u16>(),
-                core::ptr::read_unaligned(src.add(length - 2).cast()),
-            );
-        },
-        5..=8 => unsafe {
-            // SAFETY: first and last 4-byte chunks stay within the field.
-            core::ptr::write_unaligned(dst.cast::<u32>(), core::ptr::read_unaligned(src.cast()));
-            core::ptr::write_unaligned(
-                dst.add(length - 4).cast::<u32>(),
-                core::ptr::read_unaligned(src.add(length - 4).cast()),
-            );
-        },
-        9..=16 => unsafe {
-            // SAFETY: first and last 8-byte chunks stay within the field.
-            core::ptr::write_unaligned(dst.cast::<u64>(), core::ptr::read_unaligned(src.cast()));
-            core::ptr::write_unaligned(
-                dst.add(length - 8).cast::<u64>(),
-                core::ptr::read_unaligned(src.add(length - 8).cast()),
-            );
-        },
-        _ => unsafe {
-            // SAFETY: caller guarantees source and destination validity and
-            // non-overlap for the full field.
-            core::ptr::copy_nonoverlapping(src, dst, length);
-        },
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn append_csv_pattern_delimiter_unchecked(
-    sources: &[DispatchStringSource<'_>],
-    positions: &mut [usize; 5],
-    byte_positions: &mut [usize; 5],
-    output_ptr: *mut u8,
-    out_pos: &mut usize,
-) {
-    let source = &sources[4];
-    let src_pos = byte_positions[4];
-    debug_assert!(src_pos < source.bytes.len());
-    unsafe {
-        // SAFETY: the caller prevalidated that the delimiter source has
-        // exactly one byte per remaining delimiter and that the output has
-        // enough spare capacity before entering the fast path.
-        let byte = *source.bytes.as_ptr().add(src_pos);
-        *output_ptr.add(*out_pos) = byte;
-    }
-    positions[4] += 1;
-    byte_positions[4] = src_pos + 1;
-    *out_pos += 1;
 }
 
 fn append_dispatched_string_2byte_csv_pattern(
@@ -5878,11 +5406,17 @@ fn decode_partition_node(
     let bits = partition_bits(&params)?;
     #[cfg(not(feature = "paranoid"))]
     if element_width == 4 {
-        return decode_partition_u32_node(buckets.bytes, offsets.bytes, &bases, &bits, output_len);
+        return fast_partition::decode_u32_node(
+            buckets.bytes,
+            offsets.bytes,
+            &bases,
+            &bits,
+            output_len,
+        );
     }
     #[cfg(feature = "paranoid")]
     if element_width == 4 {
-        return decode_partition_u32_node_safe(
+        return fast_partition::decode_u32_node(
             buckets.bytes,
             offsets.bytes,
             &bases,
@@ -5923,154 +5457,6 @@ fn decode_partition_node(
         string_lengths: None,
         recyclable: false,
     })
-}
-
-#[cfg(feature = "paranoid")]
-fn decode_partition_u32_node_safe(
-    buckets: &[u8],
-    offset_bits: &[u8],
-    bases: &[u64],
-    bits: &[u8],
-    output_len: usize,
-) -> Result<OwnedStream> {
-    let mut reader = ForwardBitReader::new(offset_bits);
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
-    })?;
-    output.resize(output_len, 0);
-
-    let mut base_table = [0u64; 256];
-    let mut bit_table = [u8::MAX; 256];
-    let mut mask_table = [0u32; 256];
-    for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
-        base_table[bucket] = base;
-        bit_table[bucket] = bit_width;
-        if bit_width <= 32 {
-            mask_table[bucket] = bit_mask_u32(bit_width);
-        }
-    }
-
-    let mut out_pos = 0usize;
-    for &bucket in buckets {
-        let bucket = usize::from(bucket);
-        let bit_width = bit_table[bucket];
-        if bit_width == u8::MAX {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
-            );
-        }
-        let base = base_table[bucket];
-        let bit_width = usize::from(bit_width);
-        let offset = if bit_width <= 32 {
-            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
-        } else {
-            reader.read_u64(bit_width)?
-        };
-        let value = base
-            .checked_add(offset)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let value = u32::try_from(value).map_err(|_| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail("partition value exceeds output element width")
-        })?;
-        output[out_pos..out_pos + 4].copy_from_slice(&value.to_le_bytes());
-        out_pos += 4;
-    }
-
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 4,
-        string_lengths: None,
-        recyclable: false,
-    })
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_partition_u32_node(
-    buckets: &[u8],
-    offset_bits: &[u8],
-    bases: &[u64],
-    bits: &[u8],
-    output_len: usize,
-) -> Result<OwnedStream> {
-    let mut reader = ForwardBitReader::new(offset_bits);
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
-    })?;
-
-    let mut base_table = [0u64; 256];
-    let mut bit_table = [u8::MAX; 256];
-    let mut mask_table = [0u32; 256];
-    for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
-        base_table[bucket] = base;
-        bit_table[bucket] = bit_width;
-        if bit_width <= 32 {
-            mask_table[bucket] = bit_mask_u32(bit_width);
-        }
-    }
-
-    let mut out_pos = 0usize;
-    for &bucket in buckets {
-        let bucket = usize::from(bucket);
-        let bit_width = bit_table[bucket];
-        if bit_width == u8::MAX {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
-            );
-        }
-        let base = base_table[bucket];
-        let bit_width = usize::from(bit_width);
-        let offset = if bit_width <= 32 {
-            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
-        } else {
-            reader.read_u64(bit_width)?
-        };
-        let value = base
-            .checked_add(offset)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let value = u32::try_from(value).map_err(|_| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail("partition value exceeds output element width")
-        })?;
-        debug_assert!(out_pos + 4 <= output.capacity());
-        unsafe {
-            write_u32_le_spare(&mut output, out_pos, value);
-        }
-        out_pos += 4;
-    }
-
-    debug_assert_eq!(out_pos, output_len);
-    unsafe {
-        output.set_len(output_len);
-    }
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 4,
-        string_lengths: None,
-        recyclable: false,
-    })
-}
-
-#[cfg(not(feature = "paranoid"))]
-unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
-    debug_assert!(offset + 4 <= output.capacity());
-    debug_assert!(output.len() <= offset);
-    unsafe {
-        core::ptr::write_unaligned(
-            output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),
-            value.to_le_bytes(),
-        );
-    }
-}
-
-fn bit_mask_u32(bits: u8) -> u32 {
-    if bits == 32 {
-        u32::MAX
-    } else {
-        (1u32 << bits) - 1
-    }
 }
 
 fn parse_partition_header(header: &[u8]) -> Result<(PartitionParams, usize)> {
@@ -6755,136 +6141,13 @@ fn decode_zigzag_numeric_chunk(
     output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("zigzag allocation failed")
     })?;
-    #[cfg(not(feature = "paranoid"))]
-    if decode_zigzag_numeric_fast(stored.bytes, stored.element_width, &mut output) {
-        return Ok(OwnedStream {
-            bytes: output,
-            element_width: stored.element_width,
-            string_lengths: None,
-            recyclable: false,
-        });
-    }
-    match stored.element_width {
-        1 => {
-            for &encoded in stored.bytes {
-                let mask = 0u8.wrapping_sub(encoded & 1);
-                output.push((encoded >> 1) ^ mask);
-            }
-        }
-        2 => {
-            for encoded in stored.bytes.chunks_exact(2) {
-                let value = u16::from_le_bytes([encoded[0], encoded[1]]);
-                let mask = 0u16.wrapping_sub(value & 1);
-                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
-            }
-        }
-        4 => {
-            for encoded in stored.bytes.chunks_exact(4) {
-                let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-                let mask = 0u32.wrapping_sub(value & 1);
-                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
-            }
-        }
-        8 => {
-            for encoded in stored.bytes.chunks_exact(8) {
-                let value = u64::from_le_bytes([
-                    encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5],
-                    encoded[6], encoded[7],
-                ]);
-                let mask = 0u64.wrapping_sub(value & 1);
-                output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
-            }
-        }
-        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
-    }
+    fast_zigzag::decode_numeric(stored.bytes, stored.element_width, &mut output);
     Ok(OwnedStream {
         bytes: output,
         element_width: stored.element_width,
         string_lengths: None,
         recyclable: false,
     })
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_zigzag_numeric_fast(input: &[u8], element_width: usize, output: &mut Vec<u8>) -> bool {
-    match element_width {
-        2 => decode_zigzag_u16_fast(input, output),
-        4 => decode_zigzag_u32_fast(input, output),
-        8 => decode_zigzag_u64_fast(input, output),
-        _ => false,
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_zigzag_u16_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(2) {
-        return false;
-    }
-    debug_assert!(output.len() + input.len() <= output.capacity());
-    let start = output.len();
-    unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 2-byte chunks.
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(2).enumerate() {
-            let value = u16::from_le_bytes([encoded[0], encoded[1]]);
-            let mask = 0u16.wrapping_sub(value & 1);
-            dst.add(index * 2)
-                .cast::<u16>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_zigzag_u32_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(4) {
-        return false;
-    }
-    debug_assert!(output.len() + input.len() <= output.capacity());
-    let start = output.len();
-    unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 4-byte chunks.
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(4).enumerate() {
-            let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-            let mask = 0u32.wrapping_sub(value & 1);
-            dst.add(index * 4)
-                .cast::<u32>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_zigzag_u64_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(8) {
-        return false;
-    }
-    debug_assert!(output.len() + input.len() <= output.capacity());
-    let start = output.len();
-    unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 8-byte chunks.
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(8).enumerate() {
-            let value = u64::from_le_bytes([
-                encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5], encoded[6],
-                encoded[7],
-            ]);
-            let mask = 0u64.wrapping_sub(value & 1);
-            dst.add(index * 8)
-                .cast::<u64>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
 }
 
 fn decode_delta_node(

@@ -433,6 +433,37 @@ fn index_out_of_bounds() -> Error {
     Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed index is out of bounds")
 }
 
+#[cfg(all(test, not(feature = "paranoid")))]
+mod tests {
+    use super::decode_tokenize_indices;
+    use ozlrip_core::ErrorKind;
+
+    #[test]
+    fn decodes_fixed_width_tokens_into_spare_capacity() {
+        let alphabet = [b'a', b'a', b'b', b'b', b'c', b'c'];
+        let indices = [2, 0, 1];
+        let mut output = b"pre".to_vec();
+        output.reserve_exact(6);
+
+        decode_tokenize_indices(&alphabet, 3, 2, &indices, 1, &mut output).unwrap();
+
+        assert_eq!(output, b"preccaabb");
+    }
+
+    #[test]
+    fn rejects_invalid_index_before_publishing_output_len() {
+        let alphabet = [b'a', b'a', b'b', b'b'];
+        let indices = [1, 2];
+        let mut output = b"pre".to_vec();
+        output.reserve_exact(4);
+
+        let err = decode_tokenize_indices(&alphabet, 2, 2, &indices, 1, &mut output).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, b"pre");
+    }
+}
+
 fn numeric_too_large() -> Error {
     Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
 }
