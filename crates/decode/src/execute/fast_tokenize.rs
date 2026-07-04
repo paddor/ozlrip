@@ -202,15 +202,28 @@ fn decode_index_width_1_safe<const ELEMENT_WIDTH: usize>(
     indices: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for &index in indices {
-        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
-            alphabet,
-            alphabet_size,
-            usize::from(index),
-            output,
-        )?;
+    let start_len = output.len();
+    let output_len = indices.len() * ELEMENT_WIDTH;
+    output.resize(start_len + output_len, 0);
+
+    let result = (|| {
+        for (&index, out) in indices
+            .iter()
+            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+        {
+            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
+                alphabet,
+                alphabet_size,
+                usize::from(index),
+                out,
+            )?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        output.truncate(start_len);
     }
-    Ok(())
+    result
 }
 
 #[cfg(feature = "paranoid")]
@@ -220,15 +233,29 @@ fn decode_index_width_2_safe<const ELEMENT_WIDTH: usize>(
     indices: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for index in indices.chunks_exact(2) {
-        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
-            alphabet,
-            alphabet_size,
-            usize::from(u16::from_le_bytes([index[0], index[1]])),
-            output,
-        )?;
+    let elements = indices.len() / 2;
+    let start_len = output.len();
+    let output_len = elements * ELEMENT_WIDTH;
+    output.resize(start_len + output_len, 0);
+
+    let result = (|| {
+        for (index, out) in indices
+            .chunks_exact(2)
+            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+        {
+            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
+                alphabet,
+                alphabet_size,
+                usize::from(u16::from_le_bytes([index[0], index[1]])),
+                out,
+            )?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        output.truncate(start_len);
     }
-    Ok(())
+    result
 }
 
 #[cfg(feature = "paranoid")]
@@ -238,17 +265,31 @@ fn decode_index_width_4_safe<const ELEMENT_WIDTH: usize>(
     indices: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for index in indices.chunks_exact(4) {
-        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
-            alphabet,
-            alphabet_size,
-            u32::from_le_bytes([index[0], index[1], index[2], index[3]])
-                .try_into()
-                .map_err(|_| numeric_too_large())?,
-            output,
-        )?;
+    let elements = indices.len() / 4;
+    let start_len = output.len();
+    let output_len = elements * ELEMENT_WIDTH;
+    output.resize(start_len + output_len, 0);
+
+    let result = (|| {
+        for (index, out) in indices
+            .chunks_exact(4)
+            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+        {
+            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
+                alphabet,
+                alphabet_size,
+                u32::from_le_bytes([index[0], index[1], index[2], index[3]])
+                    .try_into()
+                    .map_err(|_| numeric_too_large())?,
+                out,
+            )?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        output.truncate(start_len);
     }
-    Ok(())
+    result
 }
 
 #[cfg(feature = "paranoid")]
@@ -258,19 +299,33 @@ fn decode_index_width_8_safe<const ELEMENT_WIDTH: usize>(
     indices: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for index in indices.chunks_exact(8) {
-        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
-            alphabet,
-            alphabet_size,
-            u64::from_le_bytes([
-                index[0], index[1], index[2], index[3], index[4], index[5], index[6], index[7],
-            ])
-            .try_into()
-            .map_err(|_| numeric_too_large())?,
-            output,
-        )?;
+    let elements = indices.len() / 8;
+    let start_len = output.len();
+    let output_len = elements * ELEMENT_WIDTH;
+    output.resize(start_len + output_len, 0);
+
+    let result = (|| {
+        for (index, out) in indices
+            .chunks_exact(8)
+            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+        {
+            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
+                alphabet,
+                alphabet_size,
+                u64::from_le_bytes([
+                    index[0], index[1], index[2], index[3], index[4], index[5], index[6], index[7],
+                ])
+                .try_into()
+                .map_err(|_| numeric_too_large())?,
+                out,
+            )?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        output.truncate(start_len);
     }
-    Ok(())
+    result
 }
 
 fn decode_tokenize_indices_safe(
@@ -340,15 +395,15 @@ fn decode_tokenize_indices_safe(
 
 #[cfg(feature = "paranoid")]
 #[inline(always)]
-fn append_tokenized_element_fixed<const ELEMENT_WIDTH: usize>(
+fn write_tokenized_element_fixed<const ELEMENT_WIDTH: usize>(
     alphabet: &[u8],
     alphabet_size: usize,
     index: usize,
-    output: &mut Vec<u8>,
+    out: &mut [u8],
 ) -> Result<()> {
     validate_index(index, alphabet_size)?;
     let start = index * ELEMENT_WIDTH;
-    output.extend_from_slice(&alphabet[start..start + ELEMENT_WIDTH]);
+    out.copy_from_slice(&alphabet[start..start + ELEMENT_WIDTH]);
     Ok(())
 }
 

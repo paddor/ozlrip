@@ -68,45 +68,47 @@ fn append_split_by_struct_output_safe(inputs: &[StreamInput<'_>], output: &mut V
 
 fn append_6_8_8_2_2_4_4_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 8;
-    let start_len = output.len();
-    output.resize(start_len + element_count * 28, 0);
-    for ((((((out, src0), src1), src2), src3), src4), src5) in output[start_len..]
-        .chunks_exact_mut(28)
-        .zip(inputs[0].bytes.chunks_exact(8))
+    output.reserve(element_count * 28);
+    for (((((src0, src1), src2), src3), src4), src5) in inputs[0]
+        .bytes
+        .chunks_exact(8)
         .zip(inputs[1].bytes.chunks_exact(8))
         .zip(inputs[2].bytes.chunks_exact(2))
         .zip(inputs[3].bytes.chunks_exact(2))
         .zip(inputs[4].bytes.chunks_exact(4))
         .zip(inputs[5].bytes.chunks_exact(4))
     {
-        copy_8(&mut out[0..8], src0);
-        copy_8(&mut out[8..16], src1);
-        copy_2(&mut out[16..18], src2);
-        copy_2(&mut out[18..20], src3);
-        copy_4(&mut out[20..24], src4);
-        copy_4(&mut out[24..28], src5);
+        let mut row = [0; 28];
+        copy_8(&mut row[0..8], src0);
+        copy_8(&mut row[8..16], src1);
+        copy_2(&mut row[16..18], src2);
+        copy_2(&mut row[18..20], src3);
+        copy_4(&mut row[20..24], src4);
+        copy_4(&mut row[24..28], src5);
+        output.extend_from_slice(&row);
     }
 }
 
 fn append_6_4_4_2_2_8_8_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 4;
-    let start_len = output.len();
-    output.resize(start_len + element_count * 28, 0);
-    for ((((((out, src0), src1), src2), src3), src4), src5) in output[start_len..]
-        .chunks_exact_mut(28)
-        .zip(inputs[0].bytes.chunks_exact(4))
+    output.reserve(element_count * 28);
+    for (((((src0, src1), src2), src3), src4), src5) in inputs[0]
+        .bytes
+        .chunks_exact(4)
         .zip(inputs[1].bytes.chunks_exact(4))
         .zip(inputs[2].bytes.chunks_exact(2))
         .zip(inputs[3].bytes.chunks_exact(2))
         .zip(inputs[4].bytes.chunks_exact(8))
         .zip(inputs[5].bytes.chunks_exact(8))
     {
-        copy_4(&mut out[0..4], src0);
-        copy_4(&mut out[4..8], src1);
-        copy_2(&mut out[8..10], src2);
-        copy_2(&mut out[10..12], src3);
-        copy_8(&mut out[12..20], src4);
-        copy_8(&mut out[20..28], src5);
+        let mut row = [0; 28];
+        copy_4(&mut row[0..4], src0);
+        copy_4(&mut row[4..8], src1);
+        copy_2(&mut row[8..10], src2);
+        copy_2(&mut row[10..12], src3);
+        copy_8(&mut row[12..20], src4);
+        copy_8(&mut row[20..28], src5);
+        output.extend_from_slice(&row);
     }
 }
 
