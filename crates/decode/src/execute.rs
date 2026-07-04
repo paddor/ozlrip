@@ -2924,6 +2924,18 @@ fn decode_mux_lengths_node(
         );
     }
 
+    if element_width == 2 {
+        return decode_mux_lengths_u16(
+            muxed_lengths.bytes,
+            long_lengths.bytes,
+            split_point,
+            ll_mask,
+            match_length_bias,
+            ml_max,
+            output_len,
+        );
+    }
+
     let mut literal_lengths = Vec::new();
     literal_lengths.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
@@ -2984,6 +2996,75 @@ fn decode_mux_lengths_node(
             recyclable: false,
         },
     ])
+}
+
+fn decode_mux_lengths_u16(
+    muxed_lengths: &[u8],
+    long_lengths: &[u8],
+    split_point: usize,
+    ll_mask: u64,
+    match_length_bias: u64,
+    ml_max: u64,
+    output_len: usize,
+) -> Result<Vec<OwnedStream>> {
+    let mut literal_lengths = Vec::new();
+    literal_lengths.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+    })?;
+    literal_lengths.resize(output_len, 0);
+    let mut match_lengths = Vec::new();
+    match_lengths.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+    })?;
+    match_lengths.resize(output_len, 0);
+
+    let mut long_lengths = long_lengths.chunks_exact(2);
+    for ((literal_out, match_out), &mux) in literal_lengths
+        .chunks_exact_mut(2)
+        .zip(match_lengths.chunks_exact_mut(2))
+        .zip(muxed_lengths)
+    {
+        let mux = u64::from(mux);
+        let mut literal = mux & ll_mask;
+        let mut matched = match_length_bias + (mux >> split_point);
+
+        if literal == ll_mask {
+            literal = literal.wrapping_add(read_next_u16_long_length(&mut long_lengths)?);
+        }
+        if matched == ml_max {
+            matched = matched.wrapping_add(read_next_u16_long_length(&mut long_lengths)?);
+        }
+
+        literal_out.copy_from_slice(&(literal as u16).to_le_bytes());
+        match_out.copy_from_slice(&(matched as u16).to_le_bytes());
+    }
+    if long_lengths.next().is_some() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("mux_lengths long-length stream was not fully consumed"));
+    }
+
+    Ok(vec![
+        OwnedStream {
+            bytes: literal_lengths,
+            element_width: 2,
+            string_lengths: None,
+            recyclable: false,
+        },
+        OwnedStream {
+            bytes: match_lengths,
+            element_width: 2,
+            string_lengths: None,
+            recyclable: false,
+        },
+    ])
+}
+
+#[inline]
+fn read_next_u16_long_length(long_lengths: &mut core::slice::ChunksExact<'_, u8>) -> Result<u64> {
+    let bytes = long_lengths.next().ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("mux_lengths long-length stream is exhausted")
+    })?;
+    Ok(u64::from(u16::from_le_bytes([bytes[0], bytes[1]])))
 }
 
 fn checked_next_long_pos(long_pos: usize, long_count: usize) -> Result<usize> {
