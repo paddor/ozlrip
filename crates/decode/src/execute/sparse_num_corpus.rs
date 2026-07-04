@@ -1,4 +1,4 @@
-use super::{StreamInput, decode_sparse_num_node};
+use super::{StreamInput, sparse_num};
 use ozlrip_core::{ErrorKind, Limits};
 
 fn stream<'a>(bytes: &'a [u8], element_width: usize) -> StreamInput<'a> {
@@ -13,7 +13,7 @@ fn stream<'a>(bytes: &'a [u8], element_width: usize) -> StreamInput<'a> {
 fn sparse_num_accepts_zero_literal() {
     let distances = [3, 1];
     let values = [0];
-    let output = decode_sparse_num_node(
+    let output = sparse_num::decode_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[],
         Limits::default(),
@@ -28,7 +28,7 @@ fn sparse_num_accepts_zero_literal() {
 fn sparse_num_decodes_explicit_dominant() {
     let distances = [2, 0, 1];
     let values = [1, 2];
-    let output = decode_sparse_num_node(
+    let output = sparse_num::decode_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[7],
         Limits::default(),
@@ -43,7 +43,7 @@ fn sparse_num_decodes_explicit_dominant() {
 fn sparse_num_decodes_wide_explicit_dominant() {
     let distances = [1, 2];
     let values = [5u16.to_le_bytes(), 6u16.to_le_bytes()].concat();
-    let output = decode_sparse_num_node(
+    let output = sparse_num::decode_node(
         &[stream(&distances, 1), stream(&values, 2)],
         &1024u16.to_le_bytes(),
         Limits::default(),
@@ -68,7 +68,7 @@ fn sparse_num_decodes_wide_explicit_dominant() {
 fn sparse_num_rejects_invalid_distance_count() {
     let distances = [0, 0, 0];
     let values = [1];
-    let err = decode_sparse_num_node(
+    let err = sparse_num::decode_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[],
         Limits::default(),
@@ -82,7 +82,7 @@ fn sparse_num_rejects_invalid_distance_count() {
 fn sparse_num_rejects_header_wider_than_value() {
     let distances = [0];
     let values = [1];
-    let err = decode_sparse_num_node(
+    let err = sparse_num::decode_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[1, 0],
         Limits::default(),
