@@ -20,6 +20,7 @@ mod fast_bitreader;
 mod fast_delta;
 mod fast_dispatch;
 mod fast_lengths;
+mod fast_lz;
 mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
@@ -3213,7 +3214,19 @@ fn decode_lz_node_to_output_validated(
         && literal_lengths.element_width == 2
         && match_lengths.element_width == 2
     {
-        return decode_lz_u8_u16_u16_to_output(
+        #[cfg(not(feature = "paranoid"))]
+        return fast_lz::decode_u8_u16_u16_to_output(
+            literals.bytes,
+            offsets.bytes,
+            literal_lengths.bytes,
+            match_lengths.bytes,
+            sequence_count,
+            output_len,
+            output,
+            output_base,
+        );
+        #[cfg(feature = "paranoid")]
+        return decode_lz_u8_u16_u16_to_output_safe(
             literals.bytes,
             offsets.bytes,
             literal_lengths.bytes,
@@ -3290,8 +3303,9 @@ fn decode_lz_node_to_output_validated(
     Ok(())
 }
 
+#[cfg(feature = "paranoid")]
 #[inline(always)]
-fn decode_lz_u8_u16_u16_to_output(
+fn decode_lz_u8_u16_u16_to_output_safe(
     literals: &[u8],
     offsets: &[u8],
     literal_lengths: &[u8],
