@@ -4805,9 +4805,13 @@ fn decode_partition_u32_node(
 
     let mut base_table = [0u64; 256];
     let mut bit_table = [u8::MAX; 256];
+    let mut mask_table = [0u32; 256];
     for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
         base_table[bucket] = base;
         bit_table[bucket] = bit_width;
+        if bit_width <= 32 {
+            mask_table[bucket] = bit_mask_u32(bit_width);
+        }
     }
 
     let mut out_pos = 0usize;
@@ -4822,7 +4826,7 @@ fn decode_partition_u32_node(
         let base = base_table[bucket];
         let bit_width = usize::from(bit_width);
         let offset = if bit_width <= 32 {
-            u64::from(reader.read_u32_window(bit_width)?)
+            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
         } else {
             reader.read_u64(bit_width)?
         };
@@ -4861,6 +4865,15 @@ unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
             output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),
             value.to_le_bytes(),
         );
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn bit_mask_u32(bits: u8) -> u32 {
+    if bits == 32 {
+        u32::MAX
+    } else {
+        (1u32 << bits) - 1
     }
 }
 
@@ -5121,7 +5134,7 @@ impl<'a> ForwardBitReader<'a> {
     }
 
     #[cfg(not(feature = "paranoid"))]
-    fn read_u32_window(&mut self, bits: usize) -> Result<u32> {
+    fn read_u32_window(&mut self, bits: usize, mask: u32) -> Result<u32> {
         debug_assert!(bits <= 32);
         let end = self
             .bit_pos
@@ -5148,11 +5161,6 @@ impl<'a> ForwardBitReader<'a> {
                 Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
             })?;
         value >>= bit_offset;
-        let mask = if bits == 32 {
-            u32::MAX
-        } else {
-            (1u32 << bits) - 1
-        };
         self.bit_pos = end;
         Ok(value & mask)
     }
