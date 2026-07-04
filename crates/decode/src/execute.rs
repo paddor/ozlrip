@@ -2399,10 +2399,14 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     }
     let output_ptr = output.as_mut_ptr();
 
-    for index_chunk in indices.chunks_exact(CSV_PATTERN.len()) {
-        if index_chunk != CSV_PATTERN {
-            return Ok(false);
-        }
+    if indices
+        .chunks_exact(CSV_PATTERN.len())
+        .any(|chunk| chunk != CSV_PATTERN)
+    {
+        return Ok(false);
+    }
+
+    for _ in 0..rows {
         append_csv_pattern_field_prevalidated_unchecked(
             0,
             sources,
