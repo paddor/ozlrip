@@ -43,6 +43,10 @@ fn unpack_lsb_bits_safe(
     elements: usize,
     output: &mut Vec<u8>,
 ) -> Result<()> {
+    if element_width == 2 && bits < 16 {
+        return unpack_lsb_bits_u16_window_safe(stored, bits, elements, output);
+    }
+
     let start = output.len();
     let output_len = elements
         .checked_mul(element_width)
@@ -53,6 +57,53 @@ fn unpack_lsb_bits_safe(
         return unpack_lsb_bits_u64_safe(stored, bits, element_width, out);
     }
     unpack_lsb_bits_u128_safe(stored, bits, element_width, out)
+}
+
+#[cfg(feature = "paranoid")]
+fn unpack_lsb_bits_u16_window_safe(
+    stored: &[u8],
+    bits: usize,
+    elements: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let required_bits = elements
+        .checked_mul(bits)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let required_bytes = required_bits.div_ceil(8);
+    if stored.len() < required_bytes {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated"));
+    }
+
+    let mask = (1u32 << bits) - 1;
+    let start = output.len();
+    let output_len = elements
+        .checked_mul(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    output.resize(start + output_len, 0);
+
+    for (element, out) in output[start..].chunks_exact_mut(2).enumerate() {
+        let bit_index = element * bits;
+        let byte_index = bit_index / 8;
+        let shift = bit_index & 7;
+        let mut word = 0u32;
+        if stored.len() - byte_index >= 4 {
+            word = u32::from_le_bytes([
+                stored[byte_index],
+                stored[byte_index + 1],
+                stored[byte_index + 2],
+                stored[byte_index + 3],
+            ]);
+        } else {
+            for (offset, &byte) in stored[byte_index..].iter().enumerate() {
+                word |= u32::from(byte) << (offset * 8);
+            }
+        }
+        let value = ((word >> shift) & mask) as u16;
+        let bytes = value.to_le_bytes();
+        out[0] = bytes[0];
+        out[1] = bytes[1];
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "paranoid"))]
