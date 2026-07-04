@@ -49,7 +49,14 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
             panic!("{name} ozlrip inspect failed: {err:?}");
         });
         let mut ozlrip_decoded = Vec::new();
-        ozlrip::decode_into(&frame, &mut ozlrip_decoded, case.limits()).unwrap_or_else(|err| {
+        ozlrip::decode_into_with_options(
+            &frame,
+            &mut ozlrip_decoded,
+            ozlrip::Options {
+                limits: case.limits(),
+            },
+        )
+        .unwrap_or_else(|err| {
             panic!("{name} ozlrip decode failed: {err:?}");
         });
         assert_eq!(ozlrip_decoded, input, "{name} ozlrip output mismatch");

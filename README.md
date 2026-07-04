@@ -8,13 +8,19 @@ Memory-safe Rust decoder for OpenZL.
 let decoded = ozlrip::decode(frame)?;
 
 let mut dst = Vec::new();
-let written = ozlrip::decode_into(frame, &mut dst, ozlrip::Limits::default())?;
+let written = ozlrip::decode_into(frame, &mut dst)?;
 
 let info = ozlrip::inspect(frame)?;
+
+let options = ozlrip::Options {
+    limits: ozlrip::Limits::strict(),
+};
+let decoded = ozlrip::decode_with_options(frame, options)?;
 ```
 
 For reusable allocation state, create `ozlrip::Decoder` and call
-`Decoder::decode_into`.
+`Decoder::decode` or `Decoder::decode_into`. Use `Decoder::with_options` when
+the default decoder options are not the right fit.
 
 ## Current Scope
 

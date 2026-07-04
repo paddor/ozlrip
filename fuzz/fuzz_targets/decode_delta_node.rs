@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into(&frame, &mut output, limits);
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
 });
 
 fn delta_serial_frame(first: u8, deltas: &[u8]) -> Vec<u8> {

@@ -1,4 +1,4 @@
-use ozlrip::{ErrorKind, Limits};
+use ozlrip::{ErrorKind, Limits, Options};
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
@@ -74,7 +74,7 @@ fn inspect_rejects_non_openzl_input() {
 #[test]
 fn decode_into_preserves_destination_on_unsupported_header() {
     let mut dst = vec![1, 2, 3];
-    let err = ozlrip::decode_into(b"not-openzl", &mut dst, Limits::default()).unwrap_err();
+    let err = ozlrip::decode_into(b"not-openzl", &mut dst).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
 }
@@ -84,7 +84,7 @@ fn decode_into_preserves_destination_on_unsupported_graph() {
     let frame = transform_graph_frame();
     let mut dst = vec![1, 2, 3];
 
-    let err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+    let err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
@@ -95,7 +95,7 @@ fn decode_into_preserves_destination_on_dictionary_bundle() {
     let frame = bundled_stored_frame(&[7, 8, 9]);
     let mut dst = vec![1, 2, 3];
 
-    let err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+    let err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
@@ -114,7 +114,7 @@ fn inspect_and_decode_reject_unknown_output_size() {
     let inspect_err = ozlrip::inspect(&frame).unwrap_err();
     let mut dst = vec![1, 2, 3];
 
-    let decode_err = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap_err();
+    let decode_err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
 
     assert_eq!(inspect_err.kind(), ErrorKind::Unsupported);
     assert_eq!(decode_err.kind(), ErrorKind::Unsupported);
@@ -131,11 +131,20 @@ fn decode_returns_stored_serial_output() {
 }
 
 #[test]
+fn decode_with_options_returns_stored_serial_output() {
+    let frame = stored_serial_frame(&[7, 8, 9]);
+
+    let decoded = ozlrip::decode_with_options(&frame, Options::default()).unwrap();
+
+    assert_eq!(decoded, [7, 8, 9]);
+}
+
+#[test]
 fn decode_into_appends_stored_serial_output() {
     let frame = stored_serial_frame(&[7, 8, 9]);
     let mut dst = vec![1, 2];
 
-    let written = ozlrip::decode_into(&frame, &mut dst, Limits::default()).unwrap();
+    let written = ozlrip::decode_into(&frame, &mut dst).unwrap();
 
     assert_eq!(written, 3);
     assert_eq!(dst, [1, 2, 7, 8, 9]);
@@ -144,7 +153,7 @@ fn decode_into_appends_stored_serial_output() {
 #[test]
 fn reusable_decoder_appends_outputs() {
     let frame = stored_serial_frame(&[7, 8, 9]);
-    let mut decoder = ozlrip::Decoder::new(Limits::default());
+    let mut decoder = ozlrip::Decoder::new();
     let mut dst = Vec::new();
 
     let first = decoder.decode_into(&frame, &mut dst).unwrap();
@@ -156,9 +165,19 @@ fn reusable_decoder_appends_outputs() {
 }
 
 #[test]
+fn reusable_decoder_decode_returns_owned_output() {
+    let frame = stored_serial_frame(&[7, 8, 9]);
+    let mut decoder = ozlrip::Decoder::with_options(Options::default());
+
+    let decoded = decoder.decode(&frame).unwrap();
+
+    assert_eq!(decoded, [7, 8, 9]);
+}
+
+#[test]
 fn reusable_decoder_rejects_mutated_cached_frame_buffer() {
     let mut frame = stored_serial_frame(&[7, 8, 9]);
-    let mut decoder = ozlrip::Decoder::new(Limits::default());
+    let mut decoder = ozlrip::Decoder::new();
     let mut dst = Vec::new();
 
     let written = decoder.decode_into(&frame, &mut dst).unwrap();
@@ -175,12 +194,14 @@ fn inspect_reports_stored_serial_metadata() {
     let frame = stored_serial_frame(&[7, 8, 9]);
 
     let info = ozlrip::inspect(&frame).unwrap();
+    let info_with_options = ozlrip::inspect_with_options(&frame, Options::default()).unwrap();
 
     assert_eq!(info.header_bytes, 7);
     assert_eq!(info.decoded_bytes, Some(3));
     assert_eq!(info.chunks, 1);
     assert_eq!(info.stored_streams, 1);
     assert_eq!(info.transforms, 0);
+    assert_eq!(info_with_options, info);
 }
 
 #[test]
@@ -191,7 +212,8 @@ fn inspect_enforces_stored_stream_limit() {
         ..Limits::default()
     };
 
-    let err = ozlrip::decode_into(&frame, &mut Vec::new(), limits).unwrap_err();
+    let err =
+        ozlrip::decode_into_with_options(&frame, &mut Vec::new(), Options { limits }).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }

@@ -457,7 +457,9 @@ fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
 }
 
 fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
-    let mut decoder = ozlrip::Decoder::new(bench_limits());
+    let mut decoder = ozlrip::Decoder::with_options(ozlrip::Options {
+        limits: bench_limits(),
+    });
     let mut dst = Vec::new();
     let stats = bench_loop(target, || {
         dst.clear();
@@ -471,7 +473,7 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
     let mut output = Vec::new();
-    ozlrip::decode_into(frame, &mut output, bench_limits())?;
+    ozlrip::decode_into_with_options(frame, &mut output, ozlrip::Options { limits: bench_limits() })?;
     Ok(output)
 }
 

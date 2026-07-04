@@ -12,8 +12,26 @@ mod standard;
 
 const PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
 
+/// Decoder configuration.
+///
+/// New options should be added here instead of creating new public function
+/// variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Options {
+    pub limits: Limits,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            limits: Limits::default(),
+        }
+    }
+}
+
+/// Reusable OpenZL decoder with scratch buffers and codec state.
 pub struct Decoder {
-    limits: Limits,
+    options: Options,
     scratch: execute::DecodeScratch,
     plan_cache: Option<CachedFramePlan>,
     #[cfg(feature = "zstd")]
@@ -27,9 +45,15 @@ struct CachedFramePlan {
 }
 
 impl Decoder {
-    pub fn new(limits: Limits) -> Self {
+    /// Creates a decoder with [`Options::default`].
+    pub fn new() -> Self {
+        Self::with_options(Options::default())
+    }
+
+    /// Creates a decoder with explicit options.
+    pub fn with_options(options: Options) -> Self {
         Self {
-            limits,
+            options,
             scratch: execute::DecodeScratch::new(),
             plan_cache: None,
             #[cfg(feature = "zstd")]
@@ -37,18 +61,26 @@ impl Decoder {
         }
     }
 
-    pub fn limits(&self) -> Limits {
-        self.limits
+    pub fn options(&self) -> Options {
+        self.options
     }
 
+    pub fn limits(&self) -> Limits {
+        self.options.limits
+    }
+
+    /// Decodes one OpenZL frame and appends the decoded bytes to `dst`.
+    ///
+    /// Returns the number of bytes appended. On error, `dst` is restored to its
+    /// original length.
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
         #[cfg(feature = "zstd")]
-        if let Some(frame) = parse::parse_single_zstd_frame(input, self.limits)? {
+        if let Some(frame) = parse::parse_single_zstd_frame(input, self.options.limits)? {
             return execute::decode_single_zstd_frame_with_context(
                 input,
                 frame,
                 dst,
-                self.limits,
+                self.options.limits,
                 &mut self.zstd,
             );
         }
@@ -61,7 +93,7 @@ impl Decoder {
                     &cached.plan,
                     direct_append_plans,
                     dst,
-                    self.limits,
+                    self.options.limits,
                     &mut self.scratch,
                     #[cfg(feature = "zstd")]
                     &mut self.zstd,
@@ -71,20 +103,20 @@ impl Decoder {
                 input,
                 &cached.plan,
                 dst,
-                self.limits,
+                self.options.limits,
                 &mut self.scratch,
                 #[cfg(feature = "zstd")]
                 &mut self.zstd,
             );
         }
 
-        let plan = parse::parse_frame_plan(input, self.limits)?;
+        let plan = parse::parse_frame_plan(input, self.options.limits)?;
         self.remember_frame_plan(input, &plan);
         execute::decode_plan_with_context(
             input,
             &plan,
             dst,
-            self.limits,
+            self.options.limits,
             &mut self.scratch,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
@@ -113,27 +145,58 @@ impl Decoder {
         });
     }
 
+    /// Decodes one OpenZL frame into a new `Vec`.
+    pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+        self.decode_into(input, &mut output)?;
+        Ok(output)
+    }
+
+    /// Parses and validates frame metadata without executing decode nodes.
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {
-        parse::inspect_frame(input, self.limits)
+        parse::inspect_frame(input, self.options.limits)
     }
 }
 
 impl Default for Decoder {
     fn default() -> Self {
-        Self::new(Limits::default())
+        Self::new()
     }
 }
 
+/// Decodes one OpenZL frame into a new `Vec` using [`Options::default`].
 pub fn decode(input: &[u8]) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    decode_into(input, &mut output, Limits::default())?;
-    Ok(output)
+    Decoder::new().decode(input)
 }
 
-pub fn decode_into(input: &[u8], dst: &mut Vec<u8>, limits: Limits) -> Result<usize> {
-    Decoder::new(limits).decode_into(input, dst)
+/// Decodes one OpenZL frame into a new `Vec` using explicit options.
+pub fn decode_with_options(input: &[u8], options: Options) -> Result<Vec<u8>> {
+    Decoder::with_options(options).decode(input)
 }
 
+/// Decodes one OpenZL frame and appends the decoded bytes to `dst`.
+///
+/// Returns the number of bytes appended. On error, `dst` is restored to its
+/// original length.
+pub fn decode_into(input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
+    Decoder::new().decode_into(input, dst)
+}
+
+/// Decodes one OpenZL frame into `dst` using explicit options.
+pub fn decode_into_with_options(
+    input: &[u8],
+    dst: &mut Vec<u8>,
+    options: Options,
+) -> Result<usize> {
+    Decoder::with_options(options).decode_into(input, dst)
+}
+
+/// Parses and validates frame metadata using [`Options::default`].
 pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
     Decoder::default().inspect(input)
+}
+
+/// Parses and validates frame metadata using explicit options.
+pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo> {
+    Decoder::with_options(options).inspect(input)
 }
