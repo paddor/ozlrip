@@ -27,6 +27,8 @@ mod fast_transpose;
 mod parse_int;
 
 #[cfg(test)]
+mod convert_be_corpus;
+#[cfg(test)]
 mod parse_int_corpus;
 #[cfg(test)]
 mod sparse_num_corpus;
@@ -1094,17 +1096,7 @@ fn byte_preserving_conversion_output_width(
             1
         }
         standard::CONVERT_NUM_TO_SERIAL_LE_ID => {
-            let [int_log] = header else {
-                return Err(Error::new(ErrorKind::Malformed)
-                    .with_detail("convert_num_to_serial_le header is malformed"));
-            };
-            if *int_log > 3 {
-                return Err(Error::new(ErrorKind::Malformed)
-                    .with_detail("convert_num_to_serial_le integer width is invalid"));
-            }
-            let int_size = 1usize
-                .checked_shl(u32::from(*int_log))
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let int_size = read_conversion_int_size(header, "convert_num_to_serial_le")?;
             if !input.bytes.len().is_multiple_of(int_size) {
                 return Err(Error::new(ErrorKind::Malformed)
                     .with_detail("serial stream size is not a multiple of integer width"));
@@ -1140,6 +1132,28 @@ fn read_single_conversion_width(header: &[u8]) -> Result<usize> {
             .with_detail("conversion element width must be nonzero"));
     }
     Ok(element_width)
+}
+
+fn read_conversion_int_size(header: &[u8], transform: &'static str) -> Result<usize> {
+    let [int_log] = header else {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform} header is malformed")));
+    };
+    if *int_log > 3 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform} integer width is invalid")));
+    }
+    1usize
+        .checked_shl(u32::from(*int_log))
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn validate_conversion_numeric_width(element_width: usize) -> Result<()> {
+    match element_width {
+        1 | 2 | 4 | 8 => Ok(()),
+        _ => Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("conversion numeric width is unsupported")),
+    }
 }
 
 struct ChunkExecutionPlan {
@@ -1272,6 +1286,8 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_SERIAL_LE_ID
+        | standard::CONVERT_STRUCT_TO_NUM_BE_ID
+        | standard::CONVERT_SERIAL_TO_NUM_BE_ID
         | standard::CONVERT_STRING_TO_SERIAL_ID
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
@@ -1462,6 +1478,16 @@ fn execute_standard_node(
         standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(
             decode_num_to_struct_le_chunk(single_stream(inputs)?, header, ctx.limits),
         ),
+        standard::CONVERT_STRUCT_TO_NUM_BE_ID => one_typed(decode_struct_to_num_be_chunk(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::CONVERT_SERIAL_TO_NUM_BE_ID => one_typed(decode_serial_to_num_be_chunk(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+        )),
         standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_serial(decode_numeric_to_serial_le_chunk(
             single_stream(inputs)?,
             header,
@@ -5847,22 +5873,69 @@ fn decode_serial_to_numeric_le_chunk(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    let [int_log] = header else {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("convert_num_to_serial_le header is malformed"));
-    };
-    if *int_log > 3 {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("convert_num_to_serial_le integer width is invalid"));
-    }
-    let int_size = 1usize
-        .checked_shl(u32::from(*int_log))
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let int_size = read_conversion_int_size(header, "convert_num_to_serial_le")?;
     if !stored.bytes.len().is_multiple_of(int_size) {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("serial stream size is not a multiple of integer width"));
     }
     copy_byte_preserving_conversion(stored, int_size, limits)
+}
+
+fn decode_struct_to_num_be_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_struct_to_num_be headers are unsupported"));
+    }
+    decode_big_endian_numeric_conversion(stored, stored.element_width, limits)
+}
+
+fn decode_serial_to_num_be_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let int_size = read_conversion_int_size(header, "convert_serial_to_num_be")?;
+    if !stored.bytes.len().is_multiple_of(int_size) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("serial stream size is not a multiple of integer width"));
+    }
+    decode_big_endian_numeric_conversion(stored, int_size, limits)
+}
+
+fn decode_big_endian_numeric_conversion(
+    stored: StreamInput<'_>,
+    element_width: usize,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    validate_conversion_numeric_width(element_width)?;
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    if !stored.bytes.len().is_multiple_of(element_width) {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("numeric stream has partial element")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
+    })?;
+    for element in stored.bytes.chunks_exact(element_width) {
+        output.extend(element.iter().rev().copied());
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+        recyclable: false,
+    })
 }
 
 fn copy_byte_preserving_conversion(
@@ -6698,9 +6771,11 @@ mod tests {
             standard::CONSTANT_SERIAL_ID,
             standard::CONVERT_NUM_TO_SERIAL_LE_ID,
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
+            standard::CONVERT_SERIAL_TO_NUM_BE_ID,
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRING_TO_SERIAL_ID,
+            standard::CONVERT_STRUCT_TO_NUM_BE_ID,
             standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
@@ -6748,9 +6823,11 @@ mod tests {
             standard::CONSTANT_SERIAL_ID,
             standard::CONVERT_NUM_TO_SERIAL_LE_ID,
             standard::CONVERT_NUM_TO_STRUCT_LE_ID,
+            standard::CONVERT_SERIAL_TO_NUM_BE_ID,
             standard::CONVERT_SERIAL_TO_NUM_LE_ID,
             standard::CONVERT_SERIAL_TO_STRUCT_ID,
             standard::CONVERT_STRING_TO_SERIAL_ID,
+            standard::CONVERT_STRUCT_TO_NUM_BE_ID,
             standard::CONVERT_STRUCT_TO_NUM_LE_ID,
             standard::CONVERT_STRUCT_TO_SERIAL_ID,
             standard::DELTA_INT_ID,
