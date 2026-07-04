@@ -2254,6 +2254,16 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
         if source.lengths.len().saturating_sub(source.position) != rows {
             return Ok(false);
         }
+        let remaining_len =
+            source.lengths[source.position..]
+                .iter()
+                .try_fold(0usize, |sum, &length| {
+                    sum.checked_add(length as usize)
+                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+                })?;
+        if source.bytes.len().saturating_sub(source.byte_position) != remaining_len {
+            return Ok(false);
+        }
     }
     let delimiter_count = rows
         .checked_mul(4)
@@ -2290,79 +2300,80 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     ];
     let mut out_pos = output.len();
     let capacity = output.capacity();
+    let final_out_pos = sources.iter().try_fold(out_pos, |sum, source| {
+        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if final_out_pos > capacity {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
     let output_ptr = output.as_mut_ptr();
 
     for index_chunk in indices.chunks_exact(CSV_PATTERN.len()) {
         if index_chunk != CSV_PATTERN {
             return Ok(false);
         }
-        append_csv_pattern_field_unchecked(
+        append_csv_pattern_field_prevalidated_unchecked(
             0,
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
-        )?;
+        );
         append_csv_pattern_delimiter_unchecked(
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
         );
-        append_csv_pattern_field_unchecked(
+        append_csv_pattern_field_prevalidated_unchecked(
             1,
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
-        )?;
+        );
         append_csv_pattern_delimiter_unchecked(
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
         );
-        append_csv_pattern_field_unchecked(
+        append_csv_pattern_field_prevalidated_unchecked(
             2,
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
-        )?;
+        );
         append_csv_pattern_delimiter_unchecked(
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
         );
-        append_csv_pattern_field_unchecked(
+        append_csv_pattern_field_prevalidated_unchecked(
             3,
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
-        )?;
+        );
         append_csv_pattern_delimiter_unchecked(
             sources,
             &mut positions,
             &mut byte_positions,
             output_ptr,
             &mut out_pos,
-            capacity,
         );
     }
 
@@ -2380,41 +2391,24 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
 }
 
 #[cfg(not(feature = "paranoid"))]
-fn append_csv_pattern_field_unchecked(
+fn append_csv_pattern_field_prevalidated_unchecked(
     source_index: usize,
     sources: &[DispatchStringSource<'_>],
     positions: &mut [usize; 5],
     byte_positions: &mut [usize; 5],
     output_ptr: *mut u8,
     out_pos: &mut usize,
-    capacity: usize,
-) -> Result<()> {
+) {
     let source = &sources[source_index];
-    let length = usize::try_from(source.lengths[positions[source_index]])
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("string length too large"))?;
+    let length = source.lengths[positions[source_index]] as usize;
     let src_start = byte_positions[source_index];
-    let src_end = src_start
-        .checked_add(length)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if src_end > source.bytes.len() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string range is invalid")
-        );
-    }
-    let dst_end = out_pos
-        .checked_add(length)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if dst_end > capacity {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    let src_end = src_start + length;
+    let dst_end = *out_pos + length;
     debug_assert!(src_end <= source.bytes.len());
-    debug_assert!(dst_end <= capacity);
     unsafe {
-        // SAFETY: `src_end` was checked against the source slice and `dst_end`
-        // against the output capacity. The caller sets `Vec::len` only after
-        // the complete exact-pattern append succeeds.
+        // SAFETY: the caller prevalidated that remaining source lengths match
+        // remaining source bytes and that the output has enough spare capacity.
+        // The caller sets `Vec::len` only after the full append succeeds.
         core::ptr::copy_nonoverlapping(
             source.bytes.as_ptr().add(src_start),
             output_ptr.add(*out_pos),
@@ -2424,7 +2418,6 @@ fn append_csv_pattern_field_unchecked(
     positions[source_index] += 1;
     byte_positions[source_index] = src_end;
     *out_pos = dst_end;
-    Ok(())
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -2434,16 +2427,14 @@ fn append_csv_pattern_delimiter_unchecked(
     byte_positions: &mut [usize; 5],
     output_ptr: *mut u8,
     out_pos: &mut usize,
-    capacity: usize,
 ) {
     let source = &sources[4];
     let src_pos = byte_positions[4];
     debug_assert!(src_pos < source.bytes.len());
-    debug_assert!(*out_pos < capacity);
     unsafe {
         // SAFETY: the caller prevalidated that the delimiter source has
-        // exactly one byte per remaining delimiter and reserved full output
-        // capacity before entering the fast path.
+        // exactly one byte per remaining delimiter and that the output has
+        // enough spare capacity before entering the fast path.
         let byte = *source.bytes.as_ptr().add(src_pos);
         *output_ptr.add(*out_pos) = byte;
     }
