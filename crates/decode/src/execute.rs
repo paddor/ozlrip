@@ -5110,7 +5110,7 @@ fn decode_zstd_chunk(
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
-    if magicless.len() >= 1024 {
+    if !magicless.is_empty() {
         let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
         let written = match zstd.decompress_after_magic_into(
             magicless,
