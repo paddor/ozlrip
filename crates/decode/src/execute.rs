@@ -1838,20 +1838,7 @@ fn decode_separate_string_components_node(
     }
     validate_numeric_stream_width(field_sizes.element_width, "string field sizes")?;
     let field_count = numeric_element_count(field_sizes.bytes, field_sizes.element_width)?;
-    let mut total = 0usize;
-    let mut string_lengths = Vec::new();
-    string_lengths.try_reserve_exact(field_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("string length allocation failed")
-    })?;
-    for index in 0..field_count {
-        let size = read_usize_numeric_element(field_sizes.bytes, field_sizes.element_width, index)?;
-        total = total
-            .checked_add(size)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        string_lengths.push(u32::try_from(size).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("string field size is too large")
-        })?);
-    }
+    let (string_lengths, total) = decode_string_component_lengths(field_sizes, field_count)?;
     if total != content.bytes.len() {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("string field sizes do not sum to content size"));
@@ -1874,6 +1861,67 @@ fn decode_separate_string_components_node(
         string_lengths: Some(string_lengths),
         recyclable: false,
     })
+}
+
+fn decode_string_component_lengths(
+    field_sizes: &StreamInput<'_>,
+    field_count: usize,
+) -> Result<(Vec<u32>, usize)> {
+    let mut string_lengths = Vec::new();
+    string_lengths.try_reserve_exact(field_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("string length allocation failed")
+    })?;
+    let mut total = 0usize;
+    match field_sizes.element_width {
+        1 => {
+            for &size in field_sizes.bytes {
+                total = total
+                    .checked_add(usize::from(size))
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                string_lengths.push(u32::from(size));
+            }
+        }
+        2 => {
+            for size in field_sizes.bytes.chunks_exact(2) {
+                let size = u16::from_le_bytes([size[0], size[1]]);
+                total = total
+                    .checked_add(usize::from(size))
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                string_lengths.push(u32::from(size));
+            }
+        }
+        4 => {
+            for size in field_sizes.bytes.chunks_exact(4) {
+                let size = u32::from_le_bytes([size[0], size[1], size[2], size[3]]);
+                let size_usize = usize::try_from(size).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded)
+                        .with_detail("string field size is too large")
+                })?;
+                total = total
+                    .checked_add(size_usize)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                string_lengths.push(size);
+            }
+        }
+        8 => {
+            for index in 0..field_count {
+                let size = read_usize_numeric_element(
+                    field_sizes.bytes,
+                    field_sizes.element_width,
+                    index,
+                )?;
+                total = total
+                    .checked_add(size)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                string_lengths.push(u32::try_from(size).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded)
+                        .with_detail("string field size is too large")
+                })?);
+            }
+        }
+        _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
+    }
+    Ok((string_lengths, total))
 }
 
 fn decode_dispatch_string_node(
