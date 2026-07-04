@@ -2962,7 +2962,6 @@ fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> 
     output
         .try_reserve_exact(output_len)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("lz allocation failed"))?;
-    output.resize(output_len, 0);
 
     let mut out_pos = 0usize;
     let mut lit_pos = 0usize;
@@ -2990,10 +2989,7 @@ fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> 
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("lz literal length exceeds output size"));
         }
-        let literal_dst = output.get_mut(out_pos..out_literal_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("lz literal length exceeds output size")
-        })?;
-        literal_dst.copy_from_slice(literal_src);
+        output.extend_from_slice(literal_src);
         lit_pos = literal_end;
         out_pos = out_literal_end;
 
@@ -3013,7 +3009,7 @@ fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> 
                 Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
             );
         }
-        copy_lz_match(&mut output, out_pos, match_offset, match_len);
+        append_lz_match(&mut output, out_pos, match_offset, match_len);
         out_pos = out_match_end;
     }
 
@@ -3028,25 +3024,26 @@ fn decode_lz_node(inputs: &[StreamInput<'_>], header: &[u8], limits: Limits) -> 
             Error::new(ErrorKind::Malformed).with_detail("lz output size does not match header")
         );
     }
-    output[out_pos..].copy_from_slice(remaining_literals);
+    output.extend_from_slice(remaining_literals);
     Ok(output)
 }
 
-fn copy_lz_match(output: &mut [u8], out_pos: usize, match_offset: usize, match_len: usize) {
+fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, match_len: usize) {
     if match_len == 0 {
         return;
     }
+    debug_assert_eq!(output.len(), out_pos);
     let src_start = out_pos - match_offset;
     if match_len <= match_offset {
-        output.copy_within(src_start..src_start + match_len, out_pos);
+        output.extend_from_within(src_start..src_start + match_len);
         return;
     }
 
-    output.copy_within(src_start..out_pos, out_pos);
+    output.extend_from_within(src_start..out_pos);
     let mut copied = match_offset;
     while copied < match_len {
         let len = copied.min(match_len - copied);
-        output.copy_within(out_pos..out_pos + len, out_pos + copied);
+        output.extend_from_within(out_pos..out_pos + len);
         copied += len;
     }
 }
