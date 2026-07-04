@@ -26,7 +26,7 @@ interop = ["std"]
 ozlrip-core = { version = "0.0.0", path = "../core", default-features = false }
 zrip-core = { version = "0.8.1", path = "../../../zrip/crates/core", default-features = false, features = ["alloc"] }
 zrip = { version = "0.8.1", path = "../../../zrip", default-features = false, features = ["std", "frame"], optional = true }
-lz4rip = { version = "0.9.3", path = "../../../lz4rip", default-features = false, features = ["std", "frame"], optional = true }
+lz4rip = { version = "0.10.0", path = "../../../lz4rip", default-features = false, features = ["std", "frame"], optional = true }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics"] }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 

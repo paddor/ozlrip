@@ -52,14 +52,32 @@ pub(super) fn decode_tokenize_indices(
     index_width: usize,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    decode_tokenize_indices_safe(
-        alphabet,
-        alphabet_size,
-        element_width,
-        indices,
-        index_width,
-        output,
-    )
+    match (index_width, element_width) {
+        (1, 1) => decode_index_width_1_safe::<1>(alphabet, alphabet_size, indices, output),
+        (1, 2) => decode_index_width_1_safe::<2>(alphabet, alphabet_size, indices, output),
+        (1, 4) => decode_index_width_1_safe::<4>(alphabet, alphabet_size, indices, output),
+        (1, 8) => decode_index_width_1_safe::<8>(alphabet, alphabet_size, indices, output),
+        (2, 1) => decode_index_width_2_safe::<1>(alphabet, alphabet_size, indices, output),
+        (2, 2) => decode_index_width_2_safe::<2>(alphabet, alphabet_size, indices, output),
+        (2, 4) => decode_index_width_2_safe::<4>(alphabet, alphabet_size, indices, output),
+        (2, 8) => decode_index_width_2_safe::<8>(alphabet, alphabet_size, indices, output),
+        (4, 1) => decode_index_width_4_safe::<1>(alphabet, alphabet_size, indices, output),
+        (4, 2) => decode_index_width_4_safe::<2>(alphabet, alphabet_size, indices, output),
+        (4, 4) => decode_index_width_4_safe::<4>(alphabet, alphabet_size, indices, output),
+        (4, 8) => decode_index_width_4_safe::<8>(alphabet, alphabet_size, indices, output),
+        (8, 1) => decode_index_width_8_safe::<1>(alphabet, alphabet_size, indices, output),
+        (8, 2) => decode_index_width_8_safe::<2>(alphabet, alphabet_size, indices, output),
+        (8, 4) => decode_index_width_8_safe::<4>(alphabet, alphabet_size, indices, output),
+        (8, 8) => decode_index_width_8_safe::<8>(alphabet, alphabet_size, indices, output),
+        _ => decode_tokenize_indices_safe(
+            alphabet,
+            alphabet_size,
+            element_width,
+            indices,
+            index_width,
+            output,
+        ),
+    }
 }
 
 #[cfg(not(feature = "paranoid"))]
@@ -172,6 +190,84 @@ unsafe fn copy_token<const ELEMENT_WIDTH: usize>(src: *const u8, dst: *mut u8) {
     }
 }
 
+#[cfg(feature = "paranoid")]
+fn decode_index_width_1_safe<const ELEMENT_WIDTH: usize>(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    indices: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    for &index in indices {
+        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
+            alphabet,
+            alphabet_size,
+            usize::from(index),
+            output,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "paranoid")]
+fn decode_index_width_2_safe<const ELEMENT_WIDTH: usize>(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    indices: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    for index in indices.chunks_exact(2) {
+        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
+            alphabet,
+            alphabet_size,
+            usize::from(u16::from_le_bytes([index[0], index[1]])),
+            output,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "paranoid")]
+fn decode_index_width_4_safe<const ELEMENT_WIDTH: usize>(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    indices: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    for index in indices.chunks_exact(4) {
+        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
+            alphabet,
+            alphabet_size,
+            u32::from_le_bytes([index[0], index[1], index[2], index[3]])
+                .try_into()
+                .map_err(|_| numeric_too_large())?,
+            output,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "paranoid")]
+fn decode_index_width_8_safe<const ELEMENT_WIDTH: usize>(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    indices: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    for index in indices.chunks_exact(8) {
+        append_tokenized_element_fixed::<ELEMENT_WIDTH>(
+            alphabet,
+            alphabet_size,
+            u64::from_le_bytes([
+                index[0], index[1], index[2], index[3], index[4], index[5], index[6], index[7],
+            ])
+            .try_into()
+            .map_err(|_| numeric_too_large())?,
+            output,
+        )?;
+    }
+    Ok(())
+}
+
 fn decode_tokenize_indices_safe(
     alphabet: &[u8],
     alphabet_size: usize,
@@ -234,6 +330,20 @@ fn decode_tokenize_indices_safe(
         }
         _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
     }
+    Ok(())
+}
+
+#[cfg(feature = "paranoid")]
+#[inline(always)]
+fn append_tokenized_element_fixed<const ELEMENT_WIDTH: usize>(
+    alphabet: &[u8],
+    alphabet_size: usize,
+    index: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    validate_index(index, alphabet_size)?;
+    let start = index * ELEMENT_WIDTH;
+    output.extend_from_slice(&alphabet[start..start + ELEMENT_WIDTH]);
     Ok(())
 }
 
