@@ -24,7 +24,10 @@ mod fast_lz;
 mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
+mod parse_int;
 
+#[cfg(test)]
+mod parse_int_corpus;
 #[cfg(test)]
 mod sparse_num_corpus;
 
@@ -1503,6 +1506,11 @@ fn execute_standard_node(
         )),
         standard::RANGE_PACK_ID => one_serial(decode_range_pack_serial8_chunk(
             single_input(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::PARSE_INT_ID => one_typed(parse_int::decode_node(
+            single_stream(inputs)?,
             header,
             ctx.limits,
         )),
@@ -6683,6 +6691,7 @@ mod tests {
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::PARTITION_ID,
+            standard::PARSE_INT_ID,
             standard::QUANTIZE_LENGTHS_ID,
             standard::QUANTIZE_OFFSETS_ID,
             standard::RANGE_PACK_ID,
@@ -6732,6 +6741,7 @@ mod tests {
             standard::LZ_ID,
             standard::MUX_LENGTHS_ID,
             standard::PARTITION_ID,
+            standard::PARSE_INT_ID,
             standard::QUANTIZE_LENGTHS_ID,
             standard::QUANTIZE_OFFSETS_ID,
             standard::RANGE_PACK_ID,

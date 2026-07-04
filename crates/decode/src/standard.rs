@@ -34,6 +34,7 @@ pub(crate) const ZIGZAG_ID: u32 = 3;
 pub(crate) const TRANSPOSE_SPLIT_ID: u32 = 4;
 pub(crate) const CONCAT_NUM_ID: u32 = 57;
 pub(crate) const CONCAT_STRUCT_ID: u32 = 58;
+pub(crate) const PARSE_INT_ID: u32 = 60;
 pub(crate) const TRANSPOSE_SPLIT2_ID: u32 = 30;
 pub(crate) const TRANSPOSE_SPLIT4_ID: u32 = 31;
 pub(crate) const TRANSPOSE_SPLIT8_ID: u32 = 32;
