@@ -2497,7 +2497,7 @@ fn append_csv_pattern_field_prevalidated_unchecked(
         // SAFETY: the caller prevalidated that remaining source lengths match
         // remaining source bytes and that the output has enough spare capacity.
         // The caller sets `Vec::len` only after the full append succeeds.
-        core::ptr::copy_nonoverlapping(
+        copy_short_csv_field_unchecked(
             source.bytes.as_ptr().add(src_start),
             output_ptr.add(*out_pos),
             length,
@@ -2506,6 +2506,56 @@ fn append_csv_pattern_field_prevalidated_unchecked(
     positions[source_index] += 1;
     byte_positions[source_index] = src_end;
     *out_pos = dst_end;
+}
+
+#[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled CSV row loop pays measurable call overhead for tiny fields"
+)]
+#[inline(always)]
+unsafe fn copy_short_csv_field_unchecked(src: *const u8, dst: *mut u8, length: usize) {
+    match length {
+        0 => {}
+        1 => unsafe {
+            // SAFETY: caller guarantees `src..src+length` is readable and
+            // `dst..dst+length` is writable.
+            core::ptr::write(dst, core::ptr::read(src));
+        },
+        2 => unsafe {
+            // SAFETY: caller guarantees both 2-byte ranges are valid.
+            core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
+        },
+        3..=4 => unsafe {
+            // SAFETY: first and last 2-byte chunks stay within the field.
+            core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
+            core::ptr::write_unaligned(
+                dst.add(length - 2).cast::<u16>(),
+                core::ptr::read_unaligned(src.add(length - 2).cast()),
+            );
+        },
+        5..=8 => unsafe {
+            // SAFETY: first and last 4-byte chunks stay within the field.
+            core::ptr::write_unaligned(dst.cast::<u32>(), core::ptr::read_unaligned(src.cast()));
+            core::ptr::write_unaligned(
+                dst.add(length - 4).cast::<u32>(),
+                core::ptr::read_unaligned(src.add(length - 4).cast()),
+            );
+        },
+        9..=16 => unsafe {
+            // SAFETY: first and last 8-byte chunks stay within the field.
+            core::ptr::write_unaligned(dst.cast::<u64>(), core::ptr::read_unaligned(src.cast()));
+            core::ptr::write_unaligned(
+                dst.add(length - 8).cast::<u64>(),
+                core::ptr::read_unaligned(src.add(length - 8).cast()),
+            );
+        },
+        _ => unsafe {
+            // SAFETY: caller guarantees source and destination validity and
+            // non-overlap for the full field.
+            core::ptr::copy_nonoverlapping(src, dst, length);
+        },
+    }
 }
 
 #[cfg(not(feature = "paranoid"))]
