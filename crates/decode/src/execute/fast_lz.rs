@@ -210,9 +210,27 @@ unsafe fn copy_lz_match(src: *const u8, dst: *mut u8, len: usize) {
     }
 }
 
+#[cfg(not(feature = "paranoid"))]
+pub(super) fn append_nonoverlapping_match(
+    output: &mut Vec<u8>,
+    src_start: usize,
+    match_len: usize,
+) {
+    let out_pos = output.len();
+    debug_assert!(src_start <= out_pos);
+    debug_assert!(src_start + match_len <= out_pos);
+    debug_assert!(output.capacity() >= out_pos + match_len);
+
+    unsafe {
+        let ptr = output.as_mut_ptr();
+        core::ptr::copy_nonoverlapping(ptr.add(src_start), ptr.add(out_pos), match_len);
+        output.set_len(out_pos + match_len);
+    }
+}
+
 #[cfg(all(test, not(feature = "paranoid")))]
 mod tests {
-    use super::decode_u8_u16_u16_to_output;
+    use super::{append_nonoverlapping_match, decode_u8_u16_u16_to_output};
 
     #[test]
     fn decodes_validated_u8_u16_u16_lz_into_spare_capacity() {
@@ -261,5 +279,15 @@ mod tests {
 
         assert_eq!(err.kind(), ozlrip_core::ErrorKind::Malformed);
         assert_eq!(output, b"pre");
+    }
+
+    #[test]
+    fn appends_nonoverlapping_match_from_spare_capacity() {
+        let mut output = b"abcdef".to_vec();
+        output.reserve_exact(3);
+
+        append_nonoverlapping_match(&mut output, 2, 3);
+
+        assert_eq!(output, b"abcdefcde");
     }
 }

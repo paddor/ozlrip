@@ -3519,7 +3519,14 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
     debug_assert_eq!(output.len(), out_pos);
     let src_start = out_pos - match_offset;
     if match_len <= match_offset {
-        output.extend_from_within(src_start..src_start + match_len);
+        #[cfg(not(feature = "paranoid"))]
+        {
+            fast_lz::append_nonoverlapping_match(output, src_start, match_len);
+        }
+        #[cfg(feature = "paranoid")]
+        {
+            output.extend_from_within(src_start..src_start + match_len);
+        }
         return;
     }
 
