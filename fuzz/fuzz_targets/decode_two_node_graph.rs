@@ -6,7 +6,9 @@ use ozlrip::Limits;
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
-    let (first, stored) = data.split_first().map_or((0, data), |(&first, rest)| (first, rest));
+    let (first, stored) = data
+        .split_first()
+        .map_or((0, data), |(&first, rest)| (first, rest));
     let frame = zigzag_delta_graph_frame(stored, first);
     let limits = Limits {
         max_frame_bytes: 8192,
@@ -21,7 +23,14 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        &frame,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });
 
 fn zigzag_delta_graph_frame(stored: &[u8], first: u8) -> Vec<u8> {

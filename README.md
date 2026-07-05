@@ -14,6 +14,8 @@ let info = ozlrip::inspect(frame)?;
 
 let options = ozlrip::Options {
     limits: ozlrip::Limits::strict(),
+    plan_cache_max_frame_bytes: 0,
+    ..ozlrip::Options::default()
 };
 let decoded = ozlrip::decode_with_options(frame, options)?;
 ```

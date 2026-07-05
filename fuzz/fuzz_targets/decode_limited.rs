@@ -17,5 +17,12 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 64,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(data, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        data,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });

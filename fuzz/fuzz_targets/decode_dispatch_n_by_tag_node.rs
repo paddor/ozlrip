@@ -7,9 +7,12 @@ const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
     let (tags, sizes, source0, source1) = dispatch_inputs(data);
-    let frame = single_transform_frame(42, 2, source0.len() + source1.len(), &[
-        &source1, &source0, &sizes, &tags,
-    ]);
+    let frame = single_transform_frame(
+        42,
+        2,
+        source0.len() + source1.len(),
+        &[&source1, &source0, &sizes, &tags],
+    );
     let limits = Limits {
         max_frame_bytes: 8192,
         max_decoded_bytes: 4096,
@@ -23,7 +26,14 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        &frame,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });
 
 fn dispatch_inputs(data: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -46,7 +56,10 @@ fn dispatch_inputs(data: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     };
     (
         vec![tag0, tag1],
-        vec![u8::try_from(size0).unwrap_or(u8::MAX), u8::try_from(size1).unwrap_or(u8::MAX)],
+        vec![
+            u8::try_from(size0).unwrap_or(u8::MAX),
+            u8::try_from(size1).unwrap_or(u8::MAX),
+        ],
         source0,
         source1,
     )

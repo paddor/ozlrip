@@ -6,7 +6,9 @@ use ozlrip::Limits;
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
-    let (selector, payload) = data.split_first().map_or((0, data), |(&first, rest)| (first, rest));
+    let (selector, payload) = data
+        .split_first()
+        .map_or((0, data), |(&first, rest)| (first, rest));
     let transform_id = if selector & 1 == 0 { 5 } else { 6 };
     let frame = conversion_frame(transform_id, payload);
     let limits = Limits {
@@ -22,7 +24,14 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        &frame,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });
 
 fn conversion_frame(transform_id: u8, stored: &[u8]) -> Vec<u8> {

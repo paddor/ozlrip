@@ -10,7 +10,7 @@ mod execute;
 mod parse;
 mod standard;
 
-const PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
+pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
 
 /// Decoder configuration.
 ///
@@ -18,13 +18,19 @@ const PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
 /// variants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
+    /// Defensive parser, graph, allocation, and expansion limits.
     pub limits: Limits,
+    /// Maximum frame size eligible for reusable decoder plan caching.
+    ///
+    /// Set to `0` to disable plan caching.
+    pub plan_cache_max_frame_bytes: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             limits: Limits::default(),
+            plan_cache_max_frame_bytes: DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES,
         }
     }
 }
@@ -124,7 +130,9 @@ impl Decoder {
     }
 
     fn remember_frame_plan(&mut self, input: &[u8], plan: &parse::FramePlan) {
-        if input.len() > PLAN_CACHE_MAX_FRAME_BYTES {
+        if self.options.plan_cache_max_frame_bytes == 0
+            || input.len() > self.options.plan_cache_max_frame_bytes
+        {
             self.plan_cache = None;
             return;
         }

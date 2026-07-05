@@ -12,10 +12,12 @@ fuzz_target!(|data: &[u8]| {
     let field0 = &payload[..split];
     let field1 = &payload[split..];
     let element_count = field0.len().min(field1.len());
-    let frame = single_transform_frame(41, 2, element_count * 2, &[
-        &field1[..element_count],
-        &field0[..element_count],
-    ]);
+    let frame = single_transform_frame(
+        41,
+        2,
+        element_count * 2,
+        &[&field1[..element_count], &field0[..element_count]],
+    );
     let limits = Limits {
         max_frame_bytes: 8192,
         max_decoded_bytes: 4096,
@@ -29,7 +31,14 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        &frame,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });
 
 fn single_transform_frame(

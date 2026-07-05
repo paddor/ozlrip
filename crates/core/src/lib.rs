@@ -153,6 +153,7 @@ pub struct FrameInfo {
     pub has_decoded_checksum: bool,
     pub has_encoded_checksum: bool,
     pub has_comment: bool,
+    pub comment: Option<Vec<u8>>,
     pub dictionary_bundle_id: Option<Vec<u8>>,
 }
 

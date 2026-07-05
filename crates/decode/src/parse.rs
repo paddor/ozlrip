@@ -57,9 +57,11 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         limits,
     )?;
 
-    if flags.has_comment() {
-        read_comment(&mut reader)?;
-    }
+    let comment = if flags.has_comment() {
+        Some(read_comment(&mut reader)?)
+    } else {
+        None
+    };
 
     if format_version >= CHUNK_VERSION_MIN && flags.has_encoded_checksum() {
         let checksum_offset = reader.offset();
@@ -99,6 +101,7 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         has_decoded_checksum: flags.has_decoded_checksum(),
         has_encoded_checksum: flags.has_encoded_checksum(),
         has_comment: flags.has_comment(),
+        comment,
         dictionary_bundle_id,
     };
     let plan = FramePlan {
@@ -542,7 +545,7 @@ fn read_output_sizes(
     })
 }
 
-fn read_comment(reader: &mut Reader<'_>) -> Result<()> {
+fn read_comment(reader: &mut Reader<'_>) -> Result<Vec<u8>> {
     let offset = reader.offset();
     let len = reader.read_var_u64()?;
     if len == 0 {
@@ -554,8 +557,7 @@ fn read_comment(reader: &mut Reader<'_>) -> Result<()> {
             .with_detail("OpenZL frame comment exceeds configured hard limit"));
     }
     let len = usize::try_from(len).map_err(|_| Error::at(ErrorKind::LimitExceeded, offset))?;
-    let _ = reader.read_slice(len)?;
-    Ok(())
+    Ok(reader.read_slice(len)?.to_vec())
 }
 
 fn read_chunks(
@@ -1780,6 +1782,7 @@ pub(crate) struct FramePlanInfo {
     pub(crate) has_decoded_checksum: bool,
     pub(crate) has_encoded_checksum: bool,
     pub(crate) has_comment: bool,
+    pub(crate) comment: Option<Vec<u8>>,
     pub(crate) dictionary_bundle_id: Option<Vec<u8>>,
 }
 
@@ -1810,6 +1813,7 @@ impl FramePlanInfo {
             has_decoded_checksum: self.has_decoded_checksum,
             has_encoded_checksum: self.has_encoded_checksum,
             has_comment: self.has_comment,
+            comment: self.comment,
             dictionary_bundle_id: self.dictionary_bundle_id,
         }
     }
@@ -2720,6 +2724,7 @@ mod tests {
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
         assert!(info.has_comment);
+        assert_eq!(info.comment.as_deref(), Some(b"abc".as_slice()));
         assert_eq!(info.header_bytes, input.len());
     }
 

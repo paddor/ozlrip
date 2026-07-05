@@ -23,7 +23,14 @@ fuzz_target!(|data: &[u8]| {
         max_expansion_ratio: 4096,
     };
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options { limits });
+    let _ = ozlrip::decode_into_with_options(
+        &frame,
+        &mut output,
+        ozlrip::Options {
+            limits,
+            ..ozlrip::Options::default()
+        },
+    );
 });
 
 fn range_pack_serial_frame(min_value: u8, values: &[u8]) -> Vec<u8> {
