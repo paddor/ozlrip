@@ -45,14 +45,17 @@ the default decoder options are not the right fit.
 ## Performance
 
 - Baseline: in-process `openzl-c-ffi`, not the `zli` CLI.
-- Default features: about `1.26x` mean, `1.14x` median OpenZL C on the current
+- Default features: about `1.41x` mean, `1.17x` median OpenZL C on the current
   generated corpus.
-- Default representative range: about `1.0x-1.3x` on CSV/numeric/table cases;
-  stored/serial outliers can be higher.
-- `paranoid`: about `0.75x-1.0x` OpenZL C on focused guards.
-- `paranoid` representative range: CSV/numeric samples around `0.78x-0.82x`,
-  SAO-style bitpack around `0.9x`, LZ-heavy serial near parity.
-- Noisy/shape-sensitive rows: PUMS CSV, ERA5-shaped data, large RLE output.
+- Default representative range: about `0.9x-1.4x` on CSV/numeric/table/SAO
+  cases; stored/serial and tiny-sample outliers can be higher.
+- `paranoid`: about `1.27x` mean, `0.99x` median OpenZL C on the current
+  generated corpus.
+- `paranoid` representative range: CSV/numeric samples around `0.70x-0.79x`,
+  SAO-style bitpack around `0.90x-0.94x`, LZ-heavy serial around
+  `1.00x-1.39x`.
+- Noisy/shape-sensitive rows: PUMS CSV, ERA5-shaped data, tiny parquet samples,
+  large RLE output, and short stored/serial frames.
 
 ## Benchmarking
 
