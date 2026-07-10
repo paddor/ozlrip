@@ -1,7 +1,7 @@
 use super::{StreamInput, sparse_num};
 use ozlrip_core::{ErrorKind, Limits};
 
-fn stream<'a>(bytes: &'a [u8], element_width: usize) -> StreamInput<'a> {
+fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
     StreamInput {
         bytes,
         element_width,

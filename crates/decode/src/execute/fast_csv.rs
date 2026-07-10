@@ -81,7 +81,7 @@ pub(super) fn append_wide_header_pattern(
 
     for (source, (position, byte_position)) in sources
         .iter_mut()
-        .zip(positions.into_iter().zip(byte_positions.into_iter()))
+        .zip(positions.into_iter().zip(byte_positions))
     {
         source.position = position;
         source.byte_position = byte_position;

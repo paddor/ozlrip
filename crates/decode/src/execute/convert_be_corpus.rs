@@ -5,7 +5,7 @@ use crate::parse::parse_frame_plan;
 use alloc::vec::Vec;
 use ozlrip_core::{ErrorKind, Limits};
 
-fn stream<'a>(bytes: &'a [u8], element_width: usize) -> StreamInput<'a> {
+fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
     StreamInput {
         bytes,
         element_width,
