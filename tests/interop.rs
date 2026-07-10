@@ -54,6 +54,7 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
             &mut ozlrip_decoded,
             ozlrip::Options {
                 limits: case.limits(),
+                ..ozlrip::Options::default()
             },
         )
         .unwrap_or_else(|err| {
