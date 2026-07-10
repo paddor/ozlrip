@@ -1898,9 +1898,7 @@ fn decode_transpose_split_node(
             .with_detail("transpose_split transform headers are unsupported"));
     }
     if variable_inputs != 0
-        && usize::try_from(variable_inputs)
-            .ok()
-            .is_some_and(|count| count != inputs.len())
+        && usize::try_from(variable_inputs).is_ok_and(|count| count != inputs.len())
     {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("transpose_split variable input count does not match inputs"));
@@ -4241,10 +4239,7 @@ fn decode_bitsplit_node(
     if bit_widths.is_empty() {
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitsplit has no bit widths"));
     }
-    if usize::try_from(variable_inputs)
-        .ok()
-        .is_some_and(|count| count != inputs.len())
-    {
+    if usize::try_from(variable_inputs).is_ok_and(|count| count != inputs.len()) {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("bitsplit variable input count does not match inputs"));
     }
