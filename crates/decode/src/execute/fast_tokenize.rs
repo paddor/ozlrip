@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn decodes_fixed_width_tokens_into_spare_capacity() {
-        let alphabet = [b'a', b'a', b'b', b'b', b'c', b'c'];
+        let alphabet = *b"aabbcc";
         let indices = [2, 0, 1];
         let mut output = b"pre".to_vec();
         output.reserve_exact(6);
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_index_before_publishing_output_len() {
-        let alphabet = [b'a', b'a', b'b', b'b'];
+        let alphabet = *b"aabb";
         let indices = [1, 2];
         let mut output = b"pre".to_vec();
         output.reserve_exact(4);
