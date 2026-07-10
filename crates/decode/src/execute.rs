@@ -2364,11 +2364,19 @@ fn append_dispatched_string_2byte_csv_wide_header_pattern_fast(
         .len()
         .checked_sub(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if data_sources == 0 || data_sources > usize::from(u16::MAX) {
+    if data_sources == 0 {
         return Ok(false);
     }
     let delimiter_source = data_sources;
     let header_source = data_sources + 1;
+    // Indices are read as `u16`, and `header_source` is the largest index the
+    // pattern refers to, so it must round-trip through `u16` without wrapping.
+    let (Ok(delimiter_index), Ok(header_index)) = (
+        u16::try_from(delimiter_source),
+        u16::try_from(header_source),
+    ) else {
+        return Ok(false);
+    };
     let header_fields = data_sources
         .checked_mul(2)
         .and_then(|count| count.checked_sub(1))
@@ -2391,17 +2399,17 @@ fn append_dispatched_string_2byte_csv_wide_header_pattern_fast(
     }
     if !indices[..header_bytes]
         .chunks_exact(2)
-        .all(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) == header_source as u16)
+        .all(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) == header_index)
     {
         return Ok(false);
     }
     let rows_end = indices.len() - trailing_delimiter_bytes;
-    if u16::from_le_bytes([indices[rows_end], indices[rows_end + 1]]) != delimiter_source as u16 {
+    if u16::from_le_bytes([indices[rows_end], indices[rows_end + 1]]) != delimiter_index {
         return Ok(false);
     }
     let rows = (rows_end - header_bytes) / row_bytes;
     let row_indices = &indices[header_bytes..rows_end];
-    if !csv_wide_header_row_indices_match(row_indices, rows, data_sources, delimiter_source) {
+    if !csv_wide_header_row_indices_match(row_indices, rows, delimiter_index) {
         return Ok(false);
     }
 
@@ -2464,21 +2472,17 @@ fn remaining_string_bytes(source: &DispatchStringSource<'_>) -> Result<usize> {
 }
 
 #[cfg(not(feature = "paranoid"))]
-fn csv_wide_header_row_indices_match(
-    indices: &[u8],
-    rows: usize,
-    data_sources: usize,
-    delimiter_source: usize,
-) -> bool {
+/// The delimiter stream is indexed directly after the data sources, so
+/// `delimiter_index` doubles as the data-source count.
+fn csv_wide_header_row_indices_match(indices: &[u8], rows: usize, delimiter_index: u16) -> bool {
     let mut offset = 0usize;
     for _ in 0..rows {
-        for source in 0..data_sources {
-            if u16::from_le_bytes([indices[offset], indices[offset + 1]]) != delimiter_source as u16
-            {
+        for source in 0..delimiter_index {
+            if u16::from_le_bytes([indices[offset], indices[offset + 1]]) != delimiter_index {
                 return false;
             }
             offset += 2;
-            if u16::from_le_bytes([indices[offset], indices[offset + 1]]) != source as u16 {
+            if u16::from_le_bytes([indices[offset], indices[offset + 1]]) != source {
                 return false;
             }
             offset += 2;
@@ -7960,45 +7964,46 @@ mod tests {
 
     #[test]
     fn decodes_dispatch_string_pums_style_wide_header_pattern_to_serial_output() {
-        const DATA_SOURCES: usize = 78;
-        let delimiter_source = DATA_SOURCES as u16;
-        let header_source = DATA_SOURCES as u16 + 1;
-        let header_fields = DATA_SOURCES * 2 - 1;
+        const DATA_SOURCES: u16 = 78;
+        let sources = usize::from(DATA_SOURCES);
+        let delimiter_source = DATA_SOURCES;
+        let header_source = DATA_SOURCES + 1;
+        let header_fields = sources * 2 - 1;
 
         let mut indices = Vec::new();
         for _ in 0..header_fields {
             indices.extend_from_slice(&header_source.to_le_bytes());
         }
-        for source in 0..DATA_SOURCES as u16 {
+        for source in 0..DATA_SOURCES {
             indices.extend_from_slice(&delimiter_source.to_le_bytes());
             indices.extend_from_slice(&source.to_le_bytes());
         }
         indices.extend_from_slice(&delimiter_source.to_le_bytes());
 
-        let field_lengths = vec![[2u32]; DATA_SOURCES];
-        let field_bytes = (0..DATA_SOURCES)
+        let field_lengths = vec![[2u32]; sources];
+        let field_bytes = (0..sources)
             .map(|source| format!("{source:02}").into_bytes())
             .collect::<Vec<_>>();
-        let delimiter_lengths = vec![1u32; DATA_SOURCES + 1];
+        let delimiter_lengths = vec![1u32; sources + 1];
         let delimiter_bytes = {
-            let mut bytes = Vec::with_capacity(DATA_SOURCES + 1);
+            let mut bytes = Vec::with_capacity(sources + 1);
             bytes.push(b'\n');
-            bytes.extend(core::iter::repeat_n(b',', DATA_SOURCES - 1));
+            bytes.extend(core::iter::repeat_n(b',', sources - 1));
             bytes.push(b'\n');
             bytes
         };
         let header_lengths = vec![1u32; header_fields];
         let header_bytes = (0..header_fields)
-            .map(|field| b'A' + (field % 26) as u8)
+            .map(|field| b'A' + u8::try_from(field % 26).unwrap())
             .collect::<Vec<_>>();
 
-        let mut inputs = Vec::with_capacity(DATA_SOURCES + 3);
+        let mut inputs = Vec::with_capacity(sources + 3);
         inputs.push(StreamInput {
             bytes: &indices,
             element_width: 2,
             string_lengths: None,
         });
-        for source in 0..DATA_SOURCES {
+        for source in 0..sources {
             inputs.push(StreamInput {
                 bytes: &field_bytes[source],
                 element_width: 1,
@@ -8030,7 +8035,7 @@ mod tests {
         let mut output = b"pre".to_vec();
         decode_dispatch_string_node_to_serial_output(
             &inputs,
-            (DATA_SOURCES + 2) as u32,
+            u32::from(DATA_SOURCES) + 2,
             &[],
             21,
             Limits::default(),
