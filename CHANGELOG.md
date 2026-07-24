@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Accept OpenZL format v27 metadata behind `dev-format`, including
+  `pivco_huffman` graph validation with a typed decode-time `Unsupported`
+  result.
+
 ## [0.1.0]
 
 - Initial release: decoder-first OpenZL implementation for standard-codec

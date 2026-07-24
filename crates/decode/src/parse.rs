@@ -15,7 +15,10 @@ type OutputSizeValues = SmallVec<[Option<u64>; 2]>;
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const MIN_FORMAT_VERSION: u32 = 8;
+#[cfg(not(feature = "dev-format"))]
 const MAX_FORMAT_VERSION: u32 = 26;
+#[cfg(feature = "dev-format")]
+const MAX_FORMAT_VERSION: u32 = 27;
 const CHUNK_VERSION_MIN: u32 = 21;
 const COMMENT_VERSION_MIN: u32 = 22;
 const MATERIALIZED_DICT_VERSION_MIN: u32 = 25;
@@ -982,6 +985,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::TOKENIZE_NUMERIC_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
+        | standard::PIVCO_HUFFMAN_ID
         | standard::SPARSE_NUM_ID
         | standard::SEPARATE_STRING_COMPONENTS_ID => Some(fixed_shape(2, 1)),
         standard::MUX_LENGTHS_ID => Some(fixed_shape(2, 2)),
@@ -2110,6 +2114,28 @@ mod tests {
         input
     }
 
+    fn pivco_huffman_frame(version: u32) -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(version));
+        input.push(0);
+        input.push(1);
+        input.push(1);
+        input.push(2);
+        input.push(2);
+        input.push(0);
+        input.push(67);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input
+    }
+
     fn assert_truncations_fail(input: &[u8], first_truncated_len: usize) {
         for end in first_truncated_len..input.len() {
             assert!(
@@ -2131,6 +2157,30 @@ mod tests {
         let err = inspect_frame(b"not-openzl", Limits::default()).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(err.offset(), Some(0));
+    }
+
+    #[cfg(not(feature = "dev-format"))]
+    #[test]
+    fn rejects_v27_without_dev_format() {
+        let err = inspect_frame(&magic(27), Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(err.offset(), Some(0));
+    }
+
+    #[cfg(feature = "dev-format")]
+    #[test]
+    fn parses_v27_pivco_huffman_transform() {
+        let input = pivco_huffman_frame(27);
+
+        let info = inspect_frame(&input, Limits::default()).unwrap();
+
+        assert_eq!(info.format_version, 27);
+        assert_eq!(info.decoded_bytes, Some(0));
+        assert_eq!(info.chunks, 1);
+        assert_eq!(info.transforms, 1);
+        assert_eq!(info.stored_streams, 2);
+        assert_eq!(info.regenerated_streams, 1);
     }
 
     #[test]
@@ -2445,6 +2495,15 @@ mod tests {
         input[..4].copy_from_slice(&magic(26));
         let info = inspect_frame(&input, Limits::default()).unwrap();
         assert_eq!(info.transforms, 1);
+    }
+
+    #[test]
+    fn enforces_pivco_huffman_min_version() {
+        let input = pivco_huffman_frame(26);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
 
     #[test]

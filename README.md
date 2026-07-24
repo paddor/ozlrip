@@ -35,7 +35,9 @@ the default decoder options are not the right fit.
   bitunpack, range-pack, flatpack, sparse num, partition, quantize
 - [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
 - [x] `paranoid` safe-code baseline
+- [x] OpenZL `dev-format` v27 metadata and PivCo-Huffman graph validation
 - [ ] Dictionary bundle materialization
+- [ ] PivCo-Huffman payload decode
 - [ ] External/custom codecs
 - [ ] Custom transform execution
 - [ ] Broad release-tag interop matrix

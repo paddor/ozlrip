@@ -1363,6 +1363,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
         | standard::TRANSPOSE_SPLIT2_ID
+        | standard::PIVCO_HUFFMAN_ID
         | standard::MUX_LENGTHS_ID => 2,
         standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
         standard::FIELD_LZ_ID => 5,
@@ -1638,6 +1639,8 @@ fn execute_standard_node(
         )),
         standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, ctx.limits)),
         standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, ctx.limits)),
+        standard::PIVCO_HUFFMAN_ID => Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("pivco_huffman decode is not implemented")),
         standard::QUANTIZE_OFFSETS_ID => one_typed(decode_quantize_node(
             inputs,
             header,
@@ -6642,6 +6645,29 @@ mod tests {
         standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
     }
 
+    #[cfg(feature = "dev-format")]
+    fn pivco_huffman_frame() -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(27));
+        input.push(0);
+        input.push(1);
+        input.push(1);
+        input.push(2);
+        input.push(2);
+        input.push(0);
+        input.push(67);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input
+    }
+
     fn bitpack_serial_frame(values: &[u8], bits: u8) -> Vec<u8> {
         let stored = pack_lsb_bits(values, bits);
         let max_elements = (stored.len() * 8) / usize::from(bits);
@@ -8812,6 +8838,23 @@ mod tests {
         let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "dev-format")]
+    #[test]
+    fn rejects_pivco_huffman_without_mutating_destination() {
+        let input = pivco_huffman_frame();
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.detail(),
+            Some("pivco_huffman decode is not implemented")
+        );
         assert_eq!(output, [1, 2]);
     }
 
