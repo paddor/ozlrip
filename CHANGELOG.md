@@ -3,8 +3,7 @@
 ## [Unreleased]
 
 - Accept OpenZL format v27 metadata behind `dev-format`, including
-  `pivco_huffman` graph validation with a typed decode-time `Unsupported`
-  result.
+  `pivco_huffman` graph validation and safe scalar payload decode.
 
 ## [0.1.0]
 

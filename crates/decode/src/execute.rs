@@ -1639,8 +1639,9 @@ fn execute_standard_node(
         )),
         standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, ctx.limits)),
         standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, ctx.limits)),
-        standard::PIVCO_HUFFMAN_ID => Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("pivco_huffman decode is not implemented")),
+        standard::PIVCO_HUFFMAN_ID => {
+            one_serial(pivco_huffman::decode_node(inputs, header, ctx.limits))
+        }
         standard::QUANTIZE_OFFSETS_ID => one_typed(decode_quantize_node(
             inputs,
             header,
@@ -6502,6 +6503,7 @@ fn verify_decoded_checksum(output: &[u8], expected: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+mod pivco_huffman;
 mod sparse_num;
 
 #[cfg(test)]
@@ -8843,18 +8845,14 @@ mod tests {
 
     #[cfg(feature = "dev-format")]
     #[test]
-    fn rejects_pivco_huffman_without_mutating_destination() {
+    fn decodes_empty_pivco_huffman_without_mutating_destination() {
         let input = pivco_huffman_frame();
         let plan = parse_frame_plan(&input, Limits::default()).unwrap();
         let mut output = vec![1, 2];
 
-        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+        let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
 
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert_eq!(
-            err.detail(),
-            Some("pivco_huffman decode is not implemented")
-        );
+        assert_eq!(written, 0);
         assert_eq!(output, [1, 2]);
     }
 

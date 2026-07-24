@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ozlrip = { path = ".." }
+ozlrip = { path = "..", features = ["dev-format"] }
 
 [[bin]]
 name = "parse_frame"
@@ -135,6 +135,13 @@ bench = false
 [[bin]]
 name = "decode_range_pack_node"
 path = "fuzz_targets/decode_range_pack_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_pivco_huffman_node"
+path = "fuzz_targets/decode_pivco_huffman_node.rs"
 test = false
 doc = false
 bench = false
