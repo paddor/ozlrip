@@ -45,11 +45,11 @@ pub(crate) fn decode_plan(
 ) -> Result<usize> {
     #[cfg(feature = "zstd")]
     let mut zstd = zrip::DecompressContext::new();
-    let dict_store = DictionaryStore::new();
+    let mut dict_store = DictionaryStore::new();
     let mut scratch = DecodeScratch::new();
     let mut runtime = DecodeRuntime::new(
         &mut scratch,
-        &dict_store,
+        &mut dict_store,
         #[cfg(feature = "zstd")]
         &mut zstd,
     );
@@ -99,7 +99,7 @@ impl DecodeScratch {
 pub(crate) struct DecodeRuntime<'a> {
     scratch: &'a mut DecodeScratch,
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
-    dict_store: &'a DictionaryStore,
+    dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
     zstd: &'a mut zrip::DecompressContext,
 }
@@ -107,7 +107,7 @@ pub(crate) struct DecodeRuntime<'a> {
 impl<'a> DecodeRuntime<'a> {
     pub(crate) fn new(
         scratch: &'a mut DecodeScratch,
-        dict_store: &'a DictionaryStore,
+        dict_store: &'a mut DictionaryStore,
         #[cfg(feature = "zstd")] zstd: &'a mut zrip::DecompressContext,
     ) -> Self {
         Self {
@@ -126,7 +126,14 @@ pub(crate) fn decode_plan_with_context(
     limits: Limits,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
-    decode_plan_with_optional_direct_append_plans(input, plan, None, dst, limits, runtime)
+    decode_plan_with_execution_mode(
+        input,
+        plan,
+        PlanExecutionMode::ComputeDirectAppend,
+        dst,
+        limits,
+        runtime,
+    )
 }
 
 pub(crate) fn decode_plan_with_cached_direct_append_plans(
@@ -137,20 +144,45 @@ pub(crate) fn decode_plan_with_cached_direct_append_plans(
     limits: Limits,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
-    decode_plan_with_optional_direct_append_plans(
+    decode_plan_with_execution_mode(
         input,
         plan,
-        Some(direct_append_plans),
+        PlanExecutionMode::UseDirectAppend(direct_append_plans),
         dst,
         limits,
         runtime,
     )
 }
 
-fn decode_plan_with_optional_direct_append_plans(
+pub(crate) fn decode_plan_with_cached_chunk_execution_plans(
     input: &[u8],
     plan: &FramePlan,
-    direct_append_plans: Option<&DirectAppendChunkPlans>,
+    chunk_execution_plans: &ChunkExecutionPlans,
+    dst: &mut Vec<u8>,
+    limits: Limits,
+    runtime: &mut DecodeRuntime<'_>,
+) -> Result<usize> {
+    decode_plan_with_execution_mode(
+        input,
+        plan,
+        PlanExecutionMode::UseChunkPlans(chunk_execution_plans),
+        dst,
+        limits,
+        runtime,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PlanExecutionMode<'a> {
+    ComputeDirectAppend,
+    UseDirectAppend(&'a DirectAppendChunkPlans),
+    UseChunkPlans(&'a ChunkExecutionPlans),
+}
+
+fn decode_plan_with_execution_mode(
+    input: &[u8],
+    plan: &FramePlan,
+    mode: PlanExecutionMode<'_>,
     dst: &mut Vec<u8>,
     limits: Limits,
     runtime: &mut DecodeRuntime<'_>,
@@ -165,7 +197,7 @@ fn decode_plan_with_optional_direct_append_plans(
     )? {
         return Ok(written);
     }
-    if let Some(chunk_plans) = direct_append_plans {
+    if let PlanExecutionMode::UseDirectAppend(chunk_plans) = mode {
         return decode_plan_appending_to_dst_with_rollback(
             input,
             plan,
@@ -175,10 +207,16 @@ fn decode_plan_with_optional_direct_append_plans(
             runtime,
         );
     }
-    if let Some(written) = try_decode_plan_appending_to_dst(input, plan, dst, limits, runtime)? {
+    if matches!(mode, PlanExecutionMode::ComputeDirectAppend)
+        && let Some(written) = try_decode_plan_appending_to_dst(input, plan, dst, limits, runtime)?
+    {
         return Ok(written);
     }
-    let decoded = collect_decoded_output(input, plan, limits, runtime)?;
+    let chunk_execution_plans = match mode {
+        PlanExecutionMode::UseChunkPlans(plans) => Some(plans),
+        PlanExecutionMode::ComputeDirectAppend | PlanExecutionMode::UseDirectAppend(_) => None,
+    };
+    let decoded = collect_decoded_output(input, plan, limits, chunk_execution_plans, runtime)?;
     let mut chunks = decoded.chunks;
     if dst.is_empty() && chunks.len() == 1 {
         match chunks.pop().expect("single decoded chunk exists") {
@@ -355,6 +393,28 @@ pub(crate) struct DirectAppendChunkPlans {
     chunk_plans: Vec<Option<ChunkExecutionPlan>>,
 }
 
+pub(crate) struct ChunkExecutionPlans {
+    chunk_plans: Vec<Option<ChunkExecutionPlan>>,
+}
+
+pub(crate) fn prepare_chunk_execution_plans(plan: &FramePlan) -> Result<ChunkExecutionPlans> {
+    let mut chunk_plans = Vec::new();
+    chunk_plans
+        .try_reserve_exact(plan.chunks.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail("chunk execution plan allocation failed")
+        })?;
+    for chunk in &plan.chunks {
+        if chunk.has_nodes() {
+            chunk_plans.push(Some(build_chunk_execution_plan(chunk)?));
+        } else {
+            chunk_plans.push(None);
+        }
+    }
+    Ok(ChunkExecutionPlans { chunk_plans })
+}
+
 fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<DirectAppendChunkPlans>> {
     let mut chunk_plans = Vec::new();
     chunk_plans
@@ -462,6 +522,7 @@ fn collect_decoded_output<'a>(
     input: &'a [u8],
     plan: &FramePlan,
     limits: Limits,
+    chunk_execution_plans: Option<&ChunkExecutionPlans>,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedOutput<'a>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
@@ -474,16 +535,41 @@ fn collect_decoded_output<'a>(
         Error::new(ErrorKind::LimitExceeded).with_detail("decoded output list allocation failed")
     })?;
     let mut total_len = 0usize;
-    for chunk in &plan.chunks {
+    let cached_chunk_plans = if let Some(plans) = chunk_execution_plans {
+        if plans.chunk_plans.len() != plan.chunks.len() {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("chunk execution plan count mismatch"));
+        }
+        Some(plans.chunk_plans.as_slice())
+    } else {
+        None
+    };
+    for (chunk_index, chunk) in plan.chunks.iter().enumerate() {
         let decoded = if chunk.has_nodes() {
-            decode_transform_chunk(
-                input,
-                chunk,
-                plan.info.format_version,
-                limits,
-                plan.info.dictionary_bundle_id.as_deref(),
-                runtime,
-            )?
+            if let Some(chunk_plans) = cached_chunk_plans {
+                let chunk_plan = chunk_plans[chunk_index].as_ref().ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidGraph)
+                        .with_detail("chunk execution plan is missing")
+                })?;
+                decode_transform_chunk_with_plan(
+                    input,
+                    chunk,
+                    chunk_plan,
+                    plan.info.format_version,
+                    limits,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )?
+            } else {
+                decode_transform_chunk(
+                    input,
+                    chunk,
+                    plan.info.format_version,
+                    limits,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )?
+            }
         } else {
             DecodedChunk::Borrowed(stored_only_chunk(input, chunk)?)
         };
@@ -522,6 +608,26 @@ fn decode_transform_chunk<'a>(
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedChunk<'a>> {
     let plan = build_chunk_execution_plan(chunk)?;
+    decode_transform_chunk_with_plan(
+        input,
+        chunk,
+        &plan,
+        format_version,
+        limits,
+        dictionary_bundle_id,
+        runtime,
+    )
+}
+
+fn decode_transform_chunk_with_plan<'a>(
+    input: &'a [u8],
+    chunk: &crate::parse::ChunkPlan,
+    plan: &ChunkExecutionPlan,
+    format_version: u32,
+    limits: Limits,
+    dictionary_bundle_id: Option<&[u8]>,
+    runtime: &mut DecodeRuntime<'_>,
+) -> Result<DecodedChunk<'a>> {
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
     let mut ctx = StandardNodeContext {
@@ -529,17 +635,17 @@ fn decode_transform_chunk<'a>(
         limits,
         scratch: &mut *runtime.scratch,
         dictionary_bundle_id,
-        dict_store: runtime.dict_store,
+        dict_store: &mut *runtime.dict_store,
         #[cfg(feature = "zstd")]
         zstd: &mut *runtime.zstd,
     };
 
-    for node in plan.nodes {
+    for node in &plan.nodes {
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        if try_execute_single_input_splitn_node(&mut streams, &node, header, limits)? {
+        if try_execute_single_input_splitn_node(&mut streams, node, header, limits)? {
             continue;
         }
-        if try_execute_byte_preserving_conversion_node(&mut streams, &node, header, limits)? {
+        if try_execute_byte_preserving_conversion_node(&mut streams, node, header, limits)? {
             continue;
         }
 
@@ -613,7 +719,7 @@ fn decode_transform_chunk_appending(
         limits,
         scratch: &mut *runtime.scratch,
         dictionary_bundle_id,
-        dict_store: runtime.dict_store,
+        dict_store: &mut *runtime.dict_store,
         #[cfg(feature = "zstd")]
         zstd: &mut *runtime.zstd,
     };
@@ -1444,7 +1550,7 @@ struct StandardNodeContext<'a> {
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
     dictionary_bundle_id: Option<&'a [u8]>,
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
-    dict_store: &'a DictionaryStore,
+    dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
     zstd: &'a mut zrip::DecompressContext,
 }
@@ -6330,14 +6436,8 @@ fn decode_zstd_chunk(
         let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
         })?;
-        let dict = ctx.dict_store.zstd_dict(bundle_id, dict_index)?;
-        let mut dict_zstd = zrip::DecompressContext::with_dict(dict.clone());
-        return decode_zstd_magicless_with_context(
-            magicless,
-            ctx.limits,
-            ctx.scratch,
-            &mut dict_zstd,
-        );
+        let dict_zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
+        return decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, dict_zstd);
     }
     decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, ctx.zstd)
 }

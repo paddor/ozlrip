@@ -46,13 +46,17 @@ impl DictionaryStore {
     }
 
     #[cfg(feature = "zstd")]
-    pub(crate) fn zstd_dict(&self, bundle_id: &[u8], dict_index: u32) -> Result<&zrip::Dictionary> {
+    pub(crate) fn zstd_context(
+        &mut self,
+        bundle_id: &[u8],
+        dict_index: u32,
+    ) -> Result<&mut zrip::DecompressContext> {
         let bundle_id: [u8; UNIQUE_ID_BYTES] = bundle_id.try_into().map_err(|_| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary bundle ID must be 32 bytes")
         })?;
         let bundle = self
             .bundles
-            .iter()
+            .iter_mut()
             .find(|bundle| bundle.id == bundle_id)
             .ok_or_else(|| {
                 Error::new(ErrorKind::Unsupported).with_detail("dictionary bundle is not loaded")
@@ -60,12 +64,12 @@ impl DictionaryStore {
         let index = usize::try_from(dict_index).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("dictionary index is too large")
         })?;
-        let loaded = bundle.dicts.get(index).ok_or_else(|| {
+        let loaded = bundle.dicts.get_mut(index).ok_or_else(|| {
             Error::new(ErrorKind::Unsupported)
                 .with_detail("dictionary index is not in loaded bundle")
         })?;
-        match &loaded.kind {
-            LoadedDictKind::Zstd(dict) => Ok(dict),
+        match &mut loaded.kind {
+            LoadedDictKind::Zstd { context } => Ok(context),
         }
     }
 }
@@ -83,7 +87,7 @@ struct LoadedDict {
 
 enum LoadedDictKind {
     #[cfg(feature = "zstd")]
-    Zstd(zrip::Dictionary),
+    Zstd { context: zrip::DecompressContext },
 }
 
 fn parse_fat_bundle(bytes: &[u8]) -> Result<DictionaryBundle> {
@@ -176,7 +180,9 @@ fn parse_zstd_dict(content: &[u8]) -> Result<LoadedDictKind> {
     {
         let dict = zrip::Dictionary::from_bytes(raw_dict)
             .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("invalid zstd dictionary"))?;
-        Ok(LoadedDictKind::Zstd(dict))
+        Ok(LoadedDictKind::Zstd {
+            context: zrip::DecompressContext::with_dict(dict),
+        })
     }
 
     #[cfg(not(feature = "zstd"))]

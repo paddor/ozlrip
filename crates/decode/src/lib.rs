@@ -52,6 +52,7 @@ struct CachedFramePlan {
     frame: Vec<u8>,
     plan: parse::FramePlan,
     direct_append_plans: Option<execute::DirectAppendChunkPlans>,
+    chunk_execution_plans: Option<execute::ChunkExecutionPlans>,
 }
 
 impl Decoder {
@@ -112,7 +113,7 @@ impl Decoder {
         {
             let mut runtime = execute::DecodeRuntime::new(
                 &mut self.scratch,
-                &self.dict_store,
+                &mut self.dict_store,
                 #[cfg(feature = "zstd")]
                 &mut self.zstd,
             );
@@ -121,6 +122,16 @@ impl Decoder {
                     input,
                     &cached.plan,
                     direct_append_plans,
+                    dst,
+                    self.options.limits,
+                    &mut runtime,
+                );
+            }
+            if let Some(chunk_execution_plans) = cached.chunk_execution_plans.as_ref() {
+                return execute::decode_plan_with_cached_chunk_execution_plans(
+                    input,
+                    &cached.plan,
+                    chunk_execution_plans,
                     dst,
                     self.options.limits,
                     &mut runtime,
@@ -139,7 +150,7 @@ impl Decoder {
         self.remember_frame_plan(input, &plan);
         let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
-            &self.dict_store,
+            &mut self.dict_store,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         );
@@ -163,10 +174,16 @@ impl Decoder {
         let direct_append_plans = execute::prepare_direct_append_chunk_plans(plan)
             .ok()
             .flatten();
+        let chunk_execution_plans = if direct_append_plans.is_some() {
+            None
+        } else {
+            execute::prepare_chunk_execution_plans(plan).ok()
+        };
         self.plan_cache = Some(CachedFramePlan {
             frame,
             plan: plan.clone(),
             direct_append_plans,
+            chunk_execution_plans,
         });
     }
 
