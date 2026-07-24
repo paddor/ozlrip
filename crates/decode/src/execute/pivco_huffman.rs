@@ -1,7 +1,11 @@
 use alloc::{vec, vec::Vec};
 use core::cmp;
 
+#[cfg(all(feature = "std", not(feature = "paranoid")))]
+use fearless_simd::{Level, Simd, mask8x16, prelude::*, u8x16};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
+#[cfg(all(feature = "std", not(feature = "paranoid")))]
+use std::sync::OnceLock;
 
 use super::{StreamInput, read_var_u64};
 
@@ -494,21 +498,185 @@ fn merge_results(
     output.try_reserve_exact(count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("pivco_huffman allocation failed")
     })?;
+
+    match (left, right) {
+        (DecodeResult::Constant(left), DecodeResult::Constant(right)) => {
+            merge_constant_constant(bitmap, count, *left, *right, &mut output);
+        }
+        (DecodeResult::Constant(left), DecodeResult::Bytes(right)) => {
+            if right.len() != right_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman decoded child size mismatch"));
+            }
+            let consumed = merge_constant_vector(bitmap, count, *left, right, &mut output);
+            if consumed != right_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman merge count mismatch"));
+            }
+        }
+        (DecodeResult::Bytes(left), DecodeResult::Constant(right)) => {
+            if left.len() != left_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman decoded child size mismatch"));
+            }
+            let consumed = merge_vector_constant(bitmap, count, left, *right, &mut output);
+            if consumed != left_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman merge count mismatch"));
+            }
+        }
+        (DecodeResult::Bytes(left), DecodeResult::Bytes(right)) => {
+            if left.len() != left_count || right.len() != right_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman decoded child size mismatch"));
+            }
+            let (left_consumed, right_consumed) =
+                merge_vector_vector(bitmap, count, left, right, &mut output);
+            if left_consumed != left_count || right_consumed != right_count {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("pivco_huffman merge count mismatch"));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn merge_constant_constant(bitmap: &[u8], count: usize, left: u8, right: u8, output: &mut Vec<u8>) {
+    #[cfg(all(feature = "std", not(feature = "paranoid")))]
+    if count >= 16 {
+        merge_constant_constant_simd(bitmap, count, left, right, output);
+        return;
+    }
+
+    merge_constant_constant_scalar(bitmap, count, left, right, output);
+}
+
+#[cfg(all(feature = "std", not(feature = "paranoid")))]
+fn merge_constant_constant_simd(
+    bitmap: &[u8],
+    count: usize,
+    left: u8,
+    right: u8,
+    output: &mut Vec<u8>,
+) {
+    let level = pivco_simd_level();
+    fearless_simd::dispatch!(
+        level,
+        simd => merge_constant_constant_simd_impl(simd, bitmap, count, left, right, output)
+    );
+}
+
+#[cfg(all(feature = "std", not(feature = "paranoid")))]
+fn pivco_simd_level() -> Level {
+    static LEVEL: OnceLock<Level> = OnceLock::new();
+    *LEVEL.get_or_init(Level::new)
+}
+
+#[cfg(all(feature = "std", not(feature = "paranoid")))]
+#[allow(
+    clippy::inline_always,
+    reason = "fearless_simd dispatch needs inlining for target-feature codegen"
+)]
+#[inline(always)]
+fn merge_constant_constant_simd_impl<S: Simd>(
+    simd: S,
+    bitmap: &[u8],
+    count: usize,
+    left: u8,
+    right: u8,
+    output: &mut Vec<u8>,
+) {
+    let left_values = u8x16::splat(simd, left);
+    let right_values = u8x16::splat(simd, right);
+    let full_chunks = count / 16;
+    let mut chunk_output = [0u8; 16];
+
+    for chunk in 0..full_chunks {
+        let byte_offset = chunk * 2;
+        let bits = u64::from(bitmap[byte_offset]) | (u64::from(bitmap[byte_offset + 1]) << 8);
+        let mask = mask8x16::from_bitmask(simd, bits);
+        let values = mask.select(right_values, left_values);
+        values.store_slice(&mut chunk_output);
+        output.extend_from_slice(&chunk_output);
+    }
+
+    let decoded = full_chunks * 16;
+    merge_constant_constant_scalar(&bitmap[decoded / 8..], count - decoded, left, right, output);
+}
+
+fn merge_constant_constant_scalar(
+    bitmap: &[u8],
+    count: usize,
+    left: u8,
+    right: u8,
+    output: &mut Vec<u8>,
+) {
+    for index in 0..count {
+        output.push(if bitmap_bit(bitmap, index) {
+            right
+        } else {
+            left
+        });
+    }
+}
+
+fn merge_constant_vector(
+    bitmap: &[u8],
+    count: usize,
+    left: u8,
+    right: &[u8],
+    output: &mut Vec<u8>,
+) -> usize {
+    let mut right_index = 0usize;
+    for index in 0..count {
+        if bitmap_bit(bitmap, index) {
+            output.push(right[right_index]);
+            right_index += 1;
+        } else {
+            output.push(left);
+        }
+    }
+    right_index
+}
+
+fn merge_vector_constant(
+    bitmap: &[u8],
+    count: usize,
+    left: &[u8],
+    right: u8,
+    output: &mut Vec<u8>,
+) -> usize {
+    let mut left_index = 0usize;
+    for index in 0..count {
+        if bitmap_bit(bitmap, index) {
+            output.push(right);
+        } else {
+            output.push(left[left_index]);
+            left_index += 1;
+        }
+    }
+    left_index
+}
+
+fn merge_vector_vector(
+    bitmap: &[u8],
+    count: usize,
+    left: &[u8],
+    right: &[u8],
+    output: &mut Vec<u8>,
+) -> (usize, usize) {
     let mut left_index = 0usize;
     let mut right_index = 0usize;
     for index in 0..count {
         if bitmap_bit(bitmap, index) {
-            output.push(next_decoded_byte(right, &mut right_index)?);
+            output.push(right[right_index]);
+            right_index += 1;
         } else {
-            output.push(next_decoded_byte(left, &mut left_index)?);
+            output.push(left[left_index]);
+            left_index += 1;
         }
     }
-    if left_index != left_count || right_index != right_count {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("pivco_huffman merge count mismatch")
-        );
-    }
-    Ok(output)
+    (left_index, right_index)
 }
 
 fn append_result(output: &mut Vec<u8>, result: DecodeResult, count: usize) -> Result<()> {
@@ -523,27 +691,6 @@ fn append_result(output: &mut Vec<u8>, result: DecodeResult, count: usize) -> Re
         }
     }
     Ok(())
-}
-
-fn next_decoded_byte(result: &DecodeResult, index: &mut usize) -> Result<u8> {
-    match result {
-        DecodeResult::Constant(symbol) => {
-            *index = index
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            Ok(*symbol)
-        }
-        DecodeResult::Bytes(bytes) => {
-            let byte = *bytes.get(*index).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed)
-                    .with_detail("pivco_huffman decoded child is truncated")
-            })?;
-            *index = index
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            Ok(byte)
-        }
-    }
 }
 
 struct PivCoBitReader<'a> {
@@ -649,9 +796,17 @@ fn bits_needed(max_value: usize) -> usize {
 }
 
 fn bitmap_ones(bitmap: &[u8], count: usize) -> usize {
-    (0..count)
-        .filter(|&index| bitmap_bit(bitmap, index))
-        .count()
+    let full_bytes = count / 8;
+    let mut ones = bitmap[..full_bytes]
+        .iter()
+        .map(|byte| byte.count_ones() as usize)
+        .sum::<usize>();
+    let remaining = count % 8;
+    if remaining != 0 {
+        let mask = (1u8 << remaining) - 1;
+        ones += (bitmap[full_bytes] & mask).count_ones() as usize;
+    }
+    ones
 }
 
 fn bitmap_bit(bitmap: &[u8], index: usize) -> bool {
@@ -730,6 +885,23 @@ mod tests {
         let output = decode(&weights, &[0b0000_0010], &header(3, None)).unwrap();
 
         assert_eq!(output, [0, 1, 0]);
+    }
+
+    #[test]
+    fn decodes_constant_children_across_vector_chunk() {
+        let weights = [1, 1];
+
+        let output = decode(
+            &weights,
+            &[0b1010_1010, 0b0101_0101, 0b0000_1010],
+            &header(20, None),
+        )
+        .unwrap();
+
+        assert_eq!(
+            output,
+            [0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1]
+        );
     }
 
     #[test]
