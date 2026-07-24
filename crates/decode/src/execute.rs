@@ -13,7 +13,7 @@ use zrip_core::{
 
 #[cfg(feature = "zstd")]
 use crate::parse::SingleZstdFrame;
-use crate::{parse::FramePlan, standard};
+use crate::{dict::DictionaryStore, parse::FramePlan, standard};
 
 mod fast_bitpack;
 mod fast_bitreader;
@@ -45,16 +45,15 @@ pub(crate) fn decode_plan(
 ) -> Result<usize> {
     #[cfg(feature = "zstd")]
     let mut zstd = zrip::DecompressContext::new();
+    let dict_store = DictionaryStore::new();
     let mut scratch = DecodeScratch::new();
-    decode_plan_with_context(
-        input,
-        plan,
-        dst,
-        limits,
+    let mut runtime = DecodeRuntime::new(
         &mut scratch,
+        &dict_store,
         #[cfg(feature = "zstd")]
         &mut zstd,
-    )
+    );
+    decode_plan_with_context(input, plan, dst, limits, &mut runtime)
 }
 
 #[derive(Default)]
@@ -97,24 +96,37 @@ impl DecodeScratch {
     }
 }
 
+pub(crate) struct DecodeRuntime<'a> {
+    scratch: &'a mut DecodeScratch,
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    dict_store: &'a DictionaryStore,
+    #[cfg(feature = "zstd")]
+    zstd: &'a mut zrip::DecompressContext,
+}
+
+impl<'a> DecodeRuntime<'a> {
+    pub(crate) fn new(
+        scratch: &'a mut DecodeScratch,
+        dict_store: &'a DictionaryStore,
+        #[cfg(feature = "zstd")] zstd: &'a mut zrip::DecompressContext,
+    ) -> Self {
+        Self {
+            scratch,
+            dict_store,
+            #[cfg(feature = "zstd")]
+            zstd,
+        }
+    }
+}
+
 pub(crate) fn decode_plan_with_context(
     input: &[u8],
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
-    decode_plan_with_optional_direct_append_plans(
-        input,
-        plan,
-        None,
-        dst,
-        limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
-    )
+    decode_plan_with_optional_direct_append_plans(input, plan, None, dst, limits, runtime)
 }
 
 pub(crate) fn decode_plan_with_cached_direct_append_plans(
@@ -123,8 +135,7 @@ pub(crate) fn decode_plan_with_cached_direct_append_plans(
     direct_append_plans: &DirectAppendChunkPlans,
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     decode_plan_with_optional_direct_append_plans(
         input,
@@ -132,9 +143,7 @@ pub(crate) fn decode_plan_with_cached_direct_append_plans(
         Some(direct_append_plans),
         dst,
         limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
+        runtime,
     )
 }
 
@@ -144,20 +153,15 @@ fn decode_plan_with_optional_direct_append_plans(
     direct_append_plans: Option<&DirectAppendChunkPlans>,
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
-    if plan.info.dictionary_bundle_id.is_some() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("dictionary bundle materialization is not implemented"));
-    }
     if let Some(written) = try_decode_single_zstd_into_dst(
         input,
         plan,
         dst,
         limits,
         #[cfg(feature = "zstd")]
-        zstd,
+        runtime.zstd,
     )? {
         return Ok(written);
     }
@@ -168,30 +172,13 @@ fn decode_plan_with_optional_direct_append_plans(
             chunk_plans,
             dst,
             limits,
-            scratch,
-            #[cfg(feature = "zstd")]
-            zstd,
+            runtime,
         );
     }
-    if let Some(written) = try_decode_plan_appending_to_dst(
-        input,
-        plan,
-        dst,
-        limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
-    )? {
+    if let Some(written) = try_decode_plan_appending_to_dst(input, plan, dst, limits, runtime)? {
         return Ok(written);
     }
-    let decoded = collect_decoded_output(
-        input,
-        plan,
-        limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
-    )?;
+    let decoded = collect_decoded_output(input, plan, limits, runtime)?;
     let mut chunks = decoded.chunks;
     if dst.is_empty() && chunks.len() == 1 {
         match chunks.pop().expect("single decoded chunk exists") {
@@ -282,6 +269,7 @@ fn try_decode_single_zstd_into_dst(
     if node.standard_id() != Some(standard::ZSTD_ID)
         || node.variable_outputs() != 0
         || node.regen_distances() != [0]
+        || node.dict_index().is_some()
         || node.transform_header_size() != 0
         || node.transform_header_start() != 0
         || chunk.stored_streams() != 1
@@ -350,8 +338,7 @@ fn try_decode_plan_appending_to_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Ok(None);
@@ -359,17 +346,8 @@ fn try_decode_plan_appending_to_dst(
     let Some(chunk_plans) = direct_append_chunk_plans(plan)? else {
         return Ok(None);
     };
-    decode_plan_appending_to_dst_with_rollback(
-        input,
-        plan,
-        &chunk_plans,
-        dst,
-        limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
-    )
-    .map(Some)
+    decode_plan_appending_to_dst_with_rollback(input, plan, &chunk_plans, dst, limits, runtime)
+        .map(Some)
 }
 
 #[derive(Clone)]
@@ -407,8 +385,7 @@ fn decode_plan_appending_to_dst_with_rollback(
     chunk_plans: &DirectAppendChunkPlans,
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
         let expected = usize::try_from(expected).map_err(|_| {
@@ -420,16 +397,8 @@ fn decode_plan_appending_to_dst_with_rollback(
     }
 
     let start_len = dst.len();
-    let result = decode_plan_appending_to_dst(
-        input,
-        plan,
-        &chunk_plans.chunk_plans,
-        dst,
-        limits,
-        scratch,
-        #[cfg(feature = "zstd")]
-        zstd,
-    );
+    let result =
+        decode_plan_appending_to_dst(input, plan, &chunk_plans.chunk_plans, dst, limits, runtime);
     match result {
         Ok(written) => Ok(written),
         Err(err) => {
@@ -445,8 +414,7 @@ fn decode_plan_appending_to_dst(
     chunk_plans: &[Option<ChunkExecutionPlan>],
     dst: &mut Vec<u8>,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     let start_len = dst.len();
     let mut total_len = 0usize;
@@ -470,9 +438,8 @@ fn decode_plan_appending_to_dst(
                 plan.info.format_version,
                 limits,
                 dst,
-                scratch,
-                #[cfg(feature = "zstd")]
-                zstd,
+                plan.info.dictionary_bundle_id.as_deref(),
+                runtime,
             )?;
         } else {
             let stored = stored_only_chunk(input, chunk)?;
@@ -495,8 +462,7 @@ fn collect_decoded_output<'a>(
     input: &'a [u8],
     plan: &FramePlan,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedOutput<'a>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Err(Error::new(ErrorKind::Unsupported)
@@ -515,9 +481,8 @@ fn collect_decoded_output<'a>(
                 chunk,
                 plan.info.format_version,
                 limits,
-                scratch,
-                #[cfg(feature = "zstd")]
-                zstd,
+                plan.info.dictionary_bundle_id.as_deref(),
+                runtime,
             )?
         } else {
             DecodedChunk::Borrowed(stored_only_chunk(input, chunk)?)
@@ -553,8 +518,8 @@ fn decode_transform_chunk<'a>(
     chunk: &crate::parse::ChunkPlan,
     format_version: u32,
     limits: Limits,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    dictionary_bundle_id: Option<&[u8]>,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedChunk<'a>> {
     let plan = build_chunk_execution_plan(chunk)?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
@@ -562,9 +527,11 @@ fn decode_transform_chunk<'a>(
     let mut ctx = StandardNodeContext {
         format_version,
         limits,
-        scratch,
+        scratch: &mut *runtime.scratch,
+        dictionary_bundle_id,
+        dict_store: runtime.dict_store,
         #[cfg(feature = "zstd")]
-        zstd,
+        zstd: &mut *runtime.zstd,
     };
 
     for node in plan.nodes {
@@ -584,6 +551,7 @@ fn decode_transform_chunk<'a>(
                 node.standard_id,
                 &inputs,
                 node.variable_inputs,
+                node.dict_index,
                 header,
                 &mut ctx,
             )?
@@ -630,8 +598,8 @@ fn decode_transform_chunk_appending(
     format_version: u32,
     limits: Limits,
     dst: &mut Vec<u8>,
-    scratch: &mut DecodeScratch,
-    #[cfg(feature = "zstd")] zstd: &mut zrip::DecompressContext,
+    dictionary_bundle_id: Option<&[u8]>,
+    runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     let plan = chunk.execution;
     let chunk = chunk.chunk;
@@ -643,9 +611,11 @@ fn decode_transform_chunk_appending(
     let mut ctx = StandardNodeContext {
         format_version,
         limits,
-        scratch,
+        scratch: &mut *runtime.scratch,
+        dictionary_bundle_id,
+        dict_store: runtime.dict_store,
         #[cfg(feature = "zstd")]
-        zstd,
+        zstd: &mut *runtime.zstd,
     };
 
     for (node_index, node) in plan.nodes.iter().enumerate() {
@@ -717,6 +687,7 @@ fn decode_transform_chunk_appending(
                 node.standard_id,
                 &inputs,
                 node.variable_inputs,
+                node.dict_index,
                 header,
                 &mut ctx,
             )?
@@ -1258,6 +1229,7 @@ struct NodeExecutionPlan {
     input_count: usize,
     output_targets: SmallVec<[usize; 2]>,
     variable_inputs: u32,
+    dict_index: Option<u32>,
     header_start: usize,
     header_size: usize,
 }
@@ -1329,6 +1301,7 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
             input_count,
             output_targets,
             variable_inputs: node.variable_outputs(),
+            dict_index: node.dict_index(),
             header_start: node.transform_header_start(),
             header_size: node.transform_header_size(),
         });
@@ -1468,6 +1441,10 @@ struct StandardNodeContext<'a> {
     format_version: u32,
     limits: Limits,
     scratch: &'a mut DecodeScratch,
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    dictionary_bundle_id: Option<&'a [u8]>,
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    dict_store: &'a DictionaryStore,
     #[cfg(feature = "zstd")]
     zstd: &'a mut zrip::DecompressContext,
 }
@@ -1476,9 +1453,15 @@ fn execute_standard_node(
     standard_id: u32,
     inputs: &[StreamInput<'_>],
     variable_inputs: u32,
+    dict_index: Option<u32>,
     header: &[u8],
     ctx: &mut StandardNodeContext<'_>,
 ) -> Result<SmallVec<[OwnedStream; 2]>> {
+    if dict_index.is_some() && standard_id != standard::ZSTD_ID {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only zstd dictionary-backed transforms are implemented"));
+    }
+
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
             decode_concat_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
@@ -1536,11 +1519,8 @@ fn execute_standard_node(
         standard::ZSTD_ID => one_serial(decode_zstd_chunk(
             single_input(inputs)?,
             header,
-            ctx.limits,
-            #[cfg(feature = "zstd")]
-            ctx.scratch,
-            #[cfg(feature = "zstd")]
-            ctx.zstd,
+            dict_index,
+            ctx,
         )),
         standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
             single_input(inputs)?,
@@ -6330,9 +6310,8 @@ fn decode_lz4_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<V
 fn decode_zstd_chunk(
     stored: &[u8],
     header: &[u8],
-    limits: Limits,
-    scratch: &mut DecodeScratch,
-    zstd: &mut zrip::DecompressContext,
+    dict_index: Option<u32>,
+    ctx: &mut StandardNodeContext<'_>,
 ) -> Result<Vec<u8>> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
@@ -6347,6 +6326,29 @@ fn decode_zstd_chunk(
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    if let Some(dict_index) = dict_index {
+        let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
+        })?;
+        let dict = ctx.dict_store.zstd_dict(bundle_id, dict_index)?;
+        let mut dict_zstd = zrip::DecompressContext::with_dict(dict.clone());
+        return decode_zstd_magicless_with_context(
+            magicless,
+            ctx.limits,
+            ctx.scratch,
+            &mut dict_zstd,
+        );
+    }
+    decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, ctx.zstd)
+}
+
+#[cfg(feature = "zstd")]
+fn decode_zstd_magicless_with_context(
+    magicless: &[u8],
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+    zstd: &mut zrip::DecompressContext,
+) -> Result<Vec<u8>> {
     if !magicless.is_empty() {
         let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
         let written = match zstd.decompress_after_magic_into(
@@ -6391,7 +6393,12 @@ fn map_zstd_error(err: &zrip::DecompressError) -> Error {
 }
 
 #[cfg(not(feature = "zstd"))]
-fn decode_zstd_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<Vec<u8>> {
+fn decode_zstd_chunk(
+    _stored: &[u8],
+    _header: &[u8],
+    _dict_index: Option<u32>,
+    _ctx: &mut StandardNodeContext<'_>,
+) -> Result<Vec<u8>> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
 }
 

@@ -5,6 +5,8 @@
 - Accept OpenZL format v27 metadata behind `dev-format`, including
   `pivco_huffman` graph validation, safe scalar payload decode, and std-gated
   SIMD merge acceleration.
+- Load OpenZL fat dictionary bundles through `Decoder` and decode
+  zstd-dictionary-backed frames.
 
 ## [0.1.0]
 

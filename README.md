@@ -37,7 +37,7 @@ the default decoder options are not the right fit.
 - [x] `paranoid` safe-code baseline
 - [x] OpenZL `dev-format` v27 metadata and PivCo-Huffman graph validation
 - [x] PivCo-Huffman payload decode, safe scalar path, and std-gated SIMD merge
-- [ ] Dictionary bundle materialization
+- [x] Fat-bundle dictionary materialization for zstd
 - [ ] External/custom codecs
 - [ ] Custom transform execution
 - [ ] Broad release-tag interop matrix

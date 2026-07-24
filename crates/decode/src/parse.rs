@@ -1946,6 +1946,10 @@ impl NodePlan {
     pub(crate) const fn transform_header_size(&self) -> usize {
         self.transform_header_size
     }
+
+    pub(crate) const fn dict_index(&self) -> Option<u32> {
+        self.dict_index
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -6,9 +6,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 use ozlrip_core::{FrameInfo, Limits, Result};
 
+mod dict;
 mod execute;
 mod parse;
 mod standard;
+
+use dict::DictionaryStore;
 
 pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
 
@@ -39,6 +42,7 @@ impl Default for Options {
 pub struct Decoder {
     options: Options,
     scratch: execute::DecodeScratch,
+    dict_store: DictionaryStore,
     plan_cache: Option<CachedFramePlan>,
     #[cfg(feature = "zstd")]
     zstd: zrip::DecompressContext,
@@ -61,6 +65,7 @@ impl Decoder {
         Self {
             options,
             scratch: execute::DecodeScratch::new(),
+            dict_store: DictionaryStore::new(),
             plan_cache: None,
             #[cfg(feature = "zstd")]
             zstd: zrip::DecompressContext::new(),
@@ -73,6 +78,18 @@ impl Decoder {
 
     pub fn limits(&self) -> Limits {
         self.options.limits
+    }
+
+    /// Loads a fat OpenZL dictionary bundle for later dictionary-backed decode.
+    ///
+    /// Currently only zstd dictionary materialization is implemented.
+    pub fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
+        self.dict_store.load_fat_bundle(bytes)
+    }
+
+    /// Clears all loaded dictionary bundles.
+    pub fn clear_dictionary_bundles(&mut self) {
+        self.dict_store.clear();
     }
 
     /// Decodes one OpenZL frame and appends the decoded bytes to `dst`.
@@ -93,6 +110,12 @@ impl Decoder {
         if let Some(cached) = self.plan_cache.as_ref()
             && cached.frame == input
         {
+            let mut runtime = execute::DecodeRuntime::new(
+                &mut self.scratch,
+                &self.dict_store,
+                #[cfg(feature = "zstd")]
+                &mut self.zstd,
+            );
             if let Some(direct_append_plans) = cached.direct_append_plans.as_ref() {
                 return execute::decode_plan_with_cached_direct_append_plans(
                     input,
@@ -100,9 +123,7 @@ impl Decoder {
                     direct_append_plans,
                     dst,
                     self.options.limits,
-                    &mut self.scratch,
-                    #[cfg(feature = "zstd")]
-                    &mut self.zstd,
+                    &mut runtime,
                 );
             }
             return execute::decode_plan_with_context(
@@ -110,23 +131,19 @@ impl Decoder {
                 &cached.plan,
                 dst,
                 self.options.limits,
-                &mut self.scratch,
-                #[cfg(feature = "zstd")]
-                &mut self.zstd,
+                &mut runtime,
             );
         }
 
         let plan = parse::parse_frame_plan(input, self.options.limits)?;
         self.remember_frame_plan(input, &plan);
-        execute::decode_plan_with_context(
-            input,
-            &plan,
-            dst,
-            self.options.limits,
+        let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
+            &self.dict_store,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
-        )
+        );
+        execute::decode_plan_with_context(input, &plan, dst, self.options.limits, &mut runtime)
     }
 
     fn remember_frame_plan(&mut self, input: &[u8], plan: &parse::FramePlan) {
@@ -207,4 +224,198 @@ pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
 /// Parses and validates frame metadata using explicit options.
 pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo> {
     Decoder::with_options(options).inspect(input)
+}
+
+#[cfg(all(test, feature = "zstd"))]
+mod tests {
+    use super::*;
+    use ozlrip_core::ErrorKind;
+
+    const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+    const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
+    const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
+    const BUNDLE_ID: [u8; 32] = [7; 32];
+    const OTHER_BUNDLE_ID: [u8; 32] = [8; 32];
+    const DICT_ID: [u8; 32] = [9; 32];
+
+    fn magic(version: u32) -> [u8; 4] {
+        (MAGIC_BASE + version).to_le_bytes()
+    }
+
+    fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
+            value >>= 7;
+        }
+        out.push(u8::try_from(value).unwrap());
+    }
+
+    #[cfg(feature = "zstd")]
+    fn test_zstd_dict_bytes() -> Vec<u8> {
+        use zrip_core::dict::DICT_MAGIC;
+        use zrip_core::fse::table_builder::serialize_fse_table_description;
+
+        let mut dict = Vec::new();
+        dict.extend_from_slice(&DICT_MAGIC.to_le_bytes());
+        dict.extend_from_slice(&1u32.to_le_bytes());
+        dict.push(128);
+        dict.push(0x10);
+
+        let mut of_dist = vec![0i16; 32];
+        of_dist[0] = 1 << 8;
+        dict.extend_from_slice(&serialize_fse_table_description(&of_dist, 8));
+
+        let mut ml_dist = vec![0i16; 53];
+        ml_dist[0] = 1 << 6;
+        dict.extend_from_slice(&serialize_fse_table_description(&ml_dist, 6));
+
+        let mut ll_dist = vec![0i16; 36];
+        ll_dist[0] = 1 << 6;
+        dict.extend_from_slice(&serialize_fse_table_description(&ll_dist, 6));
+
+        dict.extend_from_slice(&1u32.to_le_bytes());
+        dict.extend_from_slice(&4u32.to_le_bytes());
+        dict.extend_from_slice(&8u32.to_le_bytes());
+        dict.extend_from_slice(b"dictionary-backed OpenZL zstd content");
+        dict
+    }
+
+    #[cfg(feature = "zstd")]
+    fn fat_bundle(bundle_id: [u8; 32], raw_dict: &[u8]) -> Vec<u8> {
+        let mut content = Vec::new();
+        content.extend_from_slice(&1u32.to_le_bytes());
+        content.extend_from_slice(&1i32.to_le_bytes());
+        content.extend_from_slice(raw_dict);
+
+        let mut bundle = Vec::new();
+        bundle.extend_from_slice(&BUNDLE_INFO_MAGIC.to_le_bytes());
+        bundle.extend_from_slice(&bundle_id);
+        bundle.push(1);
+        bundle.extend_from_slice(&1u32.to_le_bytes());
+        bundle.extend_from_slice(&DICT_ID);
+        bundle.extend_from_slice(&PACKED_DICT_MAGIC.to_le_bytes());
+        bundle.extend_from_slice(&DICT_ID);
+        bundle.extend_from_slice(&standard::ZSTD_ID.to_le_bytes());
+        bundle.push(0);
+        bundle.extend_from_slice(&u32::try_from(content.len()).unwrap().to_le_bytes());
+        bundle.extend_from_slice(&content);
+        bundle
+    }
+
+    #[cfg(feature = "zstd")]
+    fn zstd_dict_frame(bundle_id: &[u8], stored: &[u8], decoded_len: usize) -> Vec<u8> {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(25));
+        input.push(1 << 3);
+        input.push(u8::try_from(bundle_id.len()).unwrap());
+        input.extend_from_slice(bundle_id);
+        input.push(1);
+        push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+        input.push(2);
+        input.push(1);
+        input.push(0);
+        input.push(u8::try_from(standard::ZSTD_ID).unwrap());
+        input.push(0);
+        input.push(0);
+        input.push(0);
+        input.push(1);
+        input.push(0);
+        input.push(0);
+        push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
+        input.extend_from_slice(stored);
+        input.push(0);
+        input
+    }
+
+    #[cfg(feature = "zstd")]
+    fn push_zstd_block_header(out: &mut Vec<u8>, last: bool, block_type: u32, block_size: usize) {
+        let raw = ((block_size as u32) << 3) | (block_type << 1) | u32::from(last);
+        out.push(raw as u8);
+        out.push((raw >> 8) as u8);
+        out.push((raw >> 16) as u8);
+    }
+
+    #[cfg(feature = "zstd")]
+    fn zstd_raw_frame_with_dict_id(bytes: &[u8], dict_id: u8) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&zrip_core::frame::ZSTD_MAGIC.to_le_bytes());
+        frame.push(0x21);
+        frame.push(dict_id);
+        frame.push(u8::try_from(bytes.len()).unwrap());
+        push_zstd_block_header(&mut frame, true, 0, bytes.len());
+        frame.extend_from_slice(bytes);
+        frame
+    }
+
+    #[cfg(feature = "zstd")]
+    fn zstd_dict_test_frame() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let raw_dict = test_zstd_dict_bytes();
+        let expected = b"dictionary-backed OpenZL zstd frame".to_vec();
+        let compressed = zstd_raw_frame_with_dict_id(&expected, 1);
+        let mut stored = Vec::new();
+        push_var_u64(&mut stored, 1);
+        stored.extend_from_slice(&compressed[4..]);
+        let frame = zstd_dict_frame(&BUNDLE_ID, &stored, expected.len());
+        (frame, fat_bundle(BUNDLE_ID, &raw_dict), expected)
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn decodes_zstd_dictionary_frame_after_loading_bundle() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.load_fat_bundle(&bundle).unwrap();
+        let mut output = vec![1, 2];
+
+        let written = decoder.decode_into(&frame, &mut output).unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(&output[..2], &[1, 2]);
+        assert_eq!(&output[2..], expected);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_dictionary_frame_without_loaded_bundle_without_mutating_destination() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        let mut output = vec![1, 2];
+
+        let err = decoder.decode_into(&frame, &mut output).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_dictionary_frame_with_wrong_bundle_without_mutating_destination() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let raw_dict = test_zstd_dict_bytes();
+        let mut decoder = Decoder::new();
+        decoder
+            .load_fat_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
+            .unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decoder.decode_into(&frame, &mut output).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn clear_dictionary_bundles_drops_loaded_bundle() {
+        let (frame, bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.load_fat_bundle(&bundle).unwrap();
+        decoder.clear_dictionary_bundles();
+        let mut output = vec![1, 2];
+
+        let err = decoder.decode_into(&frame, &mut output).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
 }

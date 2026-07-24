@@ -147,6 +147,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "load_fat_bundle"
+path = "fuzz_targets/load_fat_bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_two_node_graph"
 path = "fuzz_targets/decode_two_node_graph.rs"
 test = false

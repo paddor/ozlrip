@@ -102,14 +102,14 @@ fn decode_into_preserves_destination_on_unsupported_graph() {
 }
 
 #[test]
-fn decode_into_preserves_destination_on_dictionary_bundle() {
+fn decode_into_accepts_unused_dictionary_bundle_id() {
     let frame = bundled_stored_frame(&[7, 8, 9]);
     let mut dst = vec![1, 2, 3];
 
-    let err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
+    let written = ozlrip::decode_into(&frame, &mut dst).unwrap();
 
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(dst, [1, 2, 3]);
+    assert_eq!(written, 3);
+    assert_eq!(dst, [1, 2, 3, 7, 8, 9]);
     assert_eq!(
         ozlrip::inspect(&frame)
             .unwrap()
