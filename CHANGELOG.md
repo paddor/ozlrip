@@ -11,6 +11,7 @@
   committed manifests.
 - Add fuzz entry points for public-frame Field-LZ and dispatch-string graphs.
 - Decode OpenZL `constant_fixed` typed repeat streams.
+- Speed up constant repeat fills and quantized numeric reconstruction.
 - Pin public API behavior for custom transforms and unsupported dictionary
   materializers to typed `Unsupported` errors.
 

@@ -139,24 +139,37 @@ pub(super) fn decode_quantize_node(
         );
     }
 
+    let mut base_table = [0u32; 256];
+    let mut bit_table = [u8::MAX; 256];
+    let mut mask_table = [0u32; 256];
+    for (code, (&bits, &base)) in params.bits.iter().zip(params.base).enumerate() {
+        base_table[code] = base;
+        bit_table[code] = bits;
+        mask_table[code] = bit_mask_u32(bits);
+    }
+
     let mut reader = ForwardBitReader::new(extra_bits.bytes);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("quantize allocation failed")
     })?;
+    output.resize(output_len, 0);
+    let mut out_pos = 0usize;
     for &code in codes.bytes {
         let code_index = usize::from(code);
-        let bits = *params.bits.get(code_index).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("quantize code is out of range")
-        })?;
-        let base = *params.base.get(code_index).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("quantize code is out of range")
-        })?;
-        let extra = reader.read(u32::from(bits))?;
+        let bits = bit_table[code_index];
+        if bits == u8::MAX {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("quantize code is out of range")
+            );
+        }
+        let base = base_table[code_index];
+        let extra = reader.read_u32_window(usize::from(bits), mask_table[code_index])?;
         let value = base
             .checked_add(extra)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        output.extend_from_slice(&value.to_le_bytes());
+        output[out_pos..out_pos + 4].copy_from_slice(&value.to_le_bytes());
+        out_pos += 4;
     }
     reader.finish_zero_padding()?;
     Ok(OwnedStream {
@@ -165,6 +178,14 @@ pub(super) fn decode_quantize_node(
         string_lengths: None,
         recyclable: false,
     })
+}
+
+fn bit_mask_u32(bits: u8) -> u32 {
+    if bits == 32 {
+        u32::MAX
+    } else {
+        (1u32 << bits) - 1
+    }
 }
 
 const PARTITION_MAX_PARTITIONS: usize = 256;
@@ -545,20 +566,6 @@ pub(super) struct ForwardBitReader<'a> {
 impl<'a> ForwardBitReader<'a> {
     pub(super) const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, bit_pos: 0 }
-    }
-
-    pub(super) fn read(&mut self, bits: u32) -> Result<u32> {
-        if bits > 31 {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("forward bit width is unsupported")
-            );
-        }
-        u32::try_from(
-            self.read_u64(
-                usize::try_from(bits).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?,
-            )?,
-        )
-        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))
     }
 
     pub(super) fn read_u64(&mut self, bits: usize) -> Result<u64> {

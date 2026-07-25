@@ -2369,6 +2369,88 @@ fn decodes_partition_u32_node() {
     );
 }
 
+#[test]
+fn decodes_quantize_offsets_node() {
+    let inputs = [
+        StreamInput {
+            bytes: &[0, 1, 4],
+            element_width: 1,
+            string_lengths: None,
+        },
+        StreamInput {
+            bytes: &[0b0000_1011],
+            element_width: 1,
+            string_lengths: None,
+        },
+    ];
+
+    let output = decode_quantize_node(&inputs, &[], Limits::default(), &QUANTIZE_OFFSETS).unwrap();
+
+    assert_eq!(output.element_width, 4);
+    assert_eq!(output.bytes, [1, 0, 0, 0, 3, 0, 0, 0, 21, 0, 0, 0]);
+}
+
+#[test]
+fn decodes_quantize_lengths_node() {
+    let inputs = [
+        StreamInput {
+            bytes: &[0, 15, 16],
+            element_width: 1,
+            string_lengths: None,
+        },
+        StreamInput {
+            bytes: &[0b0000_0111],
+            element_width: 1,
+            string_lengths: None,
+        },
+    ];
+
+    let output = decode_quantize_node(&inputs, &[], Limits::default(), &QUANTIZE_LENGTHS).unwrap();
+
+    assert_eq!(output.element_width, 4);
+    assert_eq!(output.bytes, [0, 0, 0, 0, 15, 0, 0, 0, 23, 0, 0, 0]);
+}
+
+#[test]
+fn rejects_quantize_out_of_range_code() {
+    let inputs = [
+        StreamInput {
+            bytes: &[32],
+            element_width: 1,
+            string_lengths: None,
+        },
+        StreamInput {
+            bytes: &[],
+            element_width: 1,
+            string_lengths: None,
+        },
+    ];
+
+    let err = decode_quantize_node(&inputs, &[], Limits::default(), &QUANTIZE_OFFSETS).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn rejects_quantize_nonzero_padding() {
+    let inputs = [
+        StreamInput {
+            bytes: &[1],
+            element_width: 1,
+            string_lengths: None,
+        },
+        StreamInput {
+            bytes: &[0b0000_0011],
+            element_width: 1,
+            string_lengths: None,
+        },
+    ];
+
+    let err = decode_quantize_node(&inputs, &[], Limits::default(), &QUANTIZE_OFFSETS).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
 #[cfg(feature = "lz4")]
 #[test]
 fn decodes_v23_lz4_serial_chunk() {

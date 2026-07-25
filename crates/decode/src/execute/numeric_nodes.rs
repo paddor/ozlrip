@@ -166,10 +166,22 @@ fn decode_constant_typed_chunk(
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("constant allocation failed")
     })?;
-    for _ in 0..output_elements {
-        output.extend_from_slice(stored.bytes);
-    }
+    repeat_constant_element(stored.bytes, output_len, &mut output);
     Ok(OwnedStream::typed(output, stored.element_width))
+}
+
+fn repeat_constant_element(element: &[u8], output_len: usize, output: &mut Vec<u8>) {
+    if element.len() == 1 {
+        output.resize(output_len, element[0]);
+        return;
+    }
+
+    output.extend_from_slice(element);
+    while output.len() < output_len {
+        let len = output.len();
+        let copy_len = len.min(output_len - len);
+        output.extend_from_within(..copy_len);
+    }
 }
 
 pub(super) fn decode_byte_preserving_conversion_chunk(
