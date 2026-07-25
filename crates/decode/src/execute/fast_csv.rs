@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Result};
 
 #[cfg(not(feature = "paranoid"))]
-use super::DispatchStringSource;
+use super::dispatch::DispatchStringSource;
 
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn append_wide_header_pattern(

@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::{
-    OwnedStream, StreamInput, numeric_element_count, read_usize_numeric_element,
-    write_numeric_element_vec,
+    OwnedStream, StreamInput, numeric_element_count, partition::write_numeric_element_vec,
+    read_usize_numeric_element,
 };
 
 #[inline(never)]
