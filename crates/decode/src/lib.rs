@@ -51,8 +51,13 @@ pub struct Decoder {
 struct CachedFramePlan {
     frame: Vec<u8>,
     plan: parse::FramePlan,
-    direct_append_plans: Option<execute::DirectAppendChunkPlans>,
-    chunk_execution_plans: Option<execute::ChunkExecutionPlans>,
+    execution: CachedExecutionPlan,
+}
+
+enum CachedExecutionPlan {
+    DirectAppend(execute::DirectAppendChunkPlans),
+    ChunkExecution(execute::ChunkExecutionPlans),
+    Unplanned,
 }
 
 impl Decoder {
@@ -81,11 +86,18 @@ impl Decoder {
         self.options.limits
     }
 
-    /// Loads a fat OpenZL dictionary bundle for later dictionary-backed decode.
+    /// Loads an OpenZL dictionary bundle for later dictionary-backed decode.
     ///
     /// Currently only zstd dictionary materialization is implemented.
-    pub fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn load_dictionary_bundle(&mut self, bytes: &[u8]) -> Result<()> {
         self.dict_store.load_fat_bundle(bytes)
+    }
+
+    /// Loads a fat OpenZL dictionary bundle for later dictionary-backed decode.
+    ///
+    /// Prefer [`Decoder::load_dictionary_bundle`] for new code.
+    pub fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
+        self.load_dictionary_bundle(bytes)
     }
 
     /// Clears all loaded dictionary bundles.
@@ -117,25 +129,28 @@ impl Decoder {
                 #[cfg(feature = "zstd")]
                 &mut self.zstd,
             );
-            if let Some(direct_append_plans) = cached.direct_append_plans.as_ref() {
-                return execute::decode_plan_with_cached_direct_append_plans(
-                    input,
-                    &cached.plan,
-                    direct_append_plans,
-                    dst,
-                    self.options.limits,
-                    &mut runtime,
-                );
-            }
-            if let Some(chunk_execution_plans) = cached.chunk_execution_plans.as_ref() {
-                return execute::decode_plan_with_cached_chunk_execution_plans(
-                    input,
-                    &cached.plan,
-                    chunk_execution_plans,
-                    dst,
-                    self.options.limits,
-                    &mut runtime,
-                );
+            match &cached.execution {
+                CachedExecutionPlan::DirectAppend(plans) => {
+                    return execute::decode_plan_with_cached_direct_append_plans(
+                        input,
+                        &cached.plan,
+                        plans,
+                        dst,
+                        self.options.limits,
+                        &mut runtime,
+                    );
+                }
+                CachedExecutionPlan::ChunkExecution(plans) => {
+                    return execute::decode_plan_with_cached_chunk_execution_plans(
+                        input,
+                        &cached.plan,
+                        plans,
+                        dst,
+                        self.options.limits,
+                        &mut runtime,
+                    );
+                }
+                CachedExecutionPlan::Unplanned => {}
             }
             return execute::decode_plan_with_context(
                 input,
@@ -171,20 +186,22 @@ impl Decoder {
             return;
         }
         frame.extend_from_slice(input);
-        let direct_append_plans = execute::prepare_direct_append_chunk_plans(plan)
-            .ok()
-            .flatten();
-        let chunk_execution_plans = if direct_append_plans.is_some() {
-            None
-        } else {
-            execute::prepare_chunk_execution_plans(plan).ok()
-        };
+        let execution = Self::prepare_cached_execution_plan(plan);
         self.plan_cache = Some(CachedFramePlan {
             frame,
             plan: plan.clone(),
-            direct_append_plans,
-            chunk_execution_plans,
+            execution,
         });
+    }
+
+    fn prepare_cached_execution_plan(plan: &parse::FramePlan) -> CachedExecutionPlan {
+        if let Ok(Some(plans)) = execute::prepare_direct_append_chunk_plans(plan) {
+            return CachedExecutionPlan::DirectAppend(plans);
+        }
+        match execute::prepare_chunk_execution_plans(plan) {
+            Ok(plans) => CachedExecutionPlan::ChunkExecution(plans),
+            Err(_) => CachedExecutionPlan::Unplanned,
+        }
     }
 
     /// Decodes one OpenZL frame into a new `Vec`.
@@ -381,7 +398,7 @@ mod tests {
     fn decodes_zstd_dictionary_frame_after_loading_bundle() {
         let (frame, bundle, expected) = zstd_dict_test_frame();
         let mut decoder = Decoder::new();
-        decoder.load_fat_bundle(&bundle).unwrap();
+        decoder.load_dictionary_bundle(&bundle).unwrap();
         let mut output = vec![1, 2];
 
         let written = decoder.decode_into(&frame, &mut output).unwrap();

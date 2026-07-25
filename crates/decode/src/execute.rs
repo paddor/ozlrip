@@ -11,8 +11,6 @@ use zrip_core::{
     huffman::{HuffmanDecodeEntry, decode},
 };
 
-#[cfg(feature = "zstd")]
-use crate::parse::SingleZstdFrame;
 use crate::{dict::DictionaryStore, parse::FramePlan, standard};
 
 mod fast_bitpack;
@@ -27,7 +25,23 @@ mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
 mod fast_zigzag;
+mod output;
 mod parse_int;
+mod plan_cache;
+mod runtime;
+mod zstd;
+
+#[cfg(feature = "checksum")]
+use output::verify_decoded_checksum;
+use output::{DecodedChunk, DecodedOutput, check_output_size};
+pub(crate) use plan_cache::{
+    ChunkExecutionPlans, DirectAppendChunkPlans, prepare_chunk_execution_plans,
+    prepare_direct_append_chunk_plans,
+};
+pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
+#[cfg(feature = "zstd")]
+pub(crate) use zstd::decode_single_zstd_frame_with_context;
+use zstd::{decode_zstd_chunk, try_decode_single_zstd_into_dst};
 
 #[cfg(test)]
 mod convert_be_corpus;
@@ -54,69 +68,6 @@ pub(crate) fn decode_plan(
         &mut zstd,
     );
     decode_plan_with_context(input, plan, dst, limits, &mut runtime)
-}
-
-#[derive(Default)]
-pub(crate) struct DecodeScratch {
-    byte_buffers: Vec<Vec<u8>>,
-}
-
-impl DecodeScratch {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    fn take_byte_buffer(&mut self, capacity: usize, detail: &'static str) -> Result<Vec<u8>> {
-        if let Some(index) = self
-            .byte_buffers
-            .iter()
-            .position(|buffer| buffer.capacity() >= capacity)
-        {
-            let mut buffer = self.byte_buffers.swap_remove(index);
-            buffer.clear();
-            return Ok(buffer);
-        }
-
-        let mut buffer = Vec::new();
-        buffer
-            .try_reserve_exact(capacity)
-            .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail(detail))?;
-        Ok(buffer)
-    }
-
-    fn recycle_owned_stream(&mut self, stream: OwnedStream) {
-        if stream.recyclable {
-            self.recycle_byte_buffer(stream.bytes);
-        }
-    }
-
-    fn recycle_byte_buffer(&mut self, mut buffer: Vec<u8>) {
-        buffer.clear();
-        self.byte_buffers.push(buffer);
-    }
-}
-
-pub(crate) struct DecodeRuntime<'a> {
-    scratch: &'a mut DecodeScratch,
-    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
-    dict_store: &'a mut DictionaryStore,
-    #[cfg(feature = "zstd")]
-    zstd: &'a mut zrip::DecompressContext,
-}
-
-impl<'a> DecodeRuntime<'a> {
-    pub(crate) fn new(
-        scratch: &'a mut DecodeScratch,
-        dict_store: &'a mut DictionaryStore,
-        #[cfg(feature = "zstd")] zstd: &'a mut zrip::DecompressContext,
-    ) -> Self {
-        Self {
-            scratch,
-            dict_store,
-            #[cfg(feature = "zstd")]
-            zstd,
-        }
-    }
 }
 
 pub(crate) fn decode_plan_with_context(
@@ -237,140 +188,6 @@ fn decode_plan_with_execution_mode(
     Ok(decoded.total_len)
 }
 
-#[cfg(feature = "zstd")]
-pub(crate) fn decode_single_zstd_frame_with_context(
-    input: &[u8],
-    frame: SingleZstdFrame,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    zstd: &mut zrip::DecompressContext,
-) -> Result<usize> {
-    let stored = frame.stored.as_slice(input)?;
-    let mut offset = 0usize;
-    let element_width = read_var_u64(stored, &mut offset)?;
-    if element_width != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("zstd serial streams with non-byte elements are unsupported"));
-    }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
-    let start = dst.len();
-    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
-        Ok(written) => written,
-        Err(err) => {
-            dst.truncate(start);
-            return Err(map_zstd_error(&err));
-        }
-    };
-    if written > limits.max_buffer_bytes {
-        dst.truncate(start);
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    if let Some(expected) = frame.decoded_bytes
-        && expected != written
-    {
-        dst.truncate(start);
-        return Err(Error::new(ErrorKind::Malformed).with_detail("decoded output size mismatch"));
-    }
-    if frame.frame_bytes > 0 && written / frame.frame_bytes > limits.max_expansion_ratio {
-        dst.truncate(start);
-        return Err(Error::new(ErrorKind::LimitExceeded).with_detail("expansion ratio exceeded"));
-    }
-    #[cfg(feature = "checksum")]
-    if let Err(err) = verify_decoded_checksum(&dst[start..], frame.decoded_checksum) {
-        dst.truncate(start);
-        return Err(err);
-    }
-    #[cfg(not(feature = "checksum"))]
-    let _ = frame.decoded_checksum;
-    Ok(written)
-}
-
-#[cfg(feature = "zstd")]
-fn try_decode_single_zstd_into_dst(
-    input: &[u8],
-    plan: &FramePlan,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    zstd: &mut zrip::DecompressContext,
-) -> Result<Option<usize>> {
-    if plan.info.output_types.as_slice() != [FrameValueType::Serial] || plan.chunks.len() != 1 {
-        return Ok(None);
-    }
-    let chunk = &plan.chunks[0];
-    let [node] = chunk.nodes() else {
-        return Ok(None);
-    };
-    if node.standard_id() != Some(standard::ZSTD_ID)
-        || node.variable_outputs() != 0
-        || node.regen_distances() != [0]
-        || node.dict_index().is_some()
-        || node.transform_header_size() != 0
-        || node.transform_header_start() != 0
-        || chunk.stored_streams() != 1
-    {
-        return Ok(None);
-    }
-
-    let stored = chunk
-        .stored_stream_range(0)
-        .ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("zstd input stream is missing")
-        })?
-        .as_slice(input)?;
-    let mut offset = 0usize;
-    let element_width = read_var_u64(stored, &mut offset)?;
-    if element_width == 0 || element_width != 1 {
-        return Ok(None);
-    }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
-    let start = dst.len();
-    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
-        Ok(written) => written,
-        Err(err) => {
-            dst.truncate(start);
-            return Err(map_zstd_error(&err));
-        }
-    };
-    if written > limits.max_buffer_bytes {
-        dst.truncate(start);
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    if let Err(err) = check_output_size(written, input.len(), plan, limits) {
-        dst.truncate(start);
-        return Err(err);
-    }
-    #[cfg(feature = "checksum")]
-    if let Err(err) = verify_decoded_checksum(&dst[start..], chunk.decoded_checksum) {
-        dst.truncate(start);
-        return Err(err);
-    }
-    #[cfg(not(feature = "checksum"))]
-    let _ = chunk.decoded_checksum;
-    Ok(Some(written))
-}
-
-#[cfg(not(feature = "zstd"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the zstd-disabled shim keeps the same fallible signature as the zstd implementation"
-)]
-fn try_decode_single_zstd_into_dst(
-    _input: &[u8],
-    _plan: &FramePlan,
-    _dst: &mut Vec<u8>,
-    _limits: Limits,
-) -> Result<Option<usize>> {
-    Ok(None)
-}
-
 fn try_decode_plan_appending_to_dst(
     input: &[u8],
     plan: &FramePlan,
@@ -381,62 +198,11 @@ fn try_decode_plan_appending_to_dst(
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
         return Ok(None);
     }
-    let Some(chunk_plans) = direct_append_chunk_plans(plan)? else {
+    let Some(chunk_plans) = prepare_direct_append_chunk_plans(plan)? else {
         return Ok(None);
     };
     decode_plan_appending_to_dst_with_rollback(input, plan, &chunk_plans, dst, limits, runtime)
         .map(Some)
-}
-
-#[derive(Clone)]
-pub(crate) struct DirectAppendChunkPlans {
-    chunk_plans: Vec<Option<ChunkExecutionPlan>>,
-}
-
-pub(crate) struct ChunkExecutionPlans {
-    chunk_plans: Vec<Option<ChunkExecutionPlan>>,
-}
-
-pub(crate) fn prepare_chunk_execution_plans(plan: &FramePlan) -> Result<ChunkExecutionPlans> {
-    let mut chunk_plans = Vec::new();
-    chunk_plans
-        .try_reserve_exact(plan.chunks.len())
-        .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
-                .with_detail("chunk execution plan allocation failed")
-        })?;
-    for chunk in &plan.chunks {
-        if chunk.has_nodes() {
-            chunk_plans.push(Some(build_chunk_execution_plan(chunk)?));
-        } else {
-            chunk_plans.push(None);
-        }
-    }
-    Ok(ChunkExecutionPlans { chunk_plans })
-}
-
-fn direct_append_chunk_plans(plan: &FramePlan) -> Result<Option<DirectAppendChunkPlans>> {
-    let mut chunk_plans = Vec::new();
-    chunk_plans
-        .try_reserve_exact(plan.chunks.len())
-        .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
-                .with_detail("chunk execution plan allocation failed")
-        })?;
-    for chunk in &plan.chunks {
-        if !chunk.has_nodes() {
-            chunk_plans.push(None);
-            continue;
-        }
-        let Ok(chunk_plan) = build_chunk_execution_plan(chunk) else {
-            return Ok(None);
-        };
-        if direct_append_tail(&chunk_plan).is_none() {
-            return Ok(None);
-        }
-        chunk_plans.push(Some(chunk_plan));
-    }
-    Ok(Some(DirectAppendChunkPlans { chunk_plans }))
 }
 
 fn decode_plan_appending_to_dst_with_rollback(
@@ -1187,12 +953,6 @@ fn is_byte_preserving_conversion(standard_id: u32) -> bool {
             | standard::CONVERT_SERIAL_TO_NUM_LE_ID
             | standard::CONVERT_NUM_TO_SERIAL_LE_ID
     )
-}
-
-pub(crate) fn prepare_direct_append_chunk_plans(
-    plan: &FramePlan,
-) -> Result<Option<DirectAppendChunkPlans>> {
-    direct_append_chunk_plans(plan)
 }
 
 fn single_execution_input<'a>(
@@ -6412,96 +6172,6 @@ fn decode_lz4_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<V
     Err(Error::new(ErrorKind::Unsupported).with_detail("lz4 support is disabled"))
 }
 
-#[cfg(feature = "zstd")]
-fn decode_zstd_chunk(
-    stored: &[u8],
-    header: &[u8],
-    dict_index: Option<u32>,
-    ctx: &mut StandardNodeContext<'_>,
-) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("zstd transform headers are unsupported"));
-    }
-    let mut offset = 0usize;
-    let element_width = read_var_u64(stored, &mut offset)?;
-    if element_width == 0 || element_width != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only serial byte zstd output is implemented"));
-    }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
-    if let Some(dict_index) = dict_index {
-        let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
-        })?;
-        let dict_zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
-        return decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, dict_zstd);
-    }
-    decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, ctx.zstd)
-}
-
-#[cfg(feature = "zstd")]
-fn decode_zstd_magicless_with_context(
-    magicless: &[u8],
-    limits: Limits,
-    scratch: &mut DecodeScratch,
-    zstd: &mut zrip::DecompressContext,
-) -> Result<Vec<u8>> {
-    if !magicless.is_empty() {
-        let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
-        let written = match zstd.decompress_after_magic_into(
-            magicless,
-            &mut output,
-            limits.max_decoded_bytes,
-        ) {
-            Ok(written) => written,
-            Err(err) => {
-                scratch.recycle_byte_buffer(output);
-                return Err(map_zstd_error(&err));
-            }
-        };
-        debug_assert_eq!(written, output.len());
-        if output.len() > limits.max_buffer_bytes {
-            scratch.recycle_byte_buffer(output);
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
-        return Ok(output);
-    }
-    let output = zstd
-        .decompress_after_magic_with_limit(magicless, limits.max_decoded_bytes)
-        .map_err(|err| map_zstd_error(&err))?;
-    let output = output.into_owned();
-    if output.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    Ok(output)
-}
-
-#[cfg(feature = "zstd")]
-fn map_zstd_error(err: &zrip::DecompressError) -> Error {
-    if *err == zrip::DecompressError::OutputTooSmall {
-        Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-    } else {
-        Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")
-    }
-}
-
-#[cfg(not(feature = "zstd"))]
-fn decode_zstd_chunk(
-    _stored: &[u8],
-    _header: &[u8],
-    _dict_index: Option<u32>,
-    _ctx: &mut StandardNodeContext<'_>,
-) -> Result<Vec<u8>> {
-    Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
-}
-
 #[cfg(feature = "lz4")]
 fn read_single_varint_header(header: &[u8]) -> Result<usize> {
     let mut offset = 0usize;
@@ -6543,71 +6213,6 @@ fn read_var_u64(input: &[u8], offset: &mut usize) -> Result<u64> {
         }
     }
     Err(Error::at(ErrorKind::Malformed, start).with_detail("u64 varint is too long"))
-}
-
-struct DecodedOutput<'a> {
-    chunks: Vec<DecodedChunk<'a>>,
-    total_len: usize,
-}
-
-enum DecodedChunk<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
-}
-
-impl DecodedChunk<'_> {
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-
-fn check_output_size(
-    size: usize,
-    encoded_size: usize,
-    plan: &FramePlan,
-    limits: Limits,
-) -> Result<()> {
-    if size > limits.max_decoded_bytes || size > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let max_expanded = encoded_size
-        .checked_mul(limits.max_expansion_ratio)
-        .ok_or_else(|| {
-            Error::new(ErrorKind::IntegerOverflow)
-                .with_detail("encoded size expansion limit overflowed")
-        })?;
-    if size > max_expanded {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded expansion ratio exceeded")
-        );
-    }
-    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
-        let expected = usize::try_from(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
-        })?;
-        if expected != size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("stored output size does not match frame header"));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "checksum")]
-fn verify_decoded_checksum(output: &[u8], expected: Option<u32>) -> Result<()> {
-    if let Some(expected) = expected {
-        let actual = (xxhash_rust::xxh3::xxh3_64(output) & 0xffff_ffff) as u32;
-        if actual != expected {
-            return Err(Error::new(ErrorKind::ChecksumMismatch)
-                .with_detail("OpenZL decoded checksum mismatch"));
-        }
-    }
-    Ok(())
 }
 
 mod pivco_huffman;
