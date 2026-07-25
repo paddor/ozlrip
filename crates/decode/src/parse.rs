@@ -972,6 +972,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
         | standard::CONSTANT_SERIAL_ID
+        | standard::CONSTANT_FIXED_ID
         | standard::PARSE_INT_ID
         | standard::FSE_NCOUNT_ID
         | standard::LZ4_ID => Some(fixed_shape(1, 1)),

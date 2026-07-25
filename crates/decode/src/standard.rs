@@ -14,6 +14,7 @@ pub(crate) const TOKENIZE_NUMERIC_ID: u32 = 37;
 pub(crate) const SPLIT_BY_STRUCT_ID: u32 = 41;
 pub(crate) const DISPATCH_N_BY_TAG_ID: u32 = 42;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
+pub(crate) const CONSTANT_FIXED_ID: u32 = 45;
 pub(crate) const DISPATCH_STRING_ID: u32 = 54;
 pub(crate) const CONVERT_SERIAL_TO_STRUCT_ID: u32 = 5;
 pub(crate) const CONVERT_STRUCT_TO_SERIAL_ID: u32 = 6;

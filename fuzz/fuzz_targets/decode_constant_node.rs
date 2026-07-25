@@ -11,7 +11,12 @@ fuzz_target!(|data: &[u8]| {
     }
     let count = u16::from_le_bytes([data[0], data[1]]) as usize & 0x0fff;
     let value = data.get(2).copied().unwrap_or(0);
-    let frame = constant_serial_frame(value, count);
+    let transform_id = if data.get(3).copied().unwrap_or(0) & 1 == 0 {
+        44
+    } else {
+        45
+    };
+    let frame = constant_frame(transform_id, value, count);
     let limits = Limits {
         max_frame_bytes: 8192,
         max_decoded_bytes: 4096,
@@ -35,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
     );
 });
 
-fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
+fn constant_frame(transform_id: u8, value: u8, count: usize) -> Vec<u8> {
     let mut header = Vec::new();
     push_var_u64(&mut header, u64::try_from(count).unwrap());
     let mut input = Vec::new();
@@ -46,7 +51,7 @@ fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
     input.push(2);
     input.push(1);
     input.push(0);
-    input.push(44);
+    input.push(transform_id);
     input.push(1);
     push_var_u64(&mut input, u64::try_from(header.len() - 1).unwrap());
     input.push(0);

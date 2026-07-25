@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
@@ -106,24 +106,57 @@ pub(super) fn decode_constant_serial_chunk(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if stored.len() != 1 {
+    let input = StreamInput {
+        bytes: stored,
+        element_width: 1,
+        string_lengths: None,
+    };
+    Ok(decode_constant_typed_chunk(input, header, limits, "constant_serial")?.bytes)
+}
+
+pub(super) fn decode_constant_fixed_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if stored.string_lengths.is_some() {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("constant_fixed input must not be a string stream"));
+    }
+    decode_constant_typed_chunk(stored, header, limits, "constant_fixed")
+}
+
+fn decode_constant_typed_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+    name: &'static str,
+) -> Result<OwnedStream> {
+    if stored.element_width == 0 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail(format!("{name} element width must be nonzero")));
+    }
+    if stored.bytes.len() != stored.element_width {
         return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("constant_serial input must contain one byte"));
+            .with_detail(format!("{name} input must contain one element")));
     }
     let mut offset = 0usize;
-    let output_len = read_var_u64(header, &mut offset)?;
+    let output_elements = read_var_u64(header, &mut offset)?;
     if offset != header.len() {
         return Err(
-            Error::new(ErrorKind::Malformed).with_detail("unexpected constant_serial header bytes")
+            Error::new(ErrorKind::Malformed).with_detail(format!("unexpected {name} header bytes"))
         );
     }
-    if output_len == 0 {
+    if output_elements == 0 {
         return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("constant_serial output count must be nonzero"));
+            .with_detail(format!("{name} output count must be nonzero")));
     }
-    let output_len = usize::try_from(output_len).map_err(|_| {
+    let output_elements = usize::try_from(output_elements).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output count is too large")
     })?;
+    let output_len = output_elements
+        .checked_mul(stored.element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
@@ -133,8 +166,10 @@ pub(super) fn decode_constant_serial_chunk(
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("constant allocation failed")
     })?;
-    output.resize(output_len, stored[0]);
-    Ok(output)
+    for _ in 0..output_elements {
+        output.extend_from_slice(stored.bytes);
+    }
+    Ok(OwnedStream::typed(output, stored.element_width))
 }
 
 pub(super) fn decode_byte_preserving_conversion_chunk(

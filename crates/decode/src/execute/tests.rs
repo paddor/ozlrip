@@ -254,6 +254,12 @@ fn constant_serial_frame(value: u8, count: usize) -> Vec<u8> {
     standard_transform_serial_frame(21, 44, &[value], count, &header)
 }
 
+fn constant_fixed_frame(value: u8, count: usize) -> Vec<u8> {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, u64::try_from(count).unwrap());
+    standard_transform_serial_frame(21, 45, &[value], count, &header)
+}
+
 fn zigzag_serial_frame(stored: &[u8]) -> Vec<u8> {
     standard_transform_serial_frame(21, 3, stored, stored.len(), &[])
 }
@@ -443,6 +449,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::CONCAT_SERIAL_ID,
         standard::CONCAT_NUM_ID,
         standard::CONCAT_STRUCT_ID,
+        standard::CONSTANT_FIXED_ID,
         standard::CONSTANT_SERIAL_ID,
         standard::CONVERT_NUM_TO_SERIAL_LE_ID,
         standard::CONVERT_NUM_TO_STRUCT_LE_ID,
@@ -1836,6 +1843,70 @@ fn decodes_v21_constant_serial_chunk() {
 
     assert_eq!(written, 6);
     assert_eq!(output, b"xxxxxx");
+}
+
+#[test]
+fn decodes_v21_constant_fixed_chunk() {
+    let input = constant_fixed_frame(b'y', 5);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 5);
+    assert_eq!(output, b"yyyyy");
+}
+
+#[test]
+fn decodes_constant_fixed_chunk() {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, 3);
+    let input = StreamInput {
+        bytes: &[0xaa, 0xbb],
+        element_width: 2,
+        string_lengths: None,
+    };
+
+    let output = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(output.bytes, [0xaa, 0xbb, 0xaa, 0xbb, 0xaa, 0xbb]);
+    assert_eq!(output.string_lengths, None);
+}
+
+#[test]
+fn rejects_constant_fixed_partial_input() {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, 3);
+    let input = StreamInput {
+        bytes: &[0xaa],
+        element_width: 2,
+        string_lengths: None,
+    };
+
+    let err = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn rejects_constant_fixed_output_limit() {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, 3);
+    let input = StreamInput {
+        bytes: &[0xaa, 0xbb],
+        element_width: 2,
+        string_lengths: None,
+    };
+    let limits = Limits {
+        max_decoded_bytes: 5,
+        max_buffer_bytes: 5,
+        ..Limits::default()
+    };
+
+    let err = decode_constant_fixed_chunk(input, &header, limits).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }
 
 #[test]

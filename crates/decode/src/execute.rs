@@ -38,11 +38,11 @@ use lz_nodes::{
 };
 use numeric_nodes::{
     decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
-    decode_byte_preserving_conversion_chunk, decode_constant_serial_chunk, decode_delta_node,
-    decode_num_to_struct_le_chunk, decode_numeric_to_serial_le_chunk,
-    decode_range_pack_serial8_chunk, decode_serial_to_num_be_chunk,
-    decode_serial_to_numeric_le_chunk, decode_serial_to_struct_chunk,
-    decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
+    decode_byte_preserving_conversion_chunk, decode_constant_fixed_chunk,
+    decode_constant_serial_chunk, decode_delta_node, decode_num_to_struct_le_chunk,
+    decode_numeric_to_serial_le_chunk, decode_range_pack_serial8_chunk,
+    decode_serial_to_num_be_chunk, decode_serial_to_numeric_le_chunk,
+    decode_serial_to_struct_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
 };
 #[cfg(feature = "checksum")]
 use output::verify_decoded_checksum;
@@ -1281,6 +1281,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::BITPACK_SERIAL_ID
         | standard::BITPACK_INT_ID
         | standard::CONSTANT_SERIAL_ID
+        | standard::CONSTANT_FIXED_ID
         | standard::CONVERT_STRUCT_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
         | standard::CONVERT_SERIAL_TO_NUM_LE_ID
@@ -1470,6 +1471,11 @@ fn execute_standard_node(
         )),
         standard::CONSTANT_SERIAL_ID => one_serial(decode_constant_serial_chunk(
             single_input(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::CONSTANT_FIXED_ID => one_typed(decode_constant_fixed_chunk(
+            single_stream(inputs)?,
             header,
             ctx.limits,
         )),

@@ -10,6 +10,7 @@
 - Track OpenZL release-checkpoint interop and standard-node fixture coverage in
   committed manifests.
 - Add fuzz entry points for public-frame Field-LZ and dispatch-string graphs.
+- Decode OpenZL `constant_fixed` typed repeat streams.
 - Pin public API behavior for custom transforms and unsupported dictionary
   materializers to typed `Unsupported` errors.
 
