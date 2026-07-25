@@ -467,7 +467,14 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     }
 
     let rows = indices.len() / CSV_PATTERN.len();
-    for source in &sources[..4] {
+    let fixed_prefix = fixed_length_source_remaining(&sources[0], rows, 10)
+        && fixed_length_source_remaining(&sources[1], rows, 3);
+    let variable_sources = if fixed_prefix {
+        &sources[2..4]
+    } else {
+        &sources[..4]
+    };
+    for source in variable_sources {
         if source.lengths.len().saturating_sub(source.position) != rows {
             return Ok(false);
         }
@@ -501,11 +508,17 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
         return Ok(false);
     }
 
-    if indices
-        .chunks_exact(CSV_PATTERN.len())
-        .any(|chunk| chunk != CSV_PATTERN)
-    {
+    if !chunks_match_16(indices, CSV_PATTERN) {
         return Ok(false);
+    }
+
+    if fixed_prefix && delimiter_bytes_match_csv_rows(&sources[4], rows) {
+        fast_csv::append_2byte_csv_fixed_prefix_comma_pattern_rows(rows, sources, output)?;
+        return Ok(true);
+    }
+    if fixed_prefix {
+        fast_csv::append_2byte_csv_fixed_prefix_pattern_rows(rows, sources, output)?;
+        return Ok(true);
     }
 
     fast_csv::append_2byte_csv_pattern_rows(rows, sources, output)?;
@@ -542,15 +555,19 @@ fn append_dispatched_string_2byte_csv_header_pattern_fast(
     if indices[row_bytes_end..] != TRAILING_DELIMITER {
         return Ok(false);
     }
-    if indices[header_bytes..row_bytes_end]
-        .chunks_exact(ROW_PATTERN.len())
-        .any(|chunk| chunk != ROW_PATTERN)
-    {
+    if !chunks_match_16(&indices[header_bytes..row_bytes_end], ROW_PATTERN) {
         return Ok(false);
     }
 
     let rows = (row_bytes_end - header_bytes) / ROW_PATTERN.len();
-    for source in &sources[..4] {
+    let fixed_prefix = fixed_length_source_remaining(&sources[0], rows, 10)
+        && fixed_length_source_remaining(&sources[1], rows, 3);
+    let variable_sources = if fixed_prefix {
+        &sources[2..4]
+    } else {
+        &sources[..4]
+    };
+    for source in variable_sources {
         if source.lengths.len().saturating_sub(source.position) != rows {
             return Ok(false);
         }
@@ -608,8 +625,93 @@ fn append_dispatched_string_2byte_csv_header_pattern_fast(
     for _ in 0..HEADER_FIELDS {
         append_dispatched_string_to_serial(5, sources, output)?;
     }
+    if fixed_prefix && delimiter_bytes_match_csv_header_rows(&sources[4], rows) {
+        fast_csv::append_2byte_csv_fixed_prefix_comma_header_pattern_rows(rows, sources, output)?;
+        return Ok(true);
+    }
+    if fixed_prefix {
+        fast_csv::append_2byte_csv_fixed_prefix_header_pattern_rows(rows, sources, output)?;
+        return Ok(true);
+    }
     fast_csv::append_2byte_csv_header_pattern_rows(rows, sources, output)?;
     Ok(true)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn fixed_length_source_remaining(
+    source: &DispatchStringSource<'_>,
+    count: usize,
+    length: usize,
+) -> bool {
+    let Some(byte_count) = count.checked_mul(length) else {
+        return false;
+    };
+    source.lengths.len().saturating_sub(source.position) == count
+        && source.bytes.len().saturating_sub(source.byte_position) == byte_count
+        && source.lengths[source.position..]
+            .iter()
+            .all(|&candidate| candidate as usize == length)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn delimiter_bytes_match_csv_rows(source: &DispatchStringSource<'_>, rows: usize) -> bool {
+    let Some(byte_count) = rows.checked_mul(4) else {
+        return false;
+    };
+    let remaining = &source.bytes[source.byte_position..];
+    remaining.len() == byte_count && chunks_match_4(remaining, *b",,,\n")
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn delimiter_bytes_match_csv_header_rows(source: &DispatchStringSource<'_>, rows: usize) -> bool {
+    let Some(row_delimiter_bytes) = rows.checked_mul(4) else {
+        return false;
+    };
+    let Some(byte_count) = row_delimiter_bytes.checked_add(1) else {
+        return false;
+    };
+    let remaining = &source.bytes[source.byte_position..];
+    remaining.len() == byte_count
+        && remaining.first() == Some(&b'\n')
+        && chunks_match_4(&remaining[1..], *b",,,\n")
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn chunks_match_16(bytes: &[u8], pattern: [u8; 16]) -> bool {
+    debug_assert!(bytes.len().is_multiple_of(16));
+    let expected = u128::from_le_bytes(pattern);
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let actual = unsafe {
+            // SAFETY: caller gives 16-byte chunks; loop offset stays within
+            // `bytes` and read is explicitly unaligned.
+            bytes.as_ptr().add(offset).cast::<u128>().read_unaligned()
+        };
+        if u128::from_le(actual) != expected {
+            return false;
+        }
+        offset += 16;
+    }
+    true
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn chunks_match_4(bytes: &[u8], pattern: [u8; 4]) -> bool {
+    debug_assert!(bytes.len().is_multiple_of(4));
+    let expected = u32::from_le_bytes(pattern);
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let actual = unsafe {
+            // SAFETY: caller gives 4-byte chunks; loop offset stays within
+            // `bytes` and read is explicitly unaligned.
+            bytes.as_ptr().add(offset).cast::<u32>().read_unaligned()
+        };
+        if u32::from_le(actual) != expected {
+            return false;
+        }
+        offset += 4;
+    }
+    true
 }
 
 fn append_dispatched_string_2byte_csv_pattern(

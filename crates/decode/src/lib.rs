@@ -13,7 +13,7 @@ mod standard;
 
 use dict::DictionaryStore;
 
-pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4096;
+pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Decoder configuration.
 ///

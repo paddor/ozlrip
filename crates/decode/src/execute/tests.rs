@@ -55,6 +55,17 @@ fn standard_transform_serial_frame(
     input.push(0);
     input.push(1);
     push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+    append_standard_transform_chunk(&mut input, transform_id, stored, transform_header);
+    input.push(0);
+    input
+}
+
+fn append_standard_transform_chunk(
+    input: &mut Vec<u8>,
+    transform_id: u8,
+    stored: &[u8],
+    transform_header: &[u8],
+) {
     input.push(2);
     input.push(1);
     input.push(0);
@@ -63,19 +74,14 @@ fn standard_transform_serial_frame(
         input.push(0);
     } else {
         input.push(1);
-        push_var_u64(
-            &mut input,
-            u64::try_from(transform_header.len() - 1).unwrap(),
-        );
+        push_var_u64(input, u64::try_from(transform_header.len() - 1).unwrap());
     }
     input.push(0);
     input.push(0);
     input.push(0);
-    push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
+    push_var_u64(input, u64::try_from(stored.len()).unwrap());
     input.extend_from_slice(transform_header);
     input.extend_from_slice(stored);
-    input.push(0);
-    input
 }
 
 fn concat_serial_frame(payload: &[u8]) -> Vec<u8> {
@@ -135,6 +141,36 @@ fn splitn_serial_frame(streams: &[&[u8]]) -> Vec<u8> {
 
 fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
     standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
+}
+
+#[cfg(feature = "zstd")]
+fn zstd_stored_stream(decoded: &[u8]) -> Vec<u8> {
+    let compressed = zrip::compress(decoded, 1).unwrap();
+    let mut stored = Vec::new();
+    push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&compressed[4..]);
+    stored
+}
+
+#[cfg(feature = "zstd")]
+fn mixed_direct_append_frame() -> Vec<u8> {
+    let zstd_output = b"zstd";
+    let zstd_stored = zstd_stored_stream(zstd_output);
+    let mut constant_header = Vec::new();
+    push_var_u64(&mut constant_header, 3);
+
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    push_var_u64(
+        &mut input,
+        u64::try_from(zstd_output.len() + 3 + 1).unwrap(),
+    );
+    append_standard_transform_chunk(&mut input, 22, &zstd_stored, &[]);
+    append_standard_transform_chunk(&mut input, 44, b"!", &constant_header);
+    input.push(0);
+    input
 }
 
 #[cfg(feature = "dev-format")]
@@ -569,6 +605,32 @@ fn decodes_v21_stored_serial_chunks() {
 
     assert_eq!(written, 7);
     assert_eq!(output, [7, 8, 9, 10, 11, 12, 13]);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn prepares_mixed_direct_append_chunk_plans() {
+    let input = mixed_direct_append_frame();
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+
+    let plans = prepare_direct_append_chunk_plans(&plan).unwrap().unwrap();
+
+    assert_eq!(plans.chunk_plans.len(), 2);
+    assert!(plans.chunk_plans[0].is_some());
+    assert!(plans.chunk_plans[1].is_none());
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn decodes_mixed_direct_append_and_fallback_chunks() {
+    let input = mixed_direct_append_frame();
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
+    assert_eq!(output, b"zstd!!!");
 }
 
 #[test]

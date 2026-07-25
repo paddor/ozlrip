@@ -37,6 +37,7 @@ pub(crate) fn prepare_direct_append_chunk_plans(
     plan: &FramePlan,
 ) -> Result<Option<DirectAppendChunkPlans>> {
     let mut chunk_plans = Vec::new();
+    let mut has_direct_append_chunk = false;
     chunk_plans
         .try_reserve_exact(plan.chunks.len())
         .map_err(|_| {
@@ -49,12 +50,19 @@ pub(crate) fn prepare_direct_append_chunk_plans(
             continue;
         }
         let Ok(chunk_plan) = build_chunk_execution_plan(chunk) else {
-            return Ok(None);
+            chunk_plans.push(None);
+            continue;
         };
-        if direct_append_tail(&chunk_plan).is_none() {
-            return Ok(None);
+        if direct_append_tail(&chunk_plan).is_some() {
+            has_direct_append_chunk = true;
+            chunk_plans.push(Some(chunk_plan));
+        } else {
+            chunk_plans.push(None);
         }
-        chunk_plans.push(Some(chunk_plan));
     }
-    Ok(Some(DirectAppendChunkPlans { chunk_plans }))
+    if has_direct_append_chunk {
+        Ok(Some(DirectAppendChunkPlans { chunk_plans }))
+    } else {
+        Ok(None)
+    }
 }

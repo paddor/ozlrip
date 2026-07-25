@@ -180,6 +180,55 @@ pub(super) fn decode_zstd_chunk(
 }
 
 #[cfg(feature = "zstd")]
+pub(super) fn decode_zstd_chunk_to_output(
+    stored: &[u8],
+    header: &[u8],
+    dict_index: Option<u32>,
+    ctx: &mut StandardNodeContext<'_>,
+    dst: &mut Vec<u8>,
+) -> Result<()> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("zstd transform headers are unsupported"));
+    }
+    let mut offset = 0usize;
+    let element_width = read_var_u64(stored, &mut offset)?;
+    if element_width == 0 || element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only serial byte zstd output is implemented"));
+    }
+    let magicless = stored
+        .get(offset..)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let start = dst.len();
+    let written = if let Some(dict_index) = dict_index {
+        let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
+        })?;
+        let zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
+        zstd.decompress_after_magic_into(magicless, dst, ctx.limits.max_decoded_bytes)
+    } else {
+        ctx.zstd
+            .decompress_after_magic_into(magicless, dst, ctx.limits.max_decoded_bytes)
+    };
+    let written = match written {
+        Ok(written) => written,
+        Err(err) => {
+            dst.truncate(start);
+            return Err(map_zstd_error(&err));
+        }
+    };
+    debug_assert_eq!(written, dst.len() - start);
+    if written > ctx.limits.max_buffer_bytes {
+        dst.truncate(start);
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "zstd")]
 fn decode_zstd_magicless_with_context(
     magicless: &[u8],
     limits: Limits,
@@ -236,5 +285,16 @@ pub(super) fn decode_zstd_chunk(
     _dict_index: Option<u32>,
     _ctx: &mut StandardNodeContext<'_>,
 ) -> Result<Vec<u8>> {
+    Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
+}
+
+#[cfg(not(feature = "zstd"))]
+pub(super) fn decode_zstd_chunk_to_output(
+    _stored: &[u8],
+    _header: &[u8],
+    _dict_index: Option<u32>,
+    _ctx: &mut StandardNodeContext<'_>,
+    _dst: &mut Vec<u8>,
+) -> Result<()> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
 }

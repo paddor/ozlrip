@@ -11,6 +11,7 @@ mod fast_bitreader;
 mod fast_csv;
 mod fast_delta;
 mod fast_dispatch;
+mod fast_field_lz;
 mod fast_lengths;
 mod fast_lz;
 mod fast_partition;
@@ -54,7 +55,7 @@ pub(crate) use plan_cache::{
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 #[cfg(feature = "zstd")]
 pub(crate) use zstd::decode_single_zstd_frame_with_context;
-use zstd::{decode_zstd_chunk, try_decode_single_zstd_into_dst};
+use zstd::{decode_zstd_chunk, decode_zstd_chunk_to_output, try_decode_single_zstd_into_dst};
 
 #[cfg(test)]
 mod convert_be_corpus;
@@ -265,21 +266,34 @@ fn decode_plan_appending_to_dst(
     for (chunk, chunk_plan) in plan.chunks.iter().zip(chunk_plans.iter()) {
         let chunk_start = dst.len();
         if chunk.has_nodes() {
-            let chunk_plan = chunk_plan.as_ref().ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph).with_detail("chunk execution plan is missing")
-            })?;
-            decode_transform_chunk_appending(
-                input,
-                DirectAppendChunk {
+            if let Some(chunk_plan) = chunk_plan.as_ref() {
+                decode_transform_chunk_appending(
+                    input,
+                    DirectAppendChunk {
+                        chunk,
+                        execution: chunk_plan,
+                    },
+                    plan.info.format_version,
+                    limits,
+                    dst,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )?;
+            } else {
+                let decoded = decode_transform_chunk(
+                    input,
                     chunk,
-                    execution: chunk_plan,
-                },
-                plan.info.format_version,
-                limits,
-                dst,
-                plan.info.dictionary_bundle_id.as_deref(),
-                runtime,
-            )?;
+                    plan.info.format_version,
+                    limits,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )?;
+                let decoded = decoded.as_slice();
+                dst.try_reserve_exact(decoded.len()).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+                })?;
+                dst.extend_from_slice(decoded);
+            }
         } else {
             let stored = stored_only_chunk(input, chunk)?;
             dst.extend_from_slice(stored);
@@ -516,6 +530,16 @@ fn decode_transform_chunk_appending(
                 DirectAppendKind::FieldLz => {
                     decode_field_lz_node_to_output(&inputs, header, limits, dst, output_start)?
                 }
+                DirectAppendKind::Zstd => {
+                    decode_zstd_chunk_to_output(
+                        single_input(&inputs)?,
+                        header,
+                        node.dict_index,
+                        &mut ctx,
+                        dst,
+                    )?;
+                    1
+                }
                 DirectAppendKind::DispatchStringToSerial => {
                     decode_dispatch_string_node_to_serial_output(
                         &inputs,
@@ -542,13 +566,15 @@ fn decode_transform_chunk_appending(
             };
             drop(inputs);
             match append_tail.kind {
-                DirectAppendKind::Lz | DirectAppendKind::FieldLz => validate_direct_append_tail(
-                    &plan.nodes[node_index + 1..],
-                    transform_headers,
-                    element_width,
-                    &dst[output_start..],
-                    limits,
-                )?,
+                DirectAppendKind::Lz | DirectAppendKind::FieldLz | DirectAppendKind::Zstd => {
+                    validate_direct_append_tail(
+                        &plan.nodes[node_index + 1..],
+                        transform_headers,
+                        element_width,
+                        &dst[output_start..],
+                        limits,
+                    )?;
+                }
                 DirectAppendKind::DispatchStringToSerial => validate_string_to_serial_tail(
                     &plan.nodes[node_index + 1..],
                     transform_headers,
@@ -620,12 +646,14 @@ struct DirectAppendTail {
 enum DirectAppendKind {
     Lz,
     FieldLz,
+    Zstd,
     DispatchStringToSerial,
     SplitByStructToSplitN,
 }
 
 fn direct_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
     field_lz_append_tail_start(plan)
+        .or_else(|| zstd_append_tail_start(plan))
         .or_else(|| dispatch_string_to_serial_append_tail(plan))
         .or_else(|| split_by_struct_to_splitn_append_tail(plan))
         .or_else(|| lz_append_tail_start(plan))
@@ -679,6 +707,33 @@ fn field_lz_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendT
             return Some(DirectAppendTail {
                 start: index,
                 kind: DirectAppendKind::FieldLz,
+            });
+        }
+    }
+    None
+}
+
+fn zstd_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
+    let final_stream = plan.regen_targets.len().checked_sub(1)?;
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.standard_id != standard::ZSTD_ID || node.output_targets.len() != 1 {
+            continue;
+        }
+        let mut next_input = node.output_targets[0];
+        for tail in &plan.nodes[index + 1..] {
+            if !is_byte_preserving_conversion(tail.standard_id)
+                || tail.input_count != 1
+                || tail.input_start != next_input
+                || tail.output_targets.len() != 1
+            {
+                return None;
+            }
+            next_input = tail.output_targets[0];
+        }
+        if next_input == final_stream {
+            return Some(DirectAppendTail {
+                start: index,
+                kind: DirectAppendKind::Zstd,
             });
         }
     }

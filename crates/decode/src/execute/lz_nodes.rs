@@ -2,12 +2,12 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-#[cfg(not(feature = "paranoid"))]
-use super::fast_lz;
 use super::{
     DecodeScratch, OwnedStream, StreamInput, numeric_element_count, read_usize_numeric_element,
     read_var_u64, require_numeric_width, validate_numeric_stream_width,
 };
+#[cfg(not(feature = "paranoid"))]
+use super::{fast_field_lz, fast_lz};
 
 pub(super) fn decode_lz_node(
     inputs: &[StreamInput<'_>],
@@ -675,124 +675,146 @@ pub(super) fn decode_field_lz_node_to_output(
             })?;
     }
 
-    let min_match = match element_width {
-        1 => 4usize,
-        2 => 2usize,
-        _ => 1usize,
-    };
-    let mut reps = [element_width, element_width * 2, element_width * 4];
-    let mut literal_pos = 0usize;
-    let mut offset_values = offsets.bytes.chunks_exact(4);
-    let mut extra_literal_values = extra_literal_lengths.bytes.chunks_exact(4);
-    let mut extra_match_values = extra_match_lengths.bytes.chunks_exact(4);
+    #[cfg(not(feature = "paranoid"))]
+    {
+        fast_field_lz::decode_to_output(
+            literals.bytes,
+            tokens.bytes,
+            offsets.bytes,
+            extra_literal_lengths.bytes,
+            extra_match_lengths.bytes,
+            element_width,
+            output_capacity,
+            output,
+            output_base,
+        )?;
+        return Ok(element_width);
+    }
 
-    for token_bytes in tokens.bytes.chunks_exact(2) {
-        let token = u16::from_le_bytes([token_bytes[0], token_bytes[1]]);
-        let offset_code = usize::from(token & 0x3);
-        let literal_code = usize::from((token >> 2) & 0x0f);
-        let match_code = usize::from((token >> 6) & 0x0f);
+    #[cfg(feature = "paranoid")]
+    {
+        let min_match = match element_width {
+            1 => 4usize,
+            2 => 2usize,
+            _ => 1usize,
+        };
+        let mut reps = [element_width, element_width * 2, element_width * 4];
+        let mut literal_pos = 0usize;
+        let mut offset_values = offsets.bytes.chunks_exact(4);
+        let mut extra_literal_values = extra_literal_lengths.bytes.chunks_exact(4);
+        let mut extra_match_values = extra_match_lengths.bytes.chunks_exact(4);
 
-        let match_offset = match offset_code {
-            3 => {
-                let offset_bytes = offset_values.next().ok_or_else(|| {
+        for token_bytes in tokens.bytes.chunks_exact(2) {
+            let token = u16::from_le_bytes([token_bytes[0], token_bytes[1]]);
+            let offset_code = usize::from(token & 0x3);
+            let literal_code = usize::from((token >> 2) & 0x0f);
+            let match_code = usize::from((token >> 6) & 0x0f);
+
+            let match_offset = match offset_code {
+                3 => {
+                    let offset_bytes = offset_values.next().ok_or_else(|| {
+                        Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+                    })?;
+                    let raw_offset = u32::from_le_bytes([
+                        offset_bytes[0],
+                        offset_bytes[1],
+                        offset_bytes[2],
+                        offset_bytes[3],
+                    ]) as usize;
+                    let byte_offset = raw_offset
+                        .checked_mul(element_width)
+                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                    reps[2] = reps[1];
+                    reps[1] = reps[0];
+                    reps[0] = byte_offset;
+                    byte_offset
+                }
+                0 => reps[0],
+                1 => {
+                    let byte_offset = reps[1];
+                    reps.swap(1, 0);
+                    byte_offset
+                }
+                2 => {
+                    let byte_offset = reps[2];
+                    reps[2] = reps[1];
+                    reps[1] = reps[0];
+                    reps[0] = byte_offset;
+                    byte_offset
+                }
+                _ => unreachable!("offset code is masked to two bits"),
+            };
+
+            let mut literal_elements = literal_code;
+            if literal_code == 15 {
+                let extra_bytes = extra_literal_values.next().ok_or_else(|| {
                     Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
                 })?;
-                let raw_offset = u32::from_le_bytes([
-                    offset_bytes[0],
-                    offset_bytes[1],
-                    offset_bytes[2],
-                    offset_bytes[3],
+                let extra = u32::from_le_bytes([
+                    extra_bytes[0],
+                    extra_bytes[1],
+                    extra_bytes[2],
+                    extra_bytes[3],
                 ]) as usize;
-                let byte_offset = raw_offset
-                    .checked_mul(element_width)
+                literal_elements = literal_elements
+                    .checked_add(extra)
                     .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                reps[2] = reps[1];
-                reps[1] = reps[0];
-                reps[0] = byte_offset;
-                byte_offset
             }
-            0 => reps[0],
-            1 => {
-                let byte_offset = reps[1];
-                reps.swap(1, 0);
-                byte_offset
-            }
-            2 => {
-                let byte_offset = reps[2];
-                reps[2] = reps[1];
-                reps[1] = reps[0];
-                reps[0] = byte_offset;
-                byte_offset
-            }
-            _ => unreachable!("offset code is masked to two bits"),
-        };
-
-        let mut literal_elements = literal_code;
-        if literal_code == 15 {
-            let extra_bytes = extra_literal_values.next().ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
-            })?;
-            let extra = u32::from_le_bytes([
-                extra_bytes[0],
-                extra_bytes[1],
-                extra_bytes[2],
-                extra_bytes[3],
-            ]) as usize;
-            literal_elements = literal_elements
-                .checked_add(extra)
+            let literal_len = literal_elements
+                .checked_mul(element_width)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-        let literal_len = literal_elements
-            .checked_mul(element_width)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
 
-        let mut match_elements = match_code
-            .checked_add(min_match)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if match_code == 15 {
-            let extra_bytes = extra_match_values.next().ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
-            })?;
-            let extra = u32::from_le_bytes([
-                extra_bytes[0],
-                extra_bytes[1],
-                extra_bytes[2],
-                extra_bytes[3],
-            ]) as usize;
-            match_elements = match_elements
-                .checked_add(extra)
+            let mut match_elements = match_code
+                .checked_add(min_match)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            if match_code == 15 {
+                let extra_bytes = extra_match_values.next().ok_or_else(|| {
+                    Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+                })?;
+                let extra = u32::from_le_bytes([
+                    extra_bytes[0],
+                    extra_bytes[1],
+                    extra_bytes[2],
+                    extra_bytes[3],
+                ]) as usize;
+                match_elements = match_elements
+                    .checked_add(extra)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            }
+            let match_len = match_elements
+                .checked_mul(element_width)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+
+            append_field_lz_literals(output, literals.bytes, &mut literal_pos, literal_len)?;
+            append_field_lz_match(output, output_base, match_offset, match_len, output_limit)?;
         }
-        let match_len = match_elements
-            .checked_mul(element_width)
+
+        let remaining_literals = literals.bytes.get(literal_pos..).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
+        })?;
+        let final_len = output
+            .len()
+            .checked_add(remaining_literals.len())
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if final_len > output_limit {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("field_lz output size exceeds header capacity"));
+        }
+        output.extend_from_slice(remaining_literals);
 
-        append_field_lz_literals(output, literals.bytes, &mut literal_pos, literal_len)?;
-        append_field_lz_match(output, output_base, match_offset, match_len, output_limit)?;
+        if offset_values.len() != 0
+            || extra_literal_values.len() != 0
+            || extra_match_values.len() != 0
+        {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("field_lz numeric stream was not fully consumed"));
+        }
+
+        Ok(element_width)
     }
-
-    let remaining_literals = literals.bytes.get(literal_pos..).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
-    })?;
-    let final_len = output
-        .len()
-        .checked_add(remaining_literals.len())
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if final_len > output_limit {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("field_lz output size exceeds header capacity"));
-    }
-    output.extend_from_slice(remaining_literals);
-
-    if offset_values.len() != 0 || extra_literal_values.len() != 0 || extra_match_values.len() != 0
-    {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("field_lz numeric stream was not fully consumed"));
-    }
-
-    Ok(element_width)
 }
 
+#[cfg(feature = "paranoid")]
 #[expect(
     clippy::inline_always,
     reason = "profiled field-LZ token loop pays measurable append call overhead"
@@ -815,6 +837,7 @@ fn append_field_lz_literals(
     Ok(())
 }
 
+#[cfg(feature = "paranoid")]
 #[expect(
     clippy::inline_always,
     reason = "profiled field-LZ token loop pays measurable match append call overhead"

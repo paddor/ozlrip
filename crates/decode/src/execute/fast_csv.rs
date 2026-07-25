@@ -197,6 +197,150 @@ pub(super) fn append_2byte_csv_pattern_rows(
 }
 
 #[cfg(not(feature = "paranoid"))]
+pub(super) fn append_2byte_csv_fixed_prefix_pattern_rows(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    append_2byte_csv_fixed_prefix_pattern_rows_impl::<false>(rows, sources, output)
+}
+
+#[cfg(not(feature = "paranoid"))]
+pub(super) fn append_2byte_csv_fixed_prefix_comma_pattern_rows(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    append_2byte_csv_fixed_prefix_pattern_rows_impl::<true>(rows, sources, output)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_2byte_csv_fixed_prefix_pattern_rows_impl<const COMMA_NEWLINE: bool>(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let final_out_pos = sources.iter().try_fold(output.len(), |sum, source| {
+        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if final_out_pos > output.capacity() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+
+    let source0_bytes = sources[0].bytes.as_ptr();
+    let source1_bytes = sources[1].bytes.as_ptr();
+    let mut source0_byte = sources[0].byte_position;
+    let mut source1_byte = sources[1].byte_position;
+    let mut positions = [
+        sources[0].position,
+        sources[1].position,
+        sources[2].position,
+        sources[3].position,
+        sources[4].position,
+    ];
+    let mut byte_positions = [
+        sources[0].byte_position,
+        sources[1].byte_position,
+        sources[2].byte_position,
+        sources[3].byte_position,
+        sources[4].byte_position,
+    ];
+    let mut out_pos = output.len();
+    let output_ptr = output.as_mut_ptr();
+
+    for _ in 0..rows {
+        unsafe {
+            copy_10_unchecked(source0_bytes.add(source0_byte), output_ptr.add(out_pos));
+        }
+        source0_byte += 10;
+        out_pos += 10;
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        unsafe {
+            copy_3_unchecked(source1_bytes.add(source1_byte), output_ptr.add(out_pos));
+        }
+        source1_byte += 3;
+        out_pos += 3;
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        append_pattern_field_prevalidated_unchecked(
+            2,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        append_pattern_field_prevalidated_unchecked(
+            3,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b'\n');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+    }
+
+    positions[0] = sources[0].position + rows;
+    positions[1] = sources[1].position + rows;
+    byte_positions[0] = source0_byte;
+    byte_positions[1] = source1_byte;
+    if COMMA_NEWLINE {
+        let delimiter_count = rows
+            .checked_mul(4)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        positions[4] = sources[4].position + delimiter_count;
+        byte_positions[4] = sources[4].byte_position + delimiter_count;
+    }
+    commit_pattern_sources(sources, positions, byte_positions);
+    set_output_len(output, out_pos);
+    Ok(())
+}
+
+#[cfg(not(feature = "paranoid"))]
 pub(super) fn append_2byte_csv_header_pattern_rows(
     rows: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -305,6 +449,162 @@ pub(super) fn append_2byte_csv_header_pattern_rows(
 }
 
 #[cfg(not(feature = "paranoid"))]
+pub(super) fn append_2byte_csv_fixed_prefix_header_pattern_rows(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    append_2byte_csv_fixed_prefix_header_pattern_rows_impl::<false>(rows, sources, output)
+}
+
+#[cfg(not(feature = "paranoid"))]
+pub(super) fn append_2byte_csv_fixed_prefix_comma_header_pattern_rows(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    append_2byte_csv_fixed_prefix_header_pattern_rows_impl::<true>(rows, sources, output)
+}
+
+#[cfg(not(feature = "paranoid"))]
+fn append_2byte_csv_fixed_prefix_header_pattern_rows_impl<const COMMA_NEWLINE: bool>(
+    rows: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    let final_out_pos = sources[..5].iter().try_fold(output.len(), |sum, source| {
+        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if final_out_pos > output.capacity() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+
+    let source0_bytes = sources[0].bytes.as_ptr();
+    let source1_bytes = sources[1].bytes.as_ptr();
+    let mut source0_byte = sources[0].byte_position;
+    let mut source1_byte = sources[1].byte_position;
+    let mut positions = [
+        sources[0].position,
+        sources[1].position,
+        sources[2].position,
+        sources[3].position,
+        sources[4].position,
+    ];
+    let mut byte_positions = [
+        sources[0].byte_position,
+        sources[1].byte_position,
+        sources[2].byte_position,
+        sources[3].byte_position,
+        sources[4].byte_position,
+    ];
+    let mut out_pos = output.len();
+    let output_ptr = output.as_mut_ptr();
+
+    for _ in 0..rows {
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b'\n');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        unsafe {
+            copy_10_unchecked(source0_bytes.add(source0_byte), output_ptr.add(out_pos));
+        }
+        source0_byte += 10;
+        out_pos += 10;
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        unsafe {
+            copy_3_unchecked(source1_bytes.add(source1_byte), output_ptr.add(out_pos));
+        }
+        source1_byte += 3;
+        out_pos += 3;
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        append_pattern_field_prevalidated_unchecked(
+            2,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+        if COMMA_NEWLINE {
+            append_const_byte_unchecked(output_ptr, &mut out_pos, b',');
+        } else {
+            append_pattern_delimiter_unchecked(
+                sources,
+                &mut positions,
+                &mut byte_positions,
+                output_ptr,
+                &mut out_pos,
+            );
+        }
+        append_pattern_field_prevalidated_unchecked(
+            3,
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+    }
+    if COMMA_NEWLINE {
+        append_const_byte_unchecked(output_ptr, &mut out_pos, b'\n');
+    } else {
+        append_pattern_delimiter_unchecked(
+            sources,
+            &mut positions,
+            &mut byte_positions,
+            output_ptr,
+            &mut out_pos,
+        );
+    }
+
+    positions[0] = sources[0].position + rows;
+    positions[1] = sources[1].position + rows;
+    byte_positions[0] = source0_byte;
+    byte_positions[1] = source1_byte;
+    if COMMA_NEWLINE {
+        let delimiter_count = rows
+            .checked_mul(4)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        positions[4] = sources[4].position + delimiter_count;
+        byte_positions[4] = sources[4].byte_position + delimiter_count;
+    }
+    commit_pattern_sources(sources, positions, byte_positions);
+    set_output_len(output, out_pos);
+    Ok(())
+}
+
+#[cfg(not(feature = "paranoid"))]
 fn append_wide_remaining_source_bytes_unchecked(
     source: &DispatchStringSource<'_>,
     positions: &mut [usize],
@@ -380,6 +680,7 @@ fn append_wide_delimiter_unchecked(
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[inline(always)]
 fn append_pattern_field_prevalidated_unchecked(
     source_index: usize,
     sources: &[DispatchStringSource<'_>],
@@ -410,6 +711,7 @@ fn append_pattern_field_prevalidated_unchecked(
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[inline(always)]
 fn append_pattern_delimiter_unchecked(
     sources: &[DispatchStringSource<'_>],
     positions: &mut [usize; 5],
@@ -456,6 +758,16 @@ fn set_output_len(output: &mut Vec<u8>, out_pos: usize) {
 
 #[cfg(not(feature = "paranoid"))]
 #[inline(always)]
+fn append_const_byte_unchecked(output_ptr: *mut u8, out_pos: &mut usize, byte: u8) {
+    unsafe {
+        // SAFETY: caller prevalidated output spare capacity for full pattern.
+        *output_ptr.add(*out_pos) = byte;
+    }
+    *out_pos += 1;
+}
+
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
 unsafe fn copy_short_field_unchecked(src: *const u8, dst: *mut u8, length: usize) {
     match length {
         0 => {}
@@ -468,7 +780,7 @@ unsafe fn copy_short_field_unchecked(src: *const u8, dst: *mut u8, length: usize
             // SAFETY: caller guarantees both 2-byte ranges are valid.
             core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
         },
-        3..=4 => unsafe {
+        3 => unsafe {
             // SAFETY: first and last 2-byte chunks stay within the field.
             core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
             core::ptr::write_unaligned(
@@ -476,13 +788,21 @@ unsafe fn copy_short_field_unchecked(src: *const u8, dst: *mut u8, length: usize
                 core::ptr::read_unaligned(src.add(length - 2).cast()),
             );
         },
-        5..=8 => unsafe {
+        4 => unsafe {
+            // SAFETY: caller guarantees both 4-byte ranges are valid.
+            core::ptr::write_unaligned(dst.cast::<u32>(), core::ptr::read_unaligned(src.cast()));
+        },
+        5..=7 => unsafe {
             // SAFETY: first and last 4-byte chunks stay within the field.
             core::ptr::write_unaligned(dst.cast::<u32>(), core::ptr::read_unaligned(src.cast()));
             core::ptr::write_unaligned(
                 dst.add(length - 4).cast::<u32>(),
                 core::ptr::read_unaligned(src.add(length - 4).cast()),
             );
+        },
+        8 => unsafe {
+            // SAFETY: caller guarantees both 8-byte ranges are valid.
+            core::ptr::write_unaligned(dst.cast::<u64>(), core::ptr::read_unaligned(src.cast()));
         },
         9..=16 => unsafe {
             // SAFETY: first and last 8-byte chunks stay within the field.
@@ -497,5 +817,28 @@ unsafe fn copy_short_field_unchecked(src: *const u8, dst: *mut u8, length: usize
             // non-overlap for the full field.
             core::ptr::copy_nonoverlapping(src, dst, length);
         },
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+unsafe fn copy_10_unchecked(src: *const u8, dst: *mut u8) {
+    unsafe {
+        // SAFETY: caller guarantees both 10-byte ranges are valid.
+        core::ptr::write_unaligned(dst.cast::<u64>(), core::ptr::read_unaligned(src.cast()));
+        core::ptr::write_unaligned(
+            dst.add(8).cast::<u16>(),
+            core::ptr::read_unaligned(src.add(8).cast()),
+        );
+    }
+}
+
+#[cfg(not(feature = "paranoid"))]
+#[inline(always)]
+unsafe fn copy_3_unchecked(src: *const u8, dst: *mut u8) {
+    unsafe {
+        // SAFETY: caller guarantees both 3-byte ranges are valid.
+        core::ptr::write_unaligned(dst.cast::<u16>(), core::ptr::read_unaligned(src.cast()));
+        core::ptr::write(dst.add(2), core::ptr::read(src.add(2)));
     }
 }
