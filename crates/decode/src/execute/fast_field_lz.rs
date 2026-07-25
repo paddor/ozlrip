@@ -240,6 +240,8 @@ unsafe fn copy_lz_match(src: *const u8, dst: *mut u8, len: usize, offset: usize)
 
 #[cfg(all(test, not(feature = "paranoid")))]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::decode_to_output;
 
     #[test]

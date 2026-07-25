@@ -363,10 +363,8 @@ mod tests {
 
     #[cfg(feature = "zstd")]
     fn push_zstd_block_header(out: &mut Vec<u8>, last: bool, block_type: u32, block_size: usize) {
-        let raw = ((block_size as u32) << 3) | (block_type << 1) | u32::from(last);
-        out.push(raw as u8);
-        out.push((raw >> 8) as u8);
-        out.push((raw >> 16) as u8);
+        let raw = (u32::try_from(block_size).unwrap() << 3) | (block_type << 1) | u32::from(last);
+        out.extend_from_slice(&raw.to_le_bytes()[..3]);
     }
 
     #[cfg(feature = "zstd")]

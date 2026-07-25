@@ -688,7 +688,7 @@ pub(super) fn decode_field_lz_node_to_output(
             output,
             output_base,
         )?;
-        return Ok(element_width);
+        Ok(element_width)
     }
 
     #[cfg(feature = "paranoid")]

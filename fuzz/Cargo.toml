@@ -77,6 +77,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_dispatch_string_node"
+path = "fuzz_targets/decode_dispatch_string_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_bitpack_node"
 path = "fuzz_targets/decode_bitpack_node.rs"
 test = false
@@ -135,6 +142,13 @@ bench = false
 [[bin]]
 name = "decode_range_pack_node"
 path = "fuzz_targets/decode_range_pack_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_field_lz_node"
+path = "fuzz_targets/decode_field_lz_node.rs"
 test = false
 doc = false
 bench = false

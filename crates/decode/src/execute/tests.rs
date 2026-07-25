@@ -465,6 +465,8 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::MUX_LENGTHS_ID,
         standard::PARTITION_ID,
         standard::PARSE_INT_ID,
+        #[cfg(feature = "dev-format")]
+        standard::PIVCO_HUFFMAN_ID,
         standard::QUANTIZE_LENGTHS_ID,
         standard::QUANTIZE_OFFSETS_ID,
         standard::RANGE_PACK_ID,
@@ -487,61 +489,47 @@ fn supported_standard_nodes_have_decode_coverage() {
     #[cfg(feature = "zstd")]
     supported.push(standard::ZSTD_ID);
 
-    let mut covered = vec![
-        standard::BITPACK_SERIAL_ID,
-        standard::BITPACK_INT_ID,
-        standard::BIT_SPLIT_ID,
-        standard::BITUNPACK_ID,
-        standard::CONCAT_SERIAL_ID,
-        standard::CONCAT_NUM_ID,
-        standard::CONCAT_STRUCT_ID,
-        standard::CONSTANT_SERIAL_ID,
-        standard::CONVERT_NUM_TO_SERIAL_LE_ID,
-        standard::CONVERT_NUM_TO_STRUCT_LE_ID,
-        standard::CONVERT_SERIAL_TO_NUM_BE_ID,
-        standard::CONVERT_SERIAL_TO_NUM_LE_ID,
-        standard::CONVERT_SERIAL_TO_STRUCT_ID,
-        standard::CONVERT_STRING_TO_SERIAL_ID,
-        standard::CONVERT_STRUCT_TO_NUM_BE_ID,
-        standard::CONVERT_STRUCT_TO_NUM_LE_ID,
-        standard::CONVERT_STRUCT_TO_SERIAL_ID,
-        standard::DELTA_INT_ID,
-        standard::DISPATCH_N_BY_TAG_ID,
-        standard::DISPATCH_STRING_ID,
-        standard::FIELD_LZ_ID,
-        standard::FSE_V2_ID,
-        standard::FSE_NCOUNT_ID,
-        standard::HUFFMAN_V2_ID,
-        standard::FLATPACK_ID,
-        standard::LZ_ID,
-        standard::MUX_LENGTHS_ID,
-        standard::PARTITION_ID,
-        standard::PARSE_INT_ID,
-        standard::QUANTIZE_LENGTHS_ID,
-        standard::QUANTIZE_OFFSETS_ID,
-        standard::RANGE_PACK_ID,
-        standard::SENTINEL_ID,
-        standard::SEPARATE_STRING_COMPONENTS_ID,
-        standard::SPARSE_NUM_ID,
-        standard::SPLITN_ID,
-        standard::SPLITN_STRUCT_ID,
-        standard::SPLIT_BY_STRUCT_ID,
-        standard::TOKENIZE_FIXED_ID,
-        standard::TOKENIZE_NUMERIC_ID,
-        standard::TRANSPOSE_SPLIT_ID,
-        standard::TRANSPOSE_SPLIT2_ID,
-        standard::TRANSPOSE_SPLIT4_ID,
-        standard::TRANSPOSE_SPLIT8_ID,
-        standard::ZIGZAG_ID,
-    ];
-    #[cfg(feature = "lz4")]
-    covered.push(standard::LZ4_ID);
-    #[cfg(feature = "zstd")]
-    covered.push(standard::ZSTD_ID);
+    let mut covered = covered_standard_node_ids();
+    #[cfg(not(feature = "dev-format"))]
+    covered.retain(|&id| id != standard::PIVCO_HUFFMAN_ID);
+    #[cfg(not(feature = "lz4"))]
+    covered.retain(|&id| id != standard::LZ4_ID);
+    #[cfg(not(feature = "zstd"))]
+    covered.retain(|&id| id != standard::ZSTD_ID);
 
     supported.sort_unstable();
     covered.sort_unstable();
     assert_eq!(supported, covered);
+}
+
+fn covered_standard_node_ids() -> Vec<u32> {
+    const MANIFEST: &str = include_str!("../../../../tests/fixtures/standard-node-coverage.tsv");
+    MANIFEST
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut fields = line.split('\t');
+            let id = fields
+                .next()
+                .expect("standard-node coverage row has id")
+                .parse::<u32>()
+                .expect("standard-node coverage id is numeric");
+            assert!(
+                fields.next().is_some(),
+                "standard-node coverage row has name"
+            );
+            assert!(
+                fields.next().is_some(),
+                "standard-node coverage row has coverage"
+            );
+            assert!(
+                fields.next().is_none(),
+                "standard-node coverage row has extra field"
+            );
+            id
+        })
+        .collect()
 }
 
 #[test]

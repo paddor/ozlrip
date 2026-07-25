@@ -7,6 +7,11 @@
   SIMD merge acceleration.
 - Load OpenZL fat dictionary bundles through `Decoder` and decode
   zstd-dictionary-backed frames.
+- Track OpenZL release-checkpoint interop and standard-node fixture coverage in
+  committed manifests.
+- Add fuzz entry points for public-frame Field-LZ and dispatch-string graphs.
+- Pin public API behavior for custom transforms and unsupported dictionary
+  materializers to typed `Unsupported` errors.
 
 ## [0.1.0]
 

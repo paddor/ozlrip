@@ -35,6 +35,10 @@ Current unsafe leaves:
   segments into pre-reserved `Vec<u8>` storage and sets the length after all
   bytes are initialized. The caller validates tag widths, segment-size widths,
   source totals, output size, allocation limits, and capacity before entry.
+- `ozlrip-decode::execute::fast_field_lz`: writes validated Field-LZ literal
+  and match streams into pre-reserved output storage. The leaf validates numeric
+  stream element boundaries, literal ranges, match offsets, and final output
+  length before publishing the output length.
 - `ozlrip-decode::execute::fast_lengths`: decodes validated one-byte string
   length streams into pre-reserved `Vec<u32>` storage and sets the length after
   all entries are initialized. The caller validates output element count and
@@ -64,6 +68,10 @@ Current unsafe leaves:
   numeric streams into pre-reserved `Vec<u8>` storage and sets the length after
   all elements are initialized. The safe fallback handles all supported widths.
 
+PivCo-Huffman uses `fearless_simd` for a std-gated constant-leaf merge path
+under `not(feature = "paranoid")`. The module itself remains safe Rust; SIMD
+dispatch is selected through the safe abstraction and falls back to scalar code.
+
 Primary defenses:
 
 - Bounded frame, chunk, stream, node, buffer, and graph-depth limits
@@ -72,8 +80,8 @@ Primary defenses:
 - Validate the full graph before node execution
 - Borrow stored streams from the input frame
 - Allocate regenerated streams only after limit checks
-- Return typed `Unsupported` errors for unknown codecs, custom decoders,
-  dictionaries, and materialized bundles
+- Return typed `Unsupported` errors for unknown codecs, custom transforms,
+  custom dictionary materializers, and non-zstd dictionary materializers
 
 Regression tests should cover OpenZL memory-safety history recorded in
 `info/openzl/VULNS.md`.
