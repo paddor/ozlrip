@@ -14,6 +14,7 @@ pub(crate) const TOKENIZE_NUMERIC_ID: u32 = 37;
 pub(crate) const SPLIT_BY_STRUCT_ID: u32 = 41;
 pub(crate) const DISPATCH_N_BY_TAG_ID: u32 = 42;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
+pub(crate) const CONSTANT_FIXED_ID: u32 = 45;
 pub(crate) const DISPATCH_STRING_ID: u32 = 54;
 pub(crate) const CONVERT_SERIAL_TO_STRUCT_ID: u32 = 5;
 pub(crate) const CONVERT_STRUCT_TO_SERIAL_ID: u32 = 6;
@@ -47,6 +48,7 @@ pub(crate) const MUX_LENGTHS_ID: u32 = 65;
 pub(crate) const FSE_V2_ID: u32 = 49;
 pub(crate) const HUFFMAN_V2_ID: u32 = 50;
 pub(crate) const FSE_NCOUNT_ID: u32 = 52;
+pub(crate) const PIVCO_HUFFMAN_ID: u32 = 67;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
     let Some(min_version) = min_version(id) else {
@@ -80,6 +82,7 @@ const fn min_version(id: u32) -> Option<u32> {
         62 => Some(23),
         18 | 19 | 63..=65 => Some(24),
         66 => Some(26),
+        67 => Some(27),
         _ => None,
     }
 }
@@ -99,5 +102,9 @@ mod tests {
         let err = validate_transform_id(66, 25).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         validate_transform_id(66, 26).unwrap();
+
+        let err = validate_transform_id(67, 26).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        validate_transform_id(67, 27).unwrap();
     }
 }

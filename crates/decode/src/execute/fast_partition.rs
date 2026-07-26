@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
-use super::{ForwardBitReader, OwnedStream};
+use super::{OwnedStream, partition::ForwardBitReader};
 
 pub(super) fn decode_u32_node(
     buckets: &[u8],

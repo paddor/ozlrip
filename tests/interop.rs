@@ -10,6 +10,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const RELEASE_MATRIX: &str = include_str!("fixtures/openzl-release-matrix.tsv");
+
 #[test]
 fn upstream_zli_golden_roundtrips_match_ozlrip() {
     let Some(zli) = zli_path() else {
@@ -22,62 +24,48 @@ fn upstream_zli_golden_roundtrips_match_ozlrip() {
     writeln!(manifest, "upstream_commit={upstream_commit}").unwrap();
 
     for case in supported_interop_cases() {
-        let name = case.name;
-        let input = case.load_input();
-        let profile = case.profile;
-        let input_path = work.path.join(format!("{name}.input"));
-        let frame_path = work.path.join(format!("{name}.zl"));
-        let zli_decoded_path = work.path.join(format!("{name}.zli.decoded"));
-        fs::write(&input_path, &input).unwrap();
-
-        let compress_args = compress_args(
-            &input_path,
-            profile,
-            case.profile_arg,
-            case.extra_args,
-            &frame_path,
-        );
-        let decompress_args = decompress_args(&frame_path, &zli_decoded_path);
-        run(&zli, compress_args.iter().copied());
-        run(&zli, decompress_args.iter().copied());
-
-        let frame = fs::read(&frame_path).unwrap();
-        let zli_decoded = fs::read(&zli_decoded_path).unwrap();
-        assert_eq!(zli_decoded, input, "{name} upstream roundtrip changed data");
-
-        let frame_info = ozlrip::inspect(&frame).unwrap_or_else(|err| {
-            panic!("{name} ozlrip inspect failed: {err:?}");
-        });
-        let mut ozlrip_decoded = Vec::new();
-        ozlrip::decode_into_with_options(
-            &frame,
-            &mut ozlrip_decoded,
-            ozlrip::Options {
-                limits: case.limits(),
-                ..ozlrip::Options::default()
-            },
-        )
-        .unwrap_or_else(|err| {
-            panic!("{name} ozlrip decode failed: {err:?}");
-        });
-        assert_eq!(ozlrip_decoded, input, "{name} ozlrip output mismatch");
-
-        writeln!(
-            manifest,
-            "fixture={name}\nprofile={profile}\nformat_version={}\ncompress_command={}\ndecompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ndecoded_hash={:016x}\n",
-            frame_info.format_version,
-            command_line(&zli, compress_args.iter().copied()),
-            command_line(&zli, decompress_args.iter().copied()),
-            hash64(&input),
-            hash64(&frame),
-            hash64(&zli_decoded),
-        )
-        .unwrap();
+        run_roundtrip_case(&zli, &work, &case, &mut manifest);
     }
 
     let manifest_dir = Path::new("tmp").join("ozlrip-interop");
     fs::create_dir_all(&manifest_dir).unwrap();
     fs::write(manifest_dir.join("last-run.manifest"), manifest).unwrap();
+}
+
+#[test]
+fn upstream_release_checkpoint_smoke_roundtrips_match_ozlrip() {
+    let mut ran = 0usize;
+    let mut manifest = String::new();
+
+    for checkpoint in release_interop_checkpoints() {
+        let env_var = release_zli_env_var(checkpoint);
+        let Some(zli) = env::var_os(&env_var).map(PathBuf::from) else {
+            continue;
+        };
+        ran += 1;
+        let work = WorkDir::new(&format!("ozlrip-interop-{checkpoint}"));
+        let upstream_commit = upstream_commit(&zli).unwrap_or_else(|| "unknown".to_owned());
+        writeln!(
+            manifest,
+            "checkpoint={checkpoint}\nenv={env_var}\nupstream_commit={upstream_commit}"
+        )
+        .unwrap();
+        for case in release_smoke_interop_cases() {
+            run_roundtrip_case(&zli, &work, &case, &mut manifest);
+        }
+    }
+
+    if ran == 0 {
+        eprintln!(
+            "skipping release interop smoke: set OZLRIP_ZLI_V0_0_23, \
+             OZLRIP_ZLI_V0_1_0, or OZLRIP_ZLI_V0_2_0"
+        );
+        return;
+    }
+
+    let manifest_dir = Path::new("tmp").join("ozlrip-interop");
+    fs::create_dir_all(&manifest_dir).unwrap();
+    fs::write(manifest_dir.join("release-smoke.manifest"), manifest).unwrap();
 }
 
 #[test]
@@ -132,6 +120,60 @@ fn upstream_profile_discovery_records_unsupported_frames() {
     let manifest_dir = Path::new("tmp").join("ozlrip-interop");
     fs::create_dir_all(&manifest_dir).unwrap();
     fs::write(manifest_dir.join("discovery.manifest"), manifest).unwrap();
+}
+
+fn run_roundtrip_case(zli: &Path, work: &WorkDir, case: &InteropCase, manifest: &mut String) {
+    let name = case.name;
+    let input = case.load_input();
+    let profile = case.profile;
+    let input_path = work.path.join(format!("{name}.input"));
+    let frame_path = work.path.join(format!("{name}.zl"));
+    let zli_decoded_path = work.path.join(format!("{name}.zli.decoded"));
+    fs::write(&input_path, &input).unwrap();
+
+    let compress_args = compress_args(
+        &input_path,
+        profile,
+        case.profile_arg,
+        case.extra_args,
+        &frame_path,
+    );
+    let decompress_args = decompress_args(&frame_path, &zli_decoded_path);
+    run(zli, compress_args.iter().copied());
+    run(zli, decompress_args.iter().copied());
+
+    let frame = fs::read(&frame_path).unwrap();
+    let zli_decoded = fs::read(&zli_decoded_path).unwrap();
+    assert_eq!(zli_decoded, input, "{name} upstream roundtrip changed data");
+
+    let frame_info = ozlrip::inspect(&frame).unwrap_or_else(|err| {
+        panic!("{name} ozlrip inspect failed: {err:?}");
+    });
+    let mut ozlrip_decoded = Vec::new();
+    ozlrip::decode_into_with_options(
+        &frame,
+        &mut ozlrip_decoded,
+        ozlrip::Options {
+            limits: case.limits(),
+            ..ozlrip::Options::default()
+        },
+    )
+    .unwrap_or_else(|err| {
+        panic!("{name} ozlrip decode failed: {err:?}");
+    });
+    assert_eq!(ozlrip_decoded, input, "{name} ozlrip output mismatch");
+
+    writeln!(
+        manifest,
+        "fixture={name}\nprofile={profile}\nformat_version={}\ncompress_command={}\ndecompress_command={}\ninput_hash={:016x}\nframe_hash={:016x}\ndecoded_hash={:016x}\n",
+        frame_info.format_version,
+        command_line(zli, compress_args.iter().copied()),
+        command_line(zli, decompress_args.iter().copied()),
+        hash64(&input),
+        hash64(&frame),
+        hash64(&zli_decoded),
+    )
+    .unwrap();
 }
 
 fn supported_interop_cases() -> Vec<InteropCase> {
@@ -617,8 +659,54 @@ fn supported_interop_cases() -> Vec<InteropCase> {
     ]
 }
 
+fn release_smoke_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase {
+            name: "serial-small",
+            input: InteropInput::Inline(b"openzl release smoke serial fixture\n".to_vec()),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "u8-small",
+            input: InteropInput::Inline((0..=63).collect()),
+            profile: "u8",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+    ]
+}
+
 fn discovery_interop_cases() -> Vec<InteropCase> {
     Vec::new()
+}
+
+fn release_interop_checkpoints() -> Vec<&'static str> {
+    RELEASE_MATRIX
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 4, "bad OpenZL release-matrix row: {line}");
+            (fields[1] == "release").then_some(fields[0])
+        })
+        .collect()
+}
+
+fn release_zli_env_var(checkpoint: &str) -> String {
+    let suffix = checkpoint
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' => ch.to_ascii_uppercase(),
+            'A'..='Z' | '0'..='9' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    format!("OZLRIP_ZLI_{suffix}")
 }
 
 fn sao_synthetic() -> Vec<u8> {

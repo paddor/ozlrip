@@ -22,7 +22,8 @@ let decoded = ozlrip::decode_with_options(frame, options)?;
 
 For reusable allocation state, create `ozlrip::Decoder` and call
 `Decoder::decode` or `Decoder::decode_into`. Use `Decoder::with_options` when
-the default decoder options are not the right fit.
+the default decoder options are not the right fit. Load dictionary bundles with
+`Decoder::load_dictionary_bundle` before dictionary-backed decode.
 
 ## Current Scope
 
@@ -35,20 +36,30 @@ the default decoder options are not the right fit.
   bitunpack, range-pack, flatpack, sparse num, partition, quantize
 - [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
 - [x] `paranoid` safe-code baseline
-- [ ] Dictionary bundle materialization
-- [ ] External/custom codecs
-- [ ] Custom transform execution
-- [ ] Broad release-tag interop matrix
-- [ ] Committed fixture coverage for every standard node variant
+- [x] OpenZL `dev-format` v27 metadata and PivCo-Huffman graph validation
+- [x] PivCo-Huffman payload decode, safe scalar path, and std-gated SIMD merge
+- [x] Fat-bundle dictionary materialization for zstd
+- [x] Broad release-tag interop checkpoint matrix
+- [x] Committed standard-node coverage manifest tied to decoder tests
+- [ ] External/custom codec and transform extension API
 - [ ] Some unobserved transform header variants
+
+## Extension Boundary
+
+`ozlrip` decodes OpenZL standard-codec frames. Custom transforms, custom
+dictionary materializers, and non-zstd dictionary materializers are rejected
+with typed `Unsupported` errors. Adding extension execution needs a callback API
+with explicit graph typing, dictionary lifetime, allocation-limit, and rollback
+contracts; it should not be bolted into the standard decoder path.
 
 ## Performance
 
 - Baseline: in-process `openzl-c-ffi`, not the `zli` CLI.
-- Default features: about `1.41x` mean, `1.17x` median OpenZL C on the current
-  generated corpus.
-- Default representative range: about `0.9x-1.4x` on CSV/numeric/table/SAO
-  cases; stored/serial and tiny-sample outliers can be higher.
+- Default features: latest local checksum bench pass is at or above OpenZL C on
+  most generated cases; shape-sensitive rows still need repeated runs on quiet
+  hardware.
+- Representative parity rows from the last perf pass: CSV time-series
+  `1.00x-1.01x`, SDDL2/SAO `1.07x`, ERA5-shaped i32 `1.25x` in isolated rerun.
 - `paranoid`: about `1.27x` mean, `0.99x` median OpenZL C on the current
   generated corpus.
 - `paranoid` representative range: CSV/numeric samples around `0.70x-0.79x`,

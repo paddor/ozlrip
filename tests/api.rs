@@ -1,6 +1,12 @@
 use ozlrip::{ErrorKind, Limits, Options};
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
+const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
+const UNIQUE_ID_BYTES: usize = 32;
+const FAT_BUNDLE_FLAG: u8 = 1;
+const ZSTD_ID: u32 = 22;
+const LZ4_ID: u32 = 62;
 
 fn magic(version: u32) -> [u8; 4] {
     (MAGIC_BASE + version).to_le_bytes()
@@ -40,6 +46,19 @@ fn transform_graph_frame() -> Vec<u8> {
     input
 }
 
+fn custom_transform_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(1);
+    input.push(2);
+    input.push(0);
+    input.push(1);
+    input.push(1);
+    input
+}
+
 fn bundled_stored_frame(bytes: &[u8]) -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&magic(25));
@@ -54,6 +73,26 @@ fn bundled_stored_frame(bytes: &[u8]) -> Vec<u8> {
     input.extend_from_slice(bytes);
     input.push(0);
     input
+}
+
+fn dictionary_bundle(codec_id: u32, custom: bool) -> Vec<u8> {
+    let bundle_id = [7; UNIQUE_ID_BYTES];
+    let dict_id = [9; UNIQUE_ID_BYTES];
+    let content = [1u32.to_le_bytes(), 1i32.to_le_bytes()].concat();
+
+    let mut bundle = Vec::new();
+    bundle.extend_from_slice(&BUNDLE_INFO_MAGIC.to_le_bytes());
+    bundle.extend_from_slice(&bundle_id);
+    bundle.push(FAT_BUNDLE_FLAG);
+    bundle.extend_from_slice(&1u32.to_le_bytes());
+    bundle.extend_from_slice(&dict_id);
+    bundle.extend_from_slice(&PACKED_DICT_MAGIC.to_le_bytes());
+    bundle.extend_from_slice(&dict_id);
+    bundle.extend_from_slice(&codec_id.to_le_bytes());
+    bundle.push(u8::from(custom));
+    bundle.extend_from_slice(&u32::try_from(content.len()).unwrap().to_le_bytes());
+    bundle.extend_from_slice(&content);
+    bundle
 }
 
 fn unknown_size_frame() -> Vec<u8> {
@@ -102,14 +141,45 @@ fn decode_into_preserves_destination_on_unsupported_graph() {
 }
 
 #[test]
-fn decode_into_preserves_destination_on_dictionary_bundle() {
-    let frame = bundled_stored_frame(&[7, 8, 9]);
+fn decode_into_preserves_destination_on_custom_transform() {
+    let frame = custom_transform_frame();
     let mut dst = vec![1, 2, 3];
 
     let err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [1, 2, 3]);
+}
+
+#[test]
+fn load_dictionary_bundle_rejects_custom_materializer() {
+    let bundle = dictionary_bundle(ZSTD_ID, true);
+    let mut decoder = ozlrip::Decoder::new();
+
+    let err = decoder.load_dictionary_bundle(&bundle).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+#[test]
+fn load_dictionary_bundle_rejects_external_materializer() {
+    let bundle = dictionary_bundle(LZ4_ID, false);
+    let mut decoder = ozlrip::Decoder::new();
+
+    let err = decoder.load_dictionary_bundle(&bundle).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+#[test]
+fn decode_into_accepts_unused_dictionary_bundle_id() {
+    let frame = bundled_stored_frame(&[7, 8, 9]);
+    let mut dst = vec![1, 2, 3];
+
+    let written = ozlrip::decode_into(&frame, &mut dst).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(dst, [1, 2, 3, 7, 8, 9]);
     assert_eq!(
         ozlrip::inspect(&frame)
             .unwrap()
