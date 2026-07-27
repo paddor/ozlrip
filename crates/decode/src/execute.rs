@@ -918,7 +918,7 @@ fn try_execute_single_input_splitn_node(
 ) -> Result<bool> {
     if !matches!(
         node.standard_id,
-        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID
+        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::SPLITN_NUM_ID
     ) || node.input_count != 1
     {
         return Ok(false);
@@ -1252,6 +1252,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
     let static_inputs: usize = match standard_id {
         standard::SPLITN_ID
         | standard::SPLITN_STRUCT_ID
+        | standard::SPLITN_NUM_ID
         | standard::SPLIT_BY_STRUCT_ID
         | standard::TRANSPOSE_SPLIT_ID
         | standard::BIT_SPLIT_ID => 0,
@@ -1407,12 +1408,9 @@ fn execute_standard_node(
             header,
             ctx.limits,
         )),
-        standard::SPLITN_STRUCT_ID => one_typed(decode_splitn_typed_node(
-            inputs,
-            variable_inputs,
-            header,
-            ctx.limits,
-        )),
+        standard::SPLITN_STRUCT_ID | standard::SPLITN_NUM_ID => one_typed(
+            decode_splitn_typed_node(inputs, variable_inputs, header, ctx.limits),
+        ),
         standard::SPLIT_BY_STRUCT_ID => one_typed(decode_split_by_struct_node(
             inputs,
             variable_inputs,

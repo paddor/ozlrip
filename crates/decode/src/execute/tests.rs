@@ -481,6 +481,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::SEPARATE_STRING_COMPONENTS_ID,
         standard::SPARSE_NUM_ID,
         standard::SPLITN_ID,
+        standard::SPLITN_NUM_ID,
         standard::SPLITN_STRUCT_ID,
         standard::SPLIT_BY_STRUCT_ID,
         standard::TOKENIZE_FIXED_ID,
@@ -729,6 +730,56 @@ fn decodes_empty_v21_splitn_serial_chunk() {
 
     assert_eq!(written, 0);
     assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn decodes_splitn_num_node() {
+    let mut scratch = DecodeScratch::new();
+    let mut dict_store = DictionaryStore::new();
+    #[cfg(feature = "zstd")]
+    let mut zstd = zrip::DecompressContext::new();
+    let mut ctx = StandardNodeContext {
+        format_version: 21,
+        limits: Limits::default(),
+        scratch: &mut scratch,
+        dictionary_bundle_id: None,
+        dict_store: &mut dict_store,
+        #[cfg(feature = "zstd")]
+        zstd: &mut zstd,
+    };
+    let outputs = execute_standard_node(
+        standard::SPLITN_NUM_ID,
+        &[
+            StreamInput {
+                bytes: &[1, 0, 2, 0],
+                element_width: 2,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[3, 0],
+                element_width: 2,
+                string_lengths: None,
+            },
+        ],
+        2,
+        None,
+        &[],
+        &mut ctx,
+    )
+    .unwrap();
+    assert_eq!(outputs.len(), 1);
+    let output = &outputs[0];
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(output.bytes, [1, 0, 2, 0, 3, 0]);
+}
+
+#[test]
+fn decodes_empty_splitn_num_header_width() {
+    let output = decode_splitn_typed_node(&[], 0, &[4], Limits::default()).unwrap();
+
+    assert_eq!(output.element_width, 4);
+    assert!(output.bytes.is_empty());
 }
 
 #[test]

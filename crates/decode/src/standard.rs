@@ -42,6 +42,7 @@ pub(crate) const TRANSPOSE_SPLIT2_ID: u32 = 30;
 pub(crate) const TRANSPOSE_SPLIT4_ID: u32 = 31;
 pub(crate) const TRANSPOSE_SPLIT8_ID: u32 = 32;
 pub(crate) const SPLITN_STRUCT_ID: u32 = 47;
+pub(crate) const SPLITN_NUM_ID: u32 = 48;
 pub(crate) const SPARSE_NUM_ID: u32 = 66;
 pub(crate) const BIT_SPLIT_ID: u32 = 63;
 pub(crate) const MUX_LENGTHS_ID: u32 = 65;

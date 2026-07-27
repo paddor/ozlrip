@@ -1001,6 +1001,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         }),
         standard::SPLITN_ID
         | standard::SPLITN_STRUCT_ID
+        | standard::SPLITN_NUM_ID
         | standard::SPLIT_BY_STRUCT_ID
         | standard::TRANSPOSE_SPLIT_ID
         | standard::BIT_SPLIT_ID => Some(StandardNodeShape {

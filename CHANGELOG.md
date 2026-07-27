@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Decode OpenZL `splitn_num` numeric split nodes, including empty numeric
+  outputs that carry element width in the transform header.
+
 ## [0.2.0]
 
 - Accept OpenZL format v27 metadata behind `dev-format`, including
