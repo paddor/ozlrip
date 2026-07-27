@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0]
+
 - Accept OpenZL format v27 metadata behind `dev-format`, including
   `pivco_huffman` graph validation, safe scalar payload decode, and std-gated
   SIMD merge acceleration.
