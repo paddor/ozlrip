@@ -46,11 +46,12 @@ fn standard_node_fixture_manifest_has_one_row_per_node() {
 fn error_taxonomy_manifest_tracks_public_error_classes() {
     let rows = parse_tsv(
         ERROR_TAXONOMY,
-        "case\tcategory\toperation\texpected_kind",
-        4,
+        "case\tcategory\toperation\texpected_kind\trequired_feature",
+        5,
     );
     let mut cases = BTreeSet::new();
     let mut categories = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
 
     for row in rows {
         assert!(
@@ -59,31 +60,76 @@ fn error_taxonomy_manifest_tracks_public_error_classes() {
             row[0]
         );
         assert!(
-            matches!(row[1], "unsupported" | "malformed" | "truncated" | "limit"),
+            matches!(
+                row[1],
+                "unsupported"
+                    | "malformed"
+                    | "truncated"
+                    | "limit"
+                    | "invalid_graph"
+                    | "invalid_type"
+                    | "overflow"
+                    | "checksum"
+            ),
             "bad error taxonomy category {}",
             row[1]
         );
         assert!(
-            matches!(row[2], "inspect" | "decode"),
+            matches!(row[2], "inspect" | "decode" | "load-dictionary"),
             "bad error taxonomy operation {}",
             row[2]
         );
         assert!(
             matches!(
                 row[3],
-                "Unsupported" | "Malformed" | "Truncated" | "LimitExceeded"
+                "Unsupported"
+                    | "Malformed"
+                    | "Truncated"
+                    | "LimitExceeded"
+                    | "ChecksumMismatch"
+                    | "InvalidGraph"
+                    | "InvalidType"
+                    | "IntegerOverflow"
             ),
             "bad error taxonomy kind {}",
             row[3]
         );
+        assert!(
+            matches!(row[4], "none" | "checksum"),
+            "bad error taxonomy feature {}",
+            row[4]
+        );
         categories.insert(row[1]);
+        kinds.insert(row[3]);
     }
 
-    for category in ["unsupported", "malformed", "truncated", "limit"] {
+    for category in [
+        "unsupported",
+        "malformed",
+        "truncated",
+        "limit",
+        "invalid_graph",
+        "invalid_type",
+        "overflow",
+        "checksum",
+    ] {
         assert!(
             categories.contains(category),
             "missing error taxonomy category {category}"
         );
+    }
+
+    for kind in [
+        "Unsupported",
+        "Malformed",
+        "Truncated",
+        "LimitExceeded",
+        "ChecksumMismatch",
+        "InvalidGraph",
+        "InvalidType",
+        "IntegerOverflow",
+    ] {
+        assert!(kinds.contains(kind), "missing error taxonomy kind {kind}");
     }
 }
 

@@ -1,13 +1,25 @@
-case	category	operation	expected_kind
-unknown-magic	unsupported	decode	Unsupported
-unsupported-format-version	unsupported	inspect	Unsupported
-unknown-output-size	unsupported	decode	Unsupported
-custom-transform	unsupported	decode	Unsupported
-truncated-magic	truncated	inspect	Truncated
-zero-output-count	malformed	inspect	Malformed
-missing-eof-marker	truncated	decode	Truncated
-stored-output-size-mismatch	malformed	decode	Malformed
-frame-byte-limit	limit	inspect	LimitExceeded
-decoded-byte-limit	limit	decode	LimitExceeded
-stored-stream-byte-limit	limit	decode	LimitExceeded
-output-count-limit	limit	inspect	LimitExceeded
+case	category	operation	expected_kind	required_feature
+unknown-magic	unsupported	decode	Unsupported	none
+unsupported-format-version	unsupported	inspect	Unsupported	none
+unknown-output-size	unsupported	decode	Unsupported	none
+custom-transform	unsupported	decode	Unsupported	none
+zigzag-header	unsupported	decode	Unsupported	none
+custom-dictionary-materializer	unsupported	load-dictionary	Unsupported	none
+external-dictionary-materializer	unsupported	load-dictionary	Unsupported	none
+truncated-magic	truncated	inspect	Truncated	none
+missing-eof-marker	truncated	decode	Truncated	none
+truncated-dictionary-bundle	truncated	load-dictionary	Truncated	none
+zero-output-count	malformed	inspect	Malformed	none
+stored-output-size-mismatch	malformed	decode	Malformed	none
+convert-num-to-serial-missing-header	malformed	decode	Malformed	none
+bad-dictionary-bundle-magic	malformed	load-dictionary	Malformed	none
+frame-byte-limit	limit	inspect	LimitExceeded	none
+decoded-byte-limit	limit	decode	LimitExceeded	none
+stored-stream-byte-limit	limit	decode	LimitExceeded	none
+output-count-limit	limit	inspect	LimitExceeded	none
+transform-header-byte-limit	limit	inspect	LimitExceeded	none
+invalid-graph-node-input	invalid_graph	inspect	InvalidGraph	none
+invalid-output-type	invalid_type	inspect	InvalidType	none
+stored-stream-size-overflow	overflow	inspect	IntegerOverflow	none
+bad-header-checksum	checksum	inspect	ChecksumMismatch	checksum
+bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
