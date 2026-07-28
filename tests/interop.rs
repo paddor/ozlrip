@@ -69,7 +69,7 @@ fn upstream_release_checkpoint_smoke_roundtrips_match_ozlrip() {
 }
 
 #[test]
-fn upstream_profile_discovery_records_unsupported_frames() {
+fn upstream_profile_discovery_records_frame_results() {
     let Some(zli) = zli_path() else {
         eprintln!("skipping interop discovery: set OZLRIP_ZLI to an upstream zli binary");
         return;
@@ -251,6 +251,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "upstream-csv-output-neighbors",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/output_neighbors.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "upstream-tbl-supplier",
             input: InteropInput::UpstreamFile("cli/tests/sample_files/tbl/supplier_trunc.tbl"),
             profile: "csv",
@@ -415,6 +423,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "upstream-ace-newlines-serial",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/ace/newlines.txt"),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "serial-chunked-2m",
             input: InteropInput::Inline(sequential_bytes(2_000_000)),
             profile: "serial",
@@ -503,6 +519,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             profile_arg: Some(
                 "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
             ),
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "upstream-sddl2-asm-sao-silesia-forced-graph",
+            input: InteropInput::UpstreamFile("examples/sddl2_asm/sao_silesia.bin"),
+            profile: "sddl2",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
             extra_args: &["--no-store-on-expansion"],
             relaxed_limits: false,
         },
@@ -681,7 +705,34 @@ fn release_smoke_interop_cases() -> Vec<InteropCase> {
 }
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
-    Vec::new()
+    vec![
+        InteropCase {
+            name: "discovery-csv-output-neighbors",
+            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/output_neighbors.csv"),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "discovery-sddl2-asm-sao-silesia",
+            input: InteropInput::UpstreamFile("examples/sddl2_asm/sao_silesia.bin"),
+            profile: "sddl2",
+            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+        InteropCase {
+            name: "discovery-csv-pums-0001",
+            input: InteropInput::UpstreamFile(
+                "examples/getting_started/sample_inputs/csv_samples/0001.csv",
+            ),
+            profile: "csv",
+            profile_arg: None,
+            extra_args: &["--no-store-on-expansion"],
+            relaxed_limits: false,
+        },
+    ]
 }
 
 fn release_interop_checkpoints() -> Vec<&'static str> {
