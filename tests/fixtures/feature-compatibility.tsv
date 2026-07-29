@@ -1,0 +1,14 @@
+feature	case	profile	profile_arg	coverage
+serial-profile	serial-small	serial	none	inline-roundtrip
+multi-chunk-frame	serial-chunked-2m	serial	none	chunked-roundtrip
+u8-profile	u8-ramp	u8	none	inline-roundtrip
+signed-int-profile	i8-signed	i8	none	inline-roundtrip
+little-endian-u16	le-u16-ramp	le-u16	none	inline-roundtrip
+little-endian-i32	getting-started-era5-i32	le-i32	none	upstream-sample
+csv-dispatch	getting-started-csv-0001	csv	none	upstream-sample
+pipe-delimited-csv	upstream-tbl-supplier	csv	|	upstream-sample
+sao-structured	sao-synthetic	sao	none	inline-roundtrip
+sddl2-structured	upstream-sddl2-sample-2-forced-graph	sddl2	tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl	forced-graph
+parquet-structured	upstream-parquet-nested	parquet	none	upstream-sample
+numeric-ml-selector	upstream-ml-selector-64-0	numeric-ml-selector-64	none	upstream-sample
+zstd-profile	upstream-zstd-profile-0	zstd	none	upstream-sample
