@@ -11,7 +11,7 @@ id	name	coverage
 11	convert_string_to_serial	unit
 12	separate_string_components	unit
 13	convert_struct_to_num_be	unit
-14	convert_serial_to_num_be	unit
+14	convert_serial_to_num_be	unit+inline-frame
 18	sentinel	unit
 19	lz	unit
 22	zstd	unit+fuzz+interop
