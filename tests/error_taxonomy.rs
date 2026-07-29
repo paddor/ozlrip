@@ -272,6 +272,15 @@ fn error_case(name: &str) -> ErrorCase {
         "generated-truncated-stored-payload" => {
             decode_case(truncated_stored_payload_frame(), Options::default())
         }
+        "generated-truncated-transform-id" => {
+            inspect_case(truncated_transform_id_frame(), Options::default())
+        }
+        "generated-truncated-transform-header-size" => {
+            inspect_case(truncated_transform_header_size_frame(), Options::default())
+        }
+        "generated-truncated-stored-size-varint" => {
+            inspect_case(truncated_stored_size_varint_frame(), Options::default())
+        }
         "zero-output-count" => inspect_case(
             {
                 let mut input = Vec::new();
@@ -404,6 +413,36 @@ fn truncated_output_size_varint_frame() -> Vec<u8> {
 fn truncated_stored_payload_frame() -> Vec<u8> {
     let mut input = stored_serial_frame(&[7, 8, 9]);
     input.remove(10);
+    input
+}
+
+fn truncated_transform_id_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(4);
+    input.push(2);
+    input.push(1);
+    input.push(0);
+    input
+}
+
+fn truncated_transform_header_size_frame() -> Vec<u8> {
+    let mut input = truncated_transform_id_frame();
+    input.push(22);
+    input.push(1);
+    input
+}
+
+fn truncated_stored_size_varint_frame() -> Vec<u8> {
+    let mut input = truncated_transform_id_frame();
+    input.push(22);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(0x80);
     input
 }
 
