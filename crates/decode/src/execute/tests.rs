@@ -84,6 +84,118 @@ fn append_standard_transform_chunk(
     input.extend_from_slice(stored);
 }
 
+struct StandardGraphNode<'a> {
+    transform_id: u32,
+    variable_inputs: u32,
+    outputs: usize,
+    header: &'a [u8],
+}
+
+fn standard_graph_serial_frame(
+    version: u32,
+    decoded_len: usize,
+    nodes: &[StandardGraphNode<'_>],
+    logical_stored_streams: &[&[u8]],
+) -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(version));
+    input.push(0);
+    input.push(1);
+    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+    push_var_u64(&mut input, u64::try_from(nodes.len() + 1).unwrap());
+    push_var_u64(
+        &mut input,
+        u64::try_from(logical_stored_streams.len()).unwrap(),
+    );
+    push_bitpacked_u32(&mut input, &vec![0; nodes.len()], 1);
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| node.transform_id)
+            .collect::<Vec<_>>(),
+        if version < 24 { 6 } else { 7 },
+    );
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(!node.header.is_empty()))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| !node.header.is_empty()) {
+        push_var_u64(&mut input, u64::try_from(node.header.len() - 1).unwrap());
+    }
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(node.variable_inputs != 0))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| node.variable_inputs != 0) {
+        push_var_u64(&mut input, u64::from(node.variable_inputs - 1));
+    }
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(node.outputs != 1))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| node.outputs != 1) {
+        push_var_u64(&mut input, u64::try_from(node.outputs - 2).unwrap());
+    }
+    let regenerated = nodes.iter().map(|node| node.outputs).sum::<usize>();
+    let distance_bits = bits_needed(regenerated + logical_stored_streams.len());
+    let distances = nodes
+        .iter()
+        .flat_map(|node| (0..node.outputs).map(|distance| u32::try_from(distance).unwrap()))
+        .collect::<Vec<_>>();
+    push_bitpacked_u32(&mut input, &distances, distance_bits);
+    for stream in logical_stored_streams.iter().rev() {
+        push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
+    }
+    for node in nodes {
+        input.extend_from_slice(node.header);
+    }
+    for stream in logical_stored_streams.iter().rev() {
+        input.extend_from_slice(stream);
+    }
+    input.push(0);
+    input
+}
+
+fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
+    if values.is_empty() || bits == 0 {
+        return;
+    }
+    let mut packed = vec![0; (values.len() * bits).div_ceil(8)];
+    for (index, &value) in values.iter().enumerate() {
+        let bit_offset = index * bits;
+        let byte_offset = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        let lane = u64::from(value) << bit_shift;
+        let lane_bytes = lane.to_le_bytes();
+        let byte_count = (bit_shift + bits).div_ceil(8);
+        for byte_index in 0..byte_count {
+            packed[byte_offset + byte_index] |= lane_bytes[byte_index];
+        }
+    }
+    out.extend_from_slice(&packed);
+}
+
+fn bits_needed(max_value: usize) -> usize {
+    if max_value <= 1 {
+        0
+    } else {
+        usize::BITS as usize - (max_value - 1).leading_zeros() as usize
+    }
+}
+
 fn concat_serial_frame(payload: &[u8]) -> Vec<u8> {
     let size_stream = u32::try_from(payload.len()).unwrap().to_le_bytes();
     let mut input = Vec::new();
@@ -1712,6 +1824,37 @@ fn decodes_string_to_serial_node() {
 }
 
 #[test]
+fn decodes_v21_string_components_to_serial_graph() {
+    let field_sizes = [1u16.to_le_bytes(), 3u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        4,
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"abcd", &field_sizes],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, b"abcd");
+}
+
+#[test]
 fn decodes_sentinel_node_with_default_marker() {
     let exceptions = 300u16.to_le_bytes();
     let output = decode_sentinel_node(
@@ -2187,6 +2330,41 @@ fn decodes_v21_convert_num_to_serial_le_chunk() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_parse_int_graph() {
+    let input_values = [0i64, -12, 345];
+    let numeric_bytes = input_values
+        .into_iter()
+        .flat_map(i64::to_le_bytes)
+        .collect::<Vec<_>>();
+    let input = standard_graph_serial_frame(
+        21,
+        7,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[3],
+            },
+            StandardGraphNode {
+                transform_id: standard::PARSE_INT_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&numeric_bytes],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
+    assert_eq!(output, b"0-12345");
 }
 
 #[test]

@@ -8,8 +8,8 @@ id	name	coverage
 8	convert_num_to_struct_le	unit+fuzz
 9	convert_serial_to_num_le	unit+fuzz
 10	convert_num_to_serial_le	unit+fuzz
-11	convert_string_to_serial	unit
-12	separate_string_components	unit
+11	convert_string_to_serial	unit+inline-frame
+12	separate_string_components	unit+inline-frame
 13	convert_struct_to_num_be	unit
 14	convert_serial_to_num_be	unit+inline-frame
 18	sentinel	unit
@@ -42,7 +42,7 @@ id	name	coverage
 55	concat_serial	unit+fuzz
 57	concat_num	unit
 58	concat_struct	unit
-60	parse_int	unit
+60	parse_int	unit+inline-frame
 62	lz4	unit+fuzz+interop
 63	bit_split	unit
 64	partition	unit

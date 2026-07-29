@@ -1294,6 +1294,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
         | standard::DELTA_INT_ID
+        | standard::PARSE_INT_ID
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
         | standard::FSE_NCOUNT_ID => 1,
