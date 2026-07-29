@@ -33,6 +33,7 @@ id	name	coverage
 42	dispatch_n_by_tag	unit+fuzz
 44	constant_serial	unit+fuzz
 45	constant_fixed	unit+fuzz
+46	prefix	unit+inline-frame
 47	splitn_struct	unit+inline-frame
 48	splitn_num	unit+inline-frame
 49	fse_v2	unit+inline-frame

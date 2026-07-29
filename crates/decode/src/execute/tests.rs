@@ -603,6 +603,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::MUX_LENGTHS_ID,
         standard::PARTITION_ID,
         standard::PARSE_INT_ID,
+        standard::PREFIX_ID,
         #[cfg(feature = "dev-format")]
         standard::PIVCO_HUFFMAN_ID,
         standard::QUANTIZE_LENGTHS_ID,
@@ -1950,6 +1951,112 @@ fn decodes_string_to_serial_node() {
     .unwrap();
 
     assert_eq!(output, b"abcd");
+}
+
+#[test]
+fn decodes_prefix_node() {
+    let suffix_lengths = [5, 2, 1, 2];
+    let match_sizes = [0u32, 3, 2, 3]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let output = decode_prefix_node(
+        &[
+            StreamInput {
+                bytes: b"applelytly",
+                element_width: 1,
+                string_lengths: Some(&suffix_lengths),
+            },
+            StreamInput {
+                bytes: &match_sizes,
+                element_width: 4,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 1);
+    assert_eq!(output.bytes, b"appleapplyaptaptly");
+    assert_eq!(
+        output.string_lengths.as_deref(),
+        Some([5, 5, 3, 5].as_slice())
+    );
+}
+
+#[test]
+fn rejects_prefix_match_longer_than_previous_string() {
+    let match_sizes = 1u32.to_le_bytes();
+    let err = decode_prefix_node(
+        &[
+            StreamInput {
+                bytes: b"a",
+                element_width: 1,
+                string_lengths: Some(&[1]),
+            },
+            StreamInput {
+                bytes: &match_sizes,
+                element_width: 4,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn decodes_v21_prefix_graph_to_serial() {
+    let field_sizes = [5, 2, 1, 2];
+    let match_sizes = [0u32, 3, 2, 3]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let expected = b"appleapplyaptaptly";
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        expected.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::PREFIX_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&match_sizes, b"applelytly", &field_sizes],
+        &[2, 0, 0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
 }
 
 #[test]

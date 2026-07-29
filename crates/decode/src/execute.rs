@@ -1285,6 +1285,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
+        | standard::PREFIX_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::PIVCO_HUFFMAN_ID
         | standard::MUX_LENGTHS_ID => 2,
@@ -1458,6 +1459,7 @@ fn execute_standard_node(
             ctx.format_version,
             ctx.limits,
         )),
+        standard::PREFIX_ID => one_typed(decode_prefix_node(inputs, header, ctx.limits)),
         standard::SENTINEL_ID => one_typed(decode_sentinel_node(inputs, header, ctx.limits)),
         id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
             inputs,
@@ -2021,6 +2023,111 @@ fn decode_string_to_serial_node(
     })?;
     output.extend_from_slice(input.bytes);
     Ok(output)
+}
+
+fn decode_prefix_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("prefix header must be empty"));
+    }
+    let [suffixes, match_sizes] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("prefix input count does not match node shape"));
+    };
+    if suffixes.element_width != 1 {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("prefix suffixes must be byte strings")
+        );
+    }
+    let suffix_lengths = suffixes.string_lengths.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidType).with_detail("prefix suffixes are missing lengths")
+    })?;
+    if checked_sum_u32(suffix_lengths)? != suffixes.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("prefix suffix lengths do not sum to content size"));
+    }
+    if match_sizes.element_width != 4 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("prefix match sizes width is unsupported"));
+    }
+    let match_count = numeric_element_count(match_sizes.bytes, match_sizes.element_width)?;
+    if match_count != suffix_lengths.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("prefix match count does not match suffix count"));
+    }
+
+    let mut output_lengths = Vec::new();
+    output_lengths
+        .try_reserve_exact(suffix_lengths.len())
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("prefix length allocation failed")
+        })?;
+    let mut output_len = 0usize;
+    let mut previous_len = 0usize;
+    for (index, &suffix_len) in suffix_lengths.iter().enumerate() {
+        let match_len = read_usize_numeric_element(match_sizes.bytes, 4, index)?;
+        if match_len > previous_len {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("prefix match exceeds previous string"));
+        }
+        let suffix_len = usize::try_from(suffix_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("prefix suffix length is too large")
+        })?;
+        let current_len = match_len
+            .checked_add(suffix_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output_len = output_len
+            .checked_add(current_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output_lengths.push(u32::try_from(current_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("prefix output length is too large")
+        })?);
+        previous_len = current_len;
+    }
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("prefix allocation failed")
+    })?;
+    let mut suffix_offset = 0usize;
+    let mut previous_start = 0usize;
+    let mut previous_len = 0usize;
+    for (index, &suffix_len) in suffix_lengths.iter().enumerate() {
+        let match_len = read_usize_numeric_element(match_sizes.bytes, 4, index)?;
+        let suffix_len = usize::try_from(suffix_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("prefix suffix length is too large")
+        })?;
+        output.extend_from_within(previous_start..previous_start + match_len);
+        let suffix_end = suffix_offset
+            .checked_add(suffix_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        output.extend_from_slice(&suffixes.bytes[suffix_offset..suffix_end]);
+        previous_len = usize::try_from(output_lengths[index]).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("prefix output length is too large")
+        })?;
+        previous_start = output
+            .len()
+            .checked_sub(previous_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        debug_assert_eq!(previous_start + previous_len, output.len());
+        suffix_offset = suffix_end;
+    }
+    debug_assert_eq!(previous_start + previous_len, output.len());
+    debug_assert_eq!(output.len(), output_len);
+    Ok(OwnedStream {
+        bytes: output,
+        element_width: 1,
+        string_lengths: Some(output_lengths),
+        recyclable: false,
+    })
 }
 
 fn decode_sentinel_node(
