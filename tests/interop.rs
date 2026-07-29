@@ -11,6 +11,7 @@ use std::{
 };
 
 const RELEASE_MATRIX: &str = include_str!("fixtures/openzl-release-matrix.tsv");
+const FEATURE_COMPATIBILITY: &str = include_str!("fixtures/feature-compatibility.tsv");
 
 #[test]
 fn upstream_zli_golden_roundtrips_match_ozlrip() {
@@ -122,6 +123,25 @@ fn upstream_profile_discovery_records_frame_results() {
     fs::write(manifest_dir.join("discovery.manifest"), manifest).unwrap();
 }
 
+#[test]
+fn feature_compatibility_manifest_is_backed_by_interop_cases() {
+    let cases = supported_interop_cases();
+    for row in feature_compatibility_rows() {
+        let case = cases
+            .iter()
+            .find(|case| case.name == row.case)
+            .unwrap_or_else(|| panic!("missing interop case {}", row.case));
+        assert_eq!(case.profile, row.profile, "{} profile mismatch", row.case);
+        match (case.profile_arg, row.profile_arg) {
+            (None, "none") => {}
+            (Some(actual), expected) => {
+                assert_eq!(actual, expected, "{} profile arg mismatch", row.case);
+            }
+            (None, expected) => panic!("{} missing profile arg {expected}", row.case),
+        }
+    }
+}
+
 fn run_roundtrip_case(zli: &Path, work: &WorkDir, case: &InteropCase, manifest: &mut String) {
     let name = case.name;
     let input = case.load_input();
@@ -174,6 +194,32 @@ fn run_roundtrip_case(zli: &Path, work: &WorkDir, case: &InteropCase, manifest: 
         hash64(&zli_decoded),
     )
     .unwrap();
+}
+
+fn feature_compatibility_rows() -> Vec<FeatureCompatibilityRow<'static>> {
+    let mut lines = FEATURE_COMPATIBILITY.lines();
+    assert_eq!(
+        lines.next(),
+        Some("feature\tcase\tprofile\tprofile_arg\tcoverage")
+    );
+    lines
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "bad feature compatibility row: {line}");
+            FeatureCompatibilityRow {
+                case: fields[1],
+                profile: fields[2],
+                profile_arg: fields[3],
+            }
+        })
+        .collect()
+}
+
+struct FeatureCompatibilityRow<'a> {
+    case: &'a str,
+    profile: &'a str,
+    profile_arg: &'a str,
 }
 
 fn supported_interop_cases() -> Vec<InteropCase> {

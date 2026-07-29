@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 const RELEASE_MATRIX: &str = include_str!("fixtures/openzl-release-matrix.tsv");
 const NODE_COVERAGE: &str = include_str!("fixtures/standard-node-coverage.tsv");
 const ERROR_TAXONOMY: &str = include_str!("fixtures/error-taxonomy.tsv");
+const FEATURE_COMPATIBILITY: &str = include_str!("fixtures/feature-compatibility.tsv");
 
 #[test]
 fn openzl_release_matrix_tracks_known_checkpoints() {
@@ -130,6 +131,73 @@ fn error_taxonomy_manifest_tracks_public_error_classes() {
         "IntegerOverflow",
     ] {
         assert!(kinds.contains(kind), "missing error taxonomy kind {kind}");
+    }
+}
+
+#[test]
+fn feature_compatibility_manifest_tracks_profiles() {
+    let rows = parse_tsv(
+        FEATURE_COMPATIBILITY,
+        "feature\tcase\tprofile\tprofile_arg\tcoverage",
+        5,
+    );
+    let mut features = BTreeSet::new();
+    let mut cases = BTreeSet::new();
+    let mut profiles = BTreeSet::new();
+
+    for row in rows {
+        assert!(
+            features.insert(row[0]),
+            "duplicate feature compatibility feature {}",
+            row[0]
+        );
+        assert!(
+            cases.insert(row[1]),
+            "duplicate feature compatibility case {}",
+            row[1]
+        );
+        assert!(
+            matches!(
+                row[2],
+                "serial"
+                    | "u8"
+                    | "i8"
+                    | "le-u16"
+                    | "le-i32"
+                    | "csv"
+                    | "sao"
+                    | "sddl2"
+                    | "parquet"
+                    | "numeric-ml-selector-64"
+                    | "zstd"
+            ),
+            "bad feature compatibility profile {}",
+            row[2]
+        );
+        assert!(!row[3].is_empty(), "profile_arg must be present");
+        assert!(!row[4].is_empty(), "coverage must be present");
+        profiles.insert(row[2]);
+    }
+
+    for feature in [
+        "serial-profile",
+        "csv-dispatch",
+        "sao-structured",
+        "sddl2-structured",
+        "parquet-structured",
+        "zstd-profile",
+    ] {
+        assert!(
+            features.contains(feature),
+            "missing feature compatibility row for {feature}"
+        );
+    }
+
+    for profile in ["serial", "csv", "sao", "sddl2", "parquet", "zstd"] {
+        assert!(
+            profiles.contains(profile),
+            "missing feature compatibility profile {profile}"
+        );
     }
 }
 
