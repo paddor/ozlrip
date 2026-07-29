@@ -39,7 +39,7 @@ use lz_nodes::{
 use numeric_nodes::{
     decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
     decode_byte_preserving_conversion_chunk, decode_constant_fixed_chunk,
-    decode_constant_serial_chunk, decode_delta_node, decode_divide_by_node,
+    decode_constant_serial_chunk, decode_dedup_num_node, decode_delta_node, decode_divide_by_node,
     decode_num_to_struct_le_chunk, decode_numeric_to_serial_le_chunk,
     decode_range_pack_serial8_chunk, decode_serial_to_num_be_chunk,
     decode_serial_to_numeric_le_chunk, decode_serial_to_struct_chunk,
@@ -446,6 +446,13 @@ fn decode_transform_chunk_with_plan<'a>(
         let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
         let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
             one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
+        } else if node.standard_id == standard::DEDUP_NUM_ID {
+            SmallVec::from_vec(decode_dedup_num_node(
+                single_stream(&inputs)?,
+                header,
+                node.output_targets.len(),
+                ctx.limits,
+            )?)
         } else {
             execute_standard_node(
                 node.standard_id,
@@ -594,6 +601,13 @@ fn decode_transform_chunk_appending(
         let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
         let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
             one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
+        } else if node.standard_id == standard::DEDUP_NUM_ID {
+            SmallVec::from_vec(decode_dedup_num_node(
+                single_stream(&inputs)?,
+                header,
+                node.output_targets.len(),
+                ctx.limits,
+            )?)
         } else {
             execute_standard_node(
                 node.standard_id,
@@ -1294,6 +1308,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
+        | standard::DEDUP_NUM_ID
         | standard::DELTA_INT_ID
         | standard::DIVIDE_BY_ID
         | standard::PARSE_INT_ID

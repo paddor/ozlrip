@@ -589,6 +589,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::CONVERT_STRUCT_TO_NUM_BE_ID,
         standard::CONVERT_STRUCT_TO_NUM_LE_ID,
         standard::CONVERT_STRUCT_TO_SERIAL_ID,
+        standard::DEDUP_NUM_ID,
         standard::DELTA_INT_ID,
         standard::DIVIDE_BY_ID,
         standard::DISPATCH_N_BY_TAG_ID,
@@ -2505,6 +2506,76 @@ fn rejects_divide_by_overflow() {
     .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn decodes_dedup_num_node() {
+    let values = [9u16.to_le_bytes(), 10u16.to_le_bytes()].concat();
+    let outputs = decode_dedup_num_node(
+        StreamInput {
+            bytes: &values,
+            element_width: 2,
+            string_lengths: None,
+        },
+        &[],
+        3,
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 3);
+    for output in outputs {
+        assert_eq!(output.element_width, 2);
+        assert_eq!(output.bytes, values);
+    }
+}
+
+#[test]
+fn decodes_v21_dedup_num_graph() {
+    let values = [9u16.to_le_bytes(), 10u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        values.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::DEDUP_NUM_ID,
+                variable_inputs: 0,
+                outputs: 2,
+                header: &[],
+            },
+        ],
+        &[&values],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, values.len());
+    assert_eq!(output, values);
+}
+
+#[test]
+fn rejects_dedup_num_header() {
+    let err = decode_dedup_num_node(
+        StreamInput {
+            bytes: &[1, 2],
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[0],
+        1,
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
 }
 
 #[test]

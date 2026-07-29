@@ -1019,6 +1019,12 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
                 max_outputs: None,
             })
         }
+        standard::DEDUP_NUM_ID => Some(StandardNodeShape {
+            static_inputs: 1,
+            allows_variable_inputs: false,
+            min_outputs: 1,
+            max_outputs: None,
+        }),
         standard::DISPATCH_N_BY_TAG_ID => Some(StandardNodeShape {
             static_inputs: 2,
             allows_variable_inputs: true,

@@ -457,6 +457,61 @@ pub(super) fn decode_divide_by_node(
     Ok(OwnedStream::typed(output, stored.element_width))
 }
 
+pub(super) fn decode_dedup_num_node(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    output_count: usize,
+    limits: Limits,
+) -> Result<Vec<OwnedStream>> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("dedup_num headers are unsupported")
+        );
+    }
+    if output_count == 0 {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dedup_num output count is zero")
+        );
+    }
+    if stored.string_lengths.is_some() {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("dedup_num input must be numeric")
+        );
+    }
+    validate_numeric_stream_width(stored.element_width, "dedup_num input")?;
+    numeric_element_count(stored.bytes, stored.element_width)?;
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let total_buffer_bytes = stored
+        .bytes
+        .len()
+        .checked_mul(output_count)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if total_buffer_bytes > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num output allocation failed")
+    })?;
+    for _ in 0..output_count {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(stored.bytes.len()).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num allocation failed")
+        })?;
+        bytes.extend_from_slice(stored.bytes);
+        outputs.push(OwnedStream::typed(bytes, stored.element_width));
+    }
+    Ok(outputs)
+}
+
 fn parse_divide_by_divisor(header: &[u8], element_width: usize) -> Result<u64> {
     if header.is_empty() {
         return Err(Error::new(ErrorKind::Malformed).with_detail("divide_by header is malformed"));

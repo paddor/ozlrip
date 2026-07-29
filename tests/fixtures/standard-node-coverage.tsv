@@ -41,6 +41,7 @@ id	name	coverage
 53	divide_by	unit+inline-frame
 54	dispatch_string	unit+fuzz
 55	concat_serial	unit+fuzz
+56	dedup_num	unit+inline-frame
 57	concat_num	unit+inline-frame
 58	concat_struct	unit+inline-frame
 60	parse_int	unit+inline-frame
