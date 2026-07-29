@@ -39,10 +39,11 @@ use lz_nodes::{
 use numeric_nodes::{
     decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
     decode_byte_preserving_conversion_chunk, decode_constant_fixed_chunk,
-    decode_constant_serial_chunk, decode_delta_node, decode_num_to_struct_le_chunk,
-    decode_numeric_to_serial_le_chunk, decode_range_pack_serial8_chunk,
-    decode_serial_to_num_be_chunk, decode_serial_to_numeric_le_chunk,
-    decode_serial_to_struct_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
+    decode_constant_serial_chunk, decode_delta_node, decode_divide_by_node,
+    decode_num_to_struct_le_chunk, decode_numeric_to_serial_le_chunk,
+    decode_range_pack_serial8_chunk, decode_serial_to_num_be_chunk,
+    decode_serial_to_numeric_le_chunk, decode_serial_to_struct_chunk,
+    decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
 };
 #[cfg(feature = "checksum")]
 use output::verify_decoded_checksum;
@@ -1294,6 +1295,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
         | standard::DELTA_INT_ID
+        | standard::DIVIDE_BY_ID
         | standard::PARSE_INT_ID
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
@@ -1529,6 +1531,11 @@ fn execute_standard_node(
             header,
             ctx.limits,
             ctx.scratch,
+        )),
+        standard::DIVIDE_BY_ID => one_typed(decode_divide_by_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
         )),
         standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
             single_input(inputs)?,

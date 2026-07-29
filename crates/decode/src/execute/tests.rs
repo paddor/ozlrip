@@ -590,6 +590,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::CONVERT_STRUCT_TO_NUM_LE_ID,
         standard::CONVERT_STRUCT_TO_SERIAL_ID,
         standard::DELTA_INT_ID,
+        standard::DIVIDE_BY_ID,
         standard::DISPATCH_N_BY_TAG_ID,
         standard::DISPATCH_STRING_ID,
         standard::FIELD_LZ_ID,
@@ -2436,6 +2437,74 @@ fn rejects_delta_output_limit_without_mutating_destination() {
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn decodes_divide_by_numeric_u16_node() {
+    let quotients = [3u16.to_le_bytes(), 4u16.to_le_bytes()].concat();
+    let output = decode_divide_by_node(
+        StreamInput {
+            bytes: &quotients,
+            element_width: 2,
+            string_lengths: None,
+        },
+        &[5],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(
+        output.bytes,
+        [15u16.to_le_bytes(), 20u16.to_le_bytes()].concat()
+    );
+}
+
+#[test]
+fn decodes_v21_divide_by_graph() {
+    let quotients = [3u16.to_le_bytes(), 4u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        4,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::DIVIDE_BY_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[5],
+            },
+        ],
+        &[&quotients],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, [15u16.to_le_bytes(), 20u16.to_le_bytes()].concat());
+}
+
+#[test]
+fn rejects_divide_by_overflow() {
+    let err = decode_divide_by_node(
+        StreamInput {
+            bytes: &[128],
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[2],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
 }
 
 #[test]
