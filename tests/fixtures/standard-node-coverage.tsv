@@ -10,10 +10,10 @@ id	name	coverage
 10	convert_num_to_serial_le	unit+fuzz
 11	convert_string_to_serial	unit+inline-frame
 12	separate_string_components	unit+inline-frame
-13	convert_struct_to_num_be	unit
+13	convert_struct_to_num_be	unit+inline-frame
 14	convert_serial_to_num_be	unit+inline-frame
 18	sentinel	unit+inline-frame
-19	lz	unit
+19	lz	unit+inline-frame
 22	zstd	unit+fuzz+interop
 24	field_lz	unit+fuzz
 25	quantize_offsets	unit+inline-frame
@@ -35,8 +35,8 @@ id	name	coverage
 45	constant_fixed	unit+fuzz
 47	splitn_struct	unit+inline-frame
 48	splitn_num	unit+inline-frame
-49	fse_v2	unit
-50	huffman_v2	unit
+49	fse_v2	unit+inline-frame
+50	huffman_v2	unit+inline-frame
 52	fse_ncount	unit+inline-frame
 54	dispatch_string	unit+fuzz
 55	concat_serial	unit+fuzz
