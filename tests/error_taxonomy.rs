@@ -266,6 +266,12 @@ fn error_case(name: &str) -> ErrorCase {
         "custom-dictionary-materializer" => dictionary_case(dictionary_bundle(ZSTD_ID, true)),
         "external-dictionary-materializer" => dictionary_case(dictionary_bundle(LZ4_ID, false)),
         "truncated-magic" => inspect_case(vec![0xd7, 0xb1], Options::default()),
+        "generated-truncated-output-size-varint" => {
+            inspect_case(truncated_output_size_varint_frame(), Options::default())
+        }
+        "generated-truncated-stored-payload" => {
+            decode_case(truncated_stored_payload_frame(), Options::default())
+        }
         "zero-output-count" => inspect_case(
             {
                 let mut input = Vec::new();
@@ -295,6 +301,9 @@ fn error_case(name: &str) -> ErrorCase {
             },
             Options::default(),
         ),
+        "generated-trailing-after-eof" => {
+            inspect_case(trailing_after_eof_frame(), Options::default())
+        }
         "convert-num-to-serial-missing-header" => decode_case(
             standard_transform_serial_frame(21, 10, b"bytes", 5, &[]),
             Options::default(),
@@ -353,6 +362,9 @@ fn error_case(name: &str) -> ErrorCase {
         "invalid-graph-node-input" => {
             inspect_case(invalid_graph_node_input_frame(), Options::default())
         }
+        "generated-duplicate-regen-distance" => {
+            inspect_case(duplicate_regen_distance_frame(), Options::default())
+        }
         "invalid-output-type" => inspect_case(
             {
                 let mut input = Vec::new();
@@ -380,6 +392,27 @@ fn error_case(name: &str) -> ErrorCase {
     }
 }
 
+fn truncated_output_size_varint_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(0x80);
+    input
+}
+
+fn truncated_stored_payload_frame() -> Vec<u8> {
+    let mut input = stored_serial_frame(&[7, 8, 9]);
+    input.remove(10);
+    input
+}
+
+fn trailing_after_eof_frame() -> Vec<u8> {
+    let mut input = stored_serial_frame(&[7, 8, 9]);
+    input.push(0xff);
+    input
+}
+
 fn invalid_graph_node_input_frame() -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&magic(21));
@@ -399,6 +432,42 @@ fn invalid_graph_node_input_frame() -> Vec<u8> {
     input.extend_from_slice(&[1, 2, 3]);
     input.push(0);
     input
+}
+
+fn duplicate_regen_distance_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(4);
+    input.push(2);
+    input.push(2);
+    push_bitpacked_u32(&mut input, &[0], 1);
+    push_bitpacked_u32(&mut input, &[55], 6);
+    push_bitpacked_u32(&mut input, &[0], 1);
+    push_bitpacked_u32(&mut input, &[0], 1);
+    push_bitpacked_u32(&mut input, &[1], 1);
+    input.push(0);
+    push_bitpacked_u32(&mut input, &[0, 0], 2);
+    input.push(1);
+    input.push(2);
+    input.extend_from_slice(&[1, 2, 3]);
+    input.push(0);
+    input
+}
+
+fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
+    let mut bytes = vec![0u8; values.len().saturating_mul(bits).div_ceil(8)];
+    for (index, &value) in values.iter().enumerate() {
+        for bit in 0..bits {
+            if (value >> bit) & 1 == 0 {
+                continue;
+            }
+            let bit_index = index * bits + bit;
+            bytes[bit_index / 8] |= 1 << (bit_index % 8);
+        }
+    }
+    out.extend_from_slice(&bytes);
 }
 
 fn stored_stream_size_overflow_frame() -> Vec<u8> {
