@@ -84,6 +84,135 @@ fn append_standard_transform_chunk(
     input.extend_from_slice(stored);
 }
 
+struct StandardGraphNode<'a> {
+    transform_id: u32,
+    variable_inputs: u32,
+    outputs: usize,
+    header: &'a [u8],
+}
+
+fn standard_graph_serial_frame(
+    version: u32,
+    decoded_len: usize,
+    nodes: &[StandardGraphNode<'_>],
+    logical_stored_streams: &[&[u8]],
+) -> Vec<u8> {
+    let distances = nodes
+        .iter()
+        .flat_map(|node| (0..node.outputs).map(|distance| u32::try_from(distance).unwrap()))
+        .collect::<Vec<_>>();
+    standard_graph_serial_frame_with_distances(
+        version,
+        decoded_len,
+        nodes,
+        logical_stored_streams,
+        &distances,
+    )
+}
+
+fn standard_graph_serial_frame_with_distances(
+    version: u32,
+    decoded_len: usize,
+    nodes: &[StandardGraphNode<'_>],
+    logical_stored_streams: &[&[u8]],
+    regen_distances: &[u32],
+) -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(version));
+    input.push(0);
+    input.push(1);
+    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
+    push_var_u64(&mut input, u64::try_from(nodes.len() + 1).unwrap());
+    push_var_u64(
+        &mut input,
+        u64::try_from(logical_stored_streams.len()).unwrap(),
+    );
+    push_bitpacked_u32(&mut input, &vec![0; nodes.len()], 1);
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| node.transform_id)
+            .collect::<Vec<_>>(),
+        if version < 24 { 6 } else { 7 },
+    );
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(!node.header.is_empty()))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| !node.header.is_empty()) {
+        push_var_u64(&mut input, u64::try_from(node.header.len() - 1).unwrap());
+    }
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(node.variable_inputs != 0))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| node.variable_inputs != 0) {
+        push_var_u64(&mut input, u64::from(node.variable_inputs - 1));
+    }
+    push_bitpacked_u32(
+        &mut input,
+        &nodes
+            .iter()
+            .map(|node| u32::from(node.outputs != 1))
+            .collect::<Vec<_>>(),
+        1,
+    );
+    for node in nodes.iter().filter(|node| node.outputs != 1) {
+        push_var_u64(&mut input, u64::try_from(node.outputs - 2).unwrap());
+    }
+    let regenerated = nodes.iter().map(|node| node.outputs).sum::<usize>();
+    assert_eq!(regen_distances.len(), regenerated);
+    let distance_bits = bits_needed(regenerated + logical_stored_streams.len());
+    push_bitpacked_u32(&mut input, regen_distances, distance_bits);
+    for stream in logical_stored_streams.iter().rev() {
+        push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
+    }
+    for node in nodes {
+        input.extend_from_slice(node.header);
+    }
+    for stream in logical_stored_streams.iter().rev() {
+        input.extend_from_slice(stream);
+    }
+    input.push(0);
+    input
+}
+
+fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
+    if values.is_empty() || bits == 0 {
+        return;
+    }
+    let mut packed = vec![0; (values.len() * bits).div_ceil(8)];
+    for (index, &value) in values.iter().enumerate() {
+        let bit_offset = index * bits;
+        let byte_offset = bit_offset / 8;
+        let bit_shift = bit_offset % 8;
+        let lane = u64::from(value) << bit_shift;
+        let lane_bytes = lane.to_le_bytes();
+        let byte_count = (bit_shift + bits).div_ceil(8);
+        for byte_index in 0..byte_count {
+            packed[byte_offset + byte_index] |= lane_bytes[byte_index];
+        }
+    }
+    out.extend_from_slice(&packed);
+}
+
+fn bits_needed(max_value: usize) -> usize {
+    if max_value <= 1 {
+        0
+    } else {
+        usize::BITS as usize - (max_value - 1).leading_zeros() as usize
+    }
+}
+
 fn concat_serial_frame(payload: &[u8]) -> Vec<u8> {
     let size_stream = u32::try_from(payload.len()).unwrap().to_le_bytes();
     let mut input = Vec::new();
@@ -460,7 +589,9 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::CONVERT_STRUCT_TO_NUM_BE_ID,
         standard::CONVERT_STRUCT_TO_NUM_LE_ID,
         standard::CONVERT_STRUCT_TO_SERIAL_ID,
+        standard::DEDUP_NUM_ID,
         standard::DELTA_INT_ID,
+        standard::DIVIDE_BY_ID,
         standard::DISPATCH_N_BY_TAG_ID,
         standard::DISPATCH_STRING_ID,
         standard::FIELD_LZ_ID,
@@ -472,6 +603,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::MUX_LENGTHS_ID,
         standard::PARTITION_ID,
         standard::PARSE_INT_ID,
+        standard::PREFIX_ID,
         #[cfg(feature = "dev-format")]
         standard::PIVCO_HUFFMAN_ID,
         standard::QUANTIZE_LENGTHS_ID,
@@ -775,6 +907,50 @@ fn decodes_splitn_num_node() {
 }
 
 #[test]
+fn decodes_v21_splitn_struct_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        6,
+        &[StandardGraphNode {
+            transform_id: standard::SPLITN_STRUCT_ID,
+            variable_inputs: 2,
+            outputs: 1,
+            header: &[],
+        }],
+        &[b"abc", b"def"],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 6);
+    assert_eq!(output, b"abcdef");
+}
+
+#[test]
+fn decodes_v21_splitn_num_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        4,
+        &[StandardGraphNode {
+            transform_id: standard::SPLITN_NUM_ID,
+            variable_inputs: 2,
+            outputs: 1,
+            header: &[],
+        }],
+        &[&[1, 2], &[3, 4]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, [1, 2, 3, 4]);
+}
+
+#[test]
 fn decodes_empty_splitn_num_header_width() {
     let output = decode_splitn_typed_node(&[], 0, &[4], Limits::default()).unwrap();
 
@@ -1011,6 +1187,28 @@ fn decodes_mux_lengths_inline_u16() {
 }
 
 #[test]
+fn decodes_v24_mux_lengths_graph_final_match_lengths() {
+    let input = standard_graph_serial_frame(
+        24,
+        1,
+        &[StandardGraphNode {
+            transform_id: standard::MUX_LENGTHS_ID,
+            variable_inputs: 0,
+            outputs: 2,
+            header: &[0x24],
+        }],
+        &[&[0x21], &[]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 1);
+    assert_eq!(output, [4]);
+}
+
+#[test]
 fn decodes_mux_lengths_overflow_u16() {
     let muxed = [0xff];
     let long = [5, 0, 2, 0];
@@ -1095,6 +1293,28 @@ fn decodes_bitsplit_bf16_node() {
 }
 
 #[test]
+fn decodes_v24_bitsplit_bf16_graph() {
+    let input = standard_graph_serial_frame(
+        24,
+        4,
+        &[StandardGraphNode {
+            transform_id: standard::BIT_SPLIT_ID,
+            variable_inputs: 3,
+            outputs: 1,
+            header: &[2, 7, 8],
+        }],
+        &[&[0x01, 0x7f], &[0x02, 0xff], &[0x00, 0x01]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, [0x01, 0x01, 0xff, 0xff]);
+}
+
+#[test]
 fn rejects_bitsplit_mismatched_input_width() {
     let input = [0u8; 2];
     let err = decode_bitsplit_node(
@@ -1146,6 +1366,28 @@ fn decodes_lz_node_with_trailing_literals() {
     )
     .unwrap();
 
+    assert_eq!(output, b"abcabc!");
+}
+
+#[test]
+fn decodes_v24_lz_graph_with_trailing_literals() {
+    let input = standard_graph_serial_frame(
+        24,
+        7,
+        &[StandardGraphNode {
+            transform_id: standard::LZ_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[7],
+        }],
+        &[b"abc!", &[3], &[3], &[3]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
     assert_eq!(output, b"abcabc!");
 }
 
@@ -1712,6 +1954,187 @@ fn decodes_string_to_serial_node() {
 }
 
 #[test]
+fn decodes_prefix_node() {
+    let suffix_lengths = [5, 2, 1, 2];
+    let match_sizes = [0u32, 3, 2, 3]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let output = decode_prefix_node(
+        &[
+            StreamInput {
+                bytes: b"applelytly",
+                element_width: 1,
+                string_lengths: Some(&suffix_lengths),
+            },
+            StreamInput {
+                bytes: &match_sizes,
+                element_width: 4,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 1);
+    assert_eq!(output.bytes, b"appleapplyaptaptly");
+    assert_eq!(
+        output.string_lengths.as_deref(),
+        Some([5, 5, 3, 5].as_slice())
+    );
+}
+
+#[test]
+fn rejects_prefix_match_longer_than_previous_string() {
+    let match_sizes = 1u32.to_le_bytes();
+    let err = decode_prefix_node(
+        &[
+            StreamInput {
+                bytes: b"a",
+                element_width: 1,
+                string_lengths: Some(&[1]),
+            },
+            StreamInput {
+                bytes: &match_sizes,
+                element_width: 4,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn decodes_v21_prefix_graph_to_serial() {
+    let field_sizes = [5, 2, 1, 2];
+    let match_sizes = [0u32, 3, 2, 3]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let expected = b"appleapplyaptaptly";
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        expected.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::PREFIX_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&match_sizes, b"applelytly", &field_sizes],
+        &[2, 0, 0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v24_sentinel_graph() {
+    let input = standard_graph_serial_frame(
+        24,
+        3,
+        &[StandardGraphNode {
+            transform_id: standard::SENTINEL_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[],
+        }],
+        &[&[1, 255, 2], &[42]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, [1, 42, 2]);
+}
+
+#[test]
+fn decodes_v26_sparse_num_graph() {
+    let input = standard_graph_serial_frame(
+        26,
+        5,
+        &[StandardGraphNode {
+            transform_id: standard::SPARSE_NUM_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[7],
+        }],
+        &[&[2, 0, 1], &[1, 2]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 5);
+    assert_eq!(output, [7, 7, 1, 2, 7]);
+}
+
+#[test]
+fn decodes_v21_string_components_to_serial_graph() {
+    let field_sizes = [1u16.to_le_bytes(), 3u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        4,
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"abcd", &field_sizes],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, b"abcd");
+}
+
+#[test]
 fn decodes_sentinel_node_with_default_marker() {
     let exceptions = 300u16.to_le_bytes();
     let output = decode_sentinel_node(
@@ -2125,6 +2548,144 @@ fn rejects_delta_output_limit_without_mutating_destination() {
 }
 
 #[test]
+fn decodes_divide_by_numeric_u16_node() {
+    let quotients = [3u16.to_le_bytes(), 4u16.to_le_bytes()].concat();
+    let output = decode_divide_by_node(
+        StreamInput {
+            bytes: &quotients,
+            element_width: 2,
+            string_lengths: None,
+        },
+        &[5],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(
+        output.bytes,
+        [15u16.to_le_bytes(), 20u16.to_le_bytes()].concat()
+    );
+}
+
+#[test]
+fn decodes_v21_divide_by_graph() {
+    let quotients = [3u16.to_le_bytes(), 4u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        4,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::DIVIDE_BY_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[5],
+            },
+        ],
+        &[&quotients],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 4);
+    assert_eq!(output, [15u16.to_le_bytes(), 20u16.to_le_bytes()].concat());
+}
+
+#[test]
+fn rejects_divide_by_overflow() {
+    let err = decode_divide_by_node(
+        StreamInput {
+            bytes: &[128],
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[2],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn decodes_dedup_num_node() {
+    let values = [9u16.to_le_bytes(), 10u16.to_le_bytes()].concat();
+    let outputs = decode_dedup_num_node(
+        StreamInput {
+            bytes: &values,
+            element_width: 2,
+            string_lengths: None,
+        },
+        &[],
+        3,
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 3);
+    for output in outputs {
+        assert_eq!(output.element_width, 2);
+        assert_eq!(output.bytes, values);
+    }
+}
+
+#[test]
+fn decodes_v21_dedup_num_graph() {
+    let values = [9u16.to_le_bytes(), 10u16.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        values.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::DEDUP_NUM_ID,
+                variable_inputs: 0,
+                outputs: 2,
+                header: &[],
+            },
+        ],
+        &[&values],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, values.len());
+    assert_eq!(output, values);
+}
+
+#[test]
+fn rejects_dedup_num_header() {
+    let err = decode_dedup_num_node(
+        StreamInput {
+            bytes: &[1, 2],
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[0],
+        1,
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+#[test]
 fn decodes_v21_convert_serial_to_struct_chunk() {
     let expected = b"struct payload bytes";
     let input = standard_transform_serial_frame(21, 5, expected, expected.len(), &[]);
@@ -2187,6 +2748,118 @@ fn decodes_v21_convert_num_to_serial_le_chunk() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_convert_struct_to_num_be_graph() {
+    let stored = [0x12, 0x34, 0xab, 0xcd, 0x01, 0x02, 0x03, 0x04];
+    let input = standard_graph_serial_frame(
+        21,
+        stored.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_NUM_BE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&stored],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, stored.len());
+    assert_eq!(output, [0x34, 0x12, 0xcd, 0xab, 0x02, 0x01, 0x04, 0x03]);
+}
+
+#[test]
+fn decodes_v21_parse_int_graph() {
+    let input_values = [0i64, -12, 345];
+    let numeric_bytes = input_values
+        .into_iter()
+        .flat_map(i64::to_le_bytes)
+        .collect::<Vec<_>>();
+    let input = standard_graph_serial_frame(
+        21,
+        7,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[3],
+            },
+            StandardGraphNode {
+                transform_id: standard::PARSE_INT_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&numeric_bytes],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
+    assert_eq!(output, b"0-12345");
+}
+
+#[test]
+fn decodes_v21_concat_num_graph_final_output() {
+    let sizes = [2u32.to_le_bytes(), 3u32.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        3,
+        &[StandardGraphNode {
+            transform_id: standard::CONCAT_NUM_ID,
+            variable_inputs: 0,
+            outputs: 2,
+            header: &[],
+        }],
+        &[&sizes, &[10, 11, 12, 13, 14]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, [12, 13, 14]);
+}
+
+#[test]
+fn decodes_v21_concat_struct_graph_final_output() {
+    let sizes = [1u32.to_le_bytes(), 2u32.to_le_bytes()].concat();
+    let input = standard_graph_serial_frame(
+        21,
+        2,
+        &[StandardGraphNode {
+            transform_id: standard::CONCAT_STRUCT_ID,
+            variable_inputs: 0,
+            outputs: 2,
+            header: &[],
+        }],
+        &[&sizes, b"abc"],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 2);
+    assert_eq!(output, b"bc");
 }
 
 #[test]
@@ -2361,6 +3034,50 @@ fn rejects_transpose_split_mismatched_lanes_without_mutating_destination() {
 }
 
 #[test]
+fn decodes_v21_tokenize_fixed_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        3,
+        &[StandardGraphNode {
+            transform_id: standard::TOKENIZE_FIXED_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[],
+        }],
+        &[b"abc", &[2, 0, 1]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, b"cab");
+}
+
+#[test]
+fn decodes_v21_tokenize_numeric_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        3,
+        &[StandardGraphNode {
+            transform_id: standard::TOKENIZE_NUMERIC_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[],
+        }],
+        &[b"wxy", &[1, 2, 0]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, b"xyw");
+}
+
+#[test]
 fn decodes_partition_preset_varbyte16_node() {
     let output = decode_partition_node(
         &[
@@ -2421,6 +3138,28 @@ fn decodes_partition_u32_node() {
 }
 
 #[test]
+fn decodes_v24_partition_graph() {
+    let input = standard_graph_serial_frame(
+        24,
+        6,
+        &[StandardGraphNode {
+            transform_id: standard::PARTITION_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[0x15],
+        }],
+        &[&[0, 1, 2], &[0x0d]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 6);
+    assert_eq!(output, [1, 0, 2, 0, 7, 0]);
+}
+
+#[test]
 fn decodes_quantize_offsets_node() {
     let inputs = [
         StreamInput {
@@ -2442,6 +3181,28 @@ fn decodes_quantize_offsets_node() {
 }
 
 #[test]
+fn decodes_v21_quantize_offsets_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        12,
+        &[StandardGraphNode {
+            transform_id: standard::QUANTIZE_OFFSETS_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[],
+        }],
+        &[&[0, 1, 4], &[0b0000_1011]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 12);
+    assert_eq!(output, [1, 0, 0, 0, 3, 0, 0, 0, 21, 0, 0, 0]);
+}
+
+#[test]
 fn decodes_quantize_lengths_node() {
     let inputs = [
         StreamInput {
@@ -2460,6 +3221,28 @@ fn decodes_quantize_lengths_node() {
 
     assert_eq!(output.element_width, 4);
     assert_eq!(output.bytes, [0, 0, 0, 0, 15, 0, 0, 0, 23, 0, 0, 0]);
+}
+
+#[test]
+fn decodes_v21_quantize_lengths_graph() {
+    let input = standard_graph_serial_frame(
+        21,
+        12,
+        &[StandardGraphNode {
+            transform_id: standard::QUANTIZE_LENGTHS_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[],
+        }],
+        &[&[0, 15, 16], &[0b0000_0111]],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 12);
+    assert_eq!(output, [0, 0, 0, 0, 15, 0, 0, 0, 23, 0, 0, 0]);
 }
 
 #[test]
@@ -2868,6 +3651,117 @@ fn decodes_fse_ncount_node() {
         .collect::<Vec<_>>();
     assert_eq!(output.element_width, 2);
     assert_eq!(decoded, distribution);
+}
+
+#[test]
+fn decodes_v21_fse_ncount_frame() {
+    let distribution = [15, 8, 4, 3, 1, 1];
+    let encoded = zrip_core::fse::table_builder::serialize_fse_table_description(&distribution, 5);
+    let input = standard_transform_serial_frame(21, 52, &encoded, 12, &[]);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 12);
+    assert_eq!(
+        output,
+        distribution
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn decodes_v21_fse_v2_frame() {
+    let distribution = [16i16, 16];
+    let norm = distribution
+        .into_iter()
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let accuracy_log = 5;
+    let table =
+        zrip_core::fse::table_builder::build_decode_table(&distribution, accuracy_log).unwrap();
+    let expected = [0, 1];
+    let states = expected
+        .iter()
+        .copied()
+        .map(|symbol| {
+            table
+                .iter()
+                .position(|entry| entry.symbol == symbol)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let bits = reverse_bitstream(&states, accuracy_log);
+    let output_len = u8::try_from(expected.len()).unwrap();
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        expected.len(),
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::FSE_V2_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2, output_len],
+            },
+        ],
+        &[&bits, &norm],
+        &[1, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_huffman_v2_frame() {
+    let expected = [0, 1, 1, 0];
+    let output_len = u8::try_from(expected.len()).unwrap();
+    let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+    for &symbol in expected.iter().rev() {
+        writer.write_bits(u32::from(symbol), 1);
+    }
+    writer.close_reverse_stream();
+    let bits = writer.into_bytes();
+    let input = standard_graph_serial_frame(
+        21,
+        expected.len(),
+        &[StandardGraphNode {
+            transform_id: standard::HUFFMAN_V2_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[0, output_len],
+        }],
+        &[&[1, 1], &bits],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+fn reverse_bitstream(values: &[usize], bits: u8) -> Vec<u8> {
+    let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+    for &value in values.iter().rev() {
+        writer.write_bits(u32::try_from(value).unwrap(), bits);
+    }
+    writer.close_reverse_stream();
+    writer.into_bytes()
 }
 
 #[test]

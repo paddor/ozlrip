@@ -33,6 +33,21 @@ fn standard_node_fixture_manifest_has_one_row_per_node() {
             !row[2].is_empty(),
             "standard-node coverage must not be empty"
         );
+        let mut coverage_tags = BTreeSet::new();
+        for tag in row[2].split('+') {
+            assert!(
+                coverage_tags.insert(tag),
+                "duplicate standard-node coverage tag {tag} for id {id}"
+            );
+            assert!(
+                matches!(tag, "unit" | "inline-frame" | "fuzz" | "interop"),
+                "bad standard-node coverage tag {tag} for id {id}"
+            );
+        }
+        assert!(
+            coverage_tags.contains("unit"),
+            "standard-node coverage must include unit tag for id {id}"
+        );
     }
 
     for id in [1, 22, 24, 54, 62, 66, 67] {

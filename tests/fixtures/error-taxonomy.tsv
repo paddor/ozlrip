@@ -9,6 +9,9 @@ external-dictionary-materializer	unsupported	load-dictionary	Unsupported	none
 truncated-magic	truncated	inspect	Truncated	none
 generated-truncated-output-size-varint	truncated	inspect	Truncated	none
 generated-truncated-stored-payload	truncated	decode	Truncated	none
+generated-truncated-transform-id	truncated	inspect	Truncated	none
+generated-truncated-transform-header-size	truncated	inspect	Truncated	none
+generated-truncated-stored-size-varint	truncated	inspect	Truncated	none
 missing-eof-marker	truncated	decode	Truncated	none
 truncated-dictionary-bundle	truncated	load-dictionary	Truncated	none
 zero-output-count	malformed	inspect	Malformed	none

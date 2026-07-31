@@ -956,6 +956,7 @@ const fn fixed_shape(static_inputs: usize, outputs: usize) -> StandardNodeShape 
 const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
     match id {
         standard::DELTA_INT_ID
+        | standard::DIVIDE_BY_ID
         | standard::ZIGZAG_ID
         | standard::CONVERT_STRUCT_TO_NUM_LE_ID
         | standard::CONVERT_NUM_TO_STRUCT_LE_ID
@@ -984,6 +985,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
+        | standard::PREFIX_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::PIVCO_HUFFMAN_ID
@@ -1018,6 +1020,12 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
                 max_outputs: None,
             })
         }
+        standard::DEDUP_NUM_ID => Some(StandardNodeShape {
+            static_inputs: 1,
+            allows_variable_inputs: false,
+            min_outputs: 1,
+            max_outputs: None,
+        }),
         standard::DISPATCH_N_BY_TAG_ID => Some(StandardNodeShape {
             static_inputs: 2,
             allows_variable_inputs: true,

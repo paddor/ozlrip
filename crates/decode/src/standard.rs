@@ -15,6 +15,7 @@ pub(crate) const SPLIT_BY_STRUCT_ID: u32 = 41;
 pub(crate) const DISPATCH_N_BY_TAG_ID: u32 = 42;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
 pub(crate) const CONSTANT_FIXED_ID: u32 = 45;
+pub(crate) const PREFIX_ID: u32 = 46;
 pub(crate) const DISPATCH_STRING_ID: u32 = 54;
 pub(crate) const CONVERT_SERIAL_TO_STRUCT_ID: u32 = 5;
 pub(crate) const CONVERT_STRUCT_TO_SERIAL_ID: u32 = 6;
@@ -49,6 +50,8 @@ pub(crate) const MUX_LENGTHS_ID: u32 = 65;
 pub(crate) const FSE_V2_ID: u32 = 49;
 pub(crate) const HUFFMAN_V2_ID: u32 = 50;
 pub(crate) const FSE_NCOUNT_ID: u32 = 52;
+pub(crate) const DIVIDE_BY_ID: u32 = 53;
+pub(crate) const DEDUP_NUM_ID: u32 = 56;
 pub(crate) const PIVCO_HUFFMAN_ID: u32 = 67;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {

@@ -424,6 +424,141 @@ pub(super) fn decode_delta_node(
     Ok(OwnedStream::pooled(output, stored.element_width))
 }
 
+pub(super) fn decode_divide_by_node(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    validate_numeric_stream_width(stored.element_width, "divide_by input")?;
+    numeric_element_count(stored.bytes, stored.element_width)?;
+    let divisor = parse_divide_by_divisor(header, stored.element_width)?;
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("divide_by allocation failed")
+    })?;
+    let max_value = max_numeric_value(stored.element_width);
+    for element in stored.bytes.chunks_exact(stored.element_width) {
+        let quotient = read_unsigned_element(element);
+        let decoded = quotient.checked_mul(divisor).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("divide_by value overflowed")
+        })?;
+        if decoded > max_value {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("divide_by value overflowed"));
+        }
+        push_unsigned_element(&mut output, decoded, stored.element_width);
+    }
+    Ok(OwnedStream::typed(output, stored.element_width))
+}
+
+pub(super) fn decode_dedup_num_node(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    output_count: usize,
+    limits: Limits,
+) -> Result<Vec<OwnedStream>> {
+    if !header.is_empty() {
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("dedup_num headers are unsupported")
+        );
+    }
+    if output_count == 0 {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dedup_num output count is zero")
+        );
+    }
+    if stored.string_lengths.is_some() {
+        return Err(
+            Error::new(ErrorKind::InvalidType).with_detail("dedup_num input must be numeric")
+        );
+    }
+    validate_numeric_stream_width(stored.element_width, "dedup_num input")?;
+    numeric_element_count(stored.bytes, stored.element_width)?;
+    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
+    {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    let total_buffer_bytes = stored
+        .bytes
+        .len()
+        .checked_mul(output_count)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if total_buffer_bytes > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num output allocation failed")
+    })?;
+    for _ in 0..output_count {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(stored.bytes.len()).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num allocation failed")
+        })?;
+        bytes.extend_from_slice(stored.bytes);
+        outputs.push(OwnedStream::typed(bytes, stored.element_width));
+    }
+    Ok(outputs)
+}
+
+fn parse_divide_by_divisor(header: &[u8], element_width: usize) -> Result<u64> {
+    if header.is_empty() {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("divide_by header is malformed"));
+    }
+    let mut offset = 0usize;
+    let divisor = read_var_u64(header, &mut offset)?;
+    if offset != header.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("divide_by header has trailing bytes")
+        );
+    }
+    if divisor == 0 || divisor > max_numeric_value(element_width) {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("divide_by divisor is invalid"));
+    }
+    Ok(divisor)
+}
+
+fn max_numeric_value(element_width: usize) -> u64 {
+    match element_width {
+        1 => u64::from(u8::MAX),
+        2 => u64::from(u16::MAX),
+        4 => u64::from(u32::MAX),
+        8 => u64::MAX,
+        _ => unreachable!("numeric width prevalidated"),
+    }
+}
+
+fn read_unsigned_element(element: &[u8]) -> u64 {
+    match element.len() {
+        1 => u64::from(element[0]),
+        2 => u64::from(u16::from_le_bytes([element[0], element[1]])),
+        4 => u64::from(u32::from_le_bytes([
+            element[0], element[1], element[2], element[3],
+        ])),
+        8 => u64::from_le_bytes([
+            element[0], element[1], element[2], element[3], element[4], element[5], element[6],
+            element[7],
+        ]),
+        _ => unreachable!("numeric width prevalidated"),
+    }
+}
+
+fn push_unsigned_element(output: &mut Vec<u8>, value: u64, element_width: usize) {
+    let bytes = value.to_le_bytes();
+    output.extend_from_slice(&bytes[..element_width]);
+}
+
 pub(super) fn decode_bitunpack_serial8_chunk(
     stored: &[u8],
     header: &[u8],

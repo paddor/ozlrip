@@ -31,9 +31,10 @@ the default decoder options are not the right fit. Load dictionary bundles with
 - [x] Whole-graph validation before execution
 - [x] Stored streams, checksums, zstd via `zrip`, lz4 via `lz4rip`
 - [x] Core graph transforms: concat, splitN, split-by-struct, transpose split,
-  bit split, mux lengths, dispatch string, dispatchN-byTag
-- [x] Numeric/table transforms: endian conversion, delta, zigzag, bitpack,
-  bitunpack, range-pack, flatpack, sparse num, partition, quantize
+  bit split, mux lengths, prefix, dispatch string, dispatchN-byTag
+- [x] Numeric/table transforms: endian conversion, delta, divide-by, dedup,
+  zigzag, bitpack, bitunpack, range-pack, flatpack, sparse num, partition,
+  quantize
 - [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
 - [x] `paranoid` safe-code baseline
 - [x] OpenZL `dev-format` v27 metadata and PivCo-Huffman graph validation
