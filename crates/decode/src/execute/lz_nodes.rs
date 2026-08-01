@@ -1,6 +1,7 @@
 use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
+use zrip_core::bitstream::reader_reverse::ReverseBitReader;
 
 use super::{
     DecodeScratch, OwnedStream, StreamInput, numeric_element_count, read_usize_numeric_element,
@@ -652,6 +653,55 @@ struct FastLzDeprecatedPayload<'a> {
 
 const FASTLZ_DEPRECATED_MIN_OFFSET: usize = 16;
 
+#[derive(Clone, Copy)]
+struct RolzDeprecatedParams {
+    context_depth: usize,
+    context_log: usize,
+    row_log: usize,
+    min_length: usize,
+    predict_match_length: bool,
+    lz_min_length: usize,
+    rep_min_length: usize,
+}
+
+struct RolzDeprecatedPayload<'a> {
+    params: RolzDeprecatedParams,
+    literals: LegacyLiteralPayload<'a>,
+    match_types: Vec<u8>,
+    literal_lengths: Vec<usize>,
+    match_lengths: Vec<usize>,
+    match_codes: Vec<usize>,
+}
+
+const ROLZ_DEPRECATED_PARAMS: RolzDeprecatedParams = RolzDeprecatedParams {
+    context_depth: 2,
+    context_log: 12,
+    row_log: 4,
+    min_length: 3,
+    predict_match_length: true,
+    lz_min_length: 7,
+    rep_min_length: 3,
+};
+const ROLZ_DEPRECATED_HEADER_LEN: usize = 15;
+const ROLZ_DEPRECATED_MARKOV_STATES: usize = 6;
+const ROLZ_DEPRECATED_INITIAL_REPS: [usize; 3] = [1, 4, 8];
+const ROLZ_DEPRECATED_REP_SUB: usize = 4;
+const ROLZ_DEPRECATED_MATCH_TYPE_LZ: u8 = 0;
+const ROLZ_DEPRECATED_MATCH_TYPE_ROLZ: u8 = 1;
+const ROLZ_DEPRECATED_MATCH_TYPE_REP0: u8 = 2;
+const ROLZ_DEPRECATED_MATCH_TYPE_REP: u8 = 3;
+const ROLZ_DEPRECATED_VALUE_BASE: [usize; 59] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000,
+    0x8000, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x200000, 0x400000, 0x800000, 0x1000000,
+    0x2000000, 0x4000000, 0x8000000, 0x10000000, 0x20000000, 0x40000000, 0x80000000,
+];
+const ROLZ_DEPRECATED_VALUE_BITS: [u8; 59] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31,
+];
+
 pub(super) fn decode_fastlz_deprecated_node(
     source: StreamInput<'_>,
     header: &[u8],
@@ -678,12 +728,8 @@ pub(super) fn decode_rolz_deprecated_node(
     }
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "rolz_deprecated")?;
-    let literals = decode_rolz_deprecated_literal_only_payload(payload)?;
-    if literals.byte_len()? != decoded_size {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("rolz_deprecated output size does not match prefix"));
-    }
-    copy_deprecated_lz_literals(literals, "rolz_deprecated")
+    let payload = parse_rolz_deprecated_payload(payload, limits)?;
+    decode_rolz_deprecated_payload(payload, decoded_size)
 }
 
 fn parse_fastlz_deprecated_payload(payload: &[u8]) -> Result<FastLzDeprecatedPayload<'_>> {
@@ -890,23 +936,38 @@ fn read_fastlz_deprecated_extra(extras: &[u8], extras_pos: &mut usize) -> Result
     Ok(length)
 }
 
-fn decode_rolz_deprecated_literal_only_payload(payload: &[u8]) -> Result<LegacyLiteralPayload<'_>> {
-    let header = payload.get(..15).ok_or_else(|| {
+fn parse_rolz_deprecated_payload(
+    payload: &[u8],
+    limits: Limits,
+) -> Result<RolzDeprecatedPayload<'_>> {
+    let header = payload.get(..ROLZ_DEPRECATED_HEADER_LEN).ok_or_else(|| {
         Error::new(ErrorKind::Truncated).with_detail("rolz_deprecated header is truncated")
     })?;
-    if header[..7] != [2, 12, 4, 3, 1, 7, 3] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated parameters are unsupported"));
-    }
-    let num_literals = u32::from_le_bytes([header[7], header[8], header[9], header[10]]) as usize;
-    let num_sequences =
-        u32::from_le_bytes([header[11], header[12], header[13], header[14]]) as usize;
-    if num_sequences != 0 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated sequences are unsupported"));
+    let params = parse_rolz_deprecated_params(header)?;
+    let num_literals = usize::try_from(read_deprecated_lz_le_u32(
+        header,
+        7,
+        "rolz_deprecated literals",
+    )?)
+    .map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated literal count is too large")
+    })?;
+    let num_sequences = usize::try_from(read_deprecated_lz_le_u32(
+        header,
+        11,
+        "rolz_deprecated sequences",
+    )?)
+    .map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated sequence count is too large")
+    })?;
+    if num_sequences > limits.max_buffer_bytes / 16 {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated sequence count exceeds buffer limit"));
     }
 
-    let mut offset = 15usize;
+    let mut offset = ROLZ_DEPRECATED_HEADER_LEN;
     let literals = if num_literals == 0 {
         LegacyLiteralPayload::Raw(&[])
     } else {
@@ -928,17 +989,431 @@ fn decode_rolz_deprecated_literal_only_payload(payload: &[u8]) -> Result<LegacyL
             .with_detail("rolz_deprecated literal count is invalid"));
     }
 
-    let match_types =
-        parse_legacy_raw_entropy_slice(payload, &mut offset, 1, "rolz_deprecated match types")?;
-    if !match_types.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated match types are unsupported"));
+    let match_types = decode_deprecated_lz_entropy_payload_to_vec(
+        payload,
+        &mut offset,
+        num_sequences,
+        limits,
+        "rolz_deprecated match types",
+    )?;
+    for &match_type in &match_types {
+        if match_type > ROLZ_DEPRECATED_MATCH_TYPE_REP {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match type is invalid"));
+        }
     }
+    let literal_lengths = decode_rolz_deprecated_seq_values(
+        payload,
+        &mut offset,
+        &match_types,
+        limits,
+        "rolz_deprecated literal lengths",
+    )?;
+    let match_lengths = decode_rolz_deprecated_seq_values(
+        payload,
+        &mut offset,
+        &match_types,
+        limits,
+        "rolz_deprecated match lengths",
+    )?;
+    let match_codes = decode_rolz_deprecated_seq_values(
+        payload,
+        &mut offset,
+        &match_types,
+        limits,
+        "rolz_deprecated match codes",
+    )?;
     if offset != payload.len() {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated payload has trailing bytes"));
     }
-    Ok(literals)
+    Ok(RolzDeprecatedPayload {
+        params,
+        literals,
+        match_types,
+        literal_lengths,
+        match_lengths,
+        match_codes,
+    })
+}
+
+fn parse_rolz_deprecated_params(header: &[u8]) -> Result<RolzDeprecatedParams> {
+    let params = RolzDeprecatedParams {
+        context_depth: usize::from(header[0]),
+        context_log: usize::from(header[1]),
+        row_log: usize::from(header[2]),
+        min_length: usize::from(header[3]),
+        predict_match_length: header[4] != 0,
+        lz_min_length: usize::from(header[5]),
+        rep_min_length: usize::from(header[6]),
+    };
+    if params.context_depth != ROLZ_DEPRECATED_PARAMS.context_depth
+        || params.context_log != ROLZ_DEPRECATED_PARAMS.context_log
+        || params.row_log != ROLZ_DEPRECATED_PARAMS.row_log
+        || params.min_length != ROLZ_DEPRECATED_PARAMS.min_length
+        || params.predict_match_length != ROLZ_DEPRECATED_PARAMS.predict_match_length
+        || params.lz_min_length != ROLZ_DEPRECATED_PARAMS.lz_min_length
+        || params.rep_min_length != ROLZ_DEPRECATED_PARAMS.rep_min_length
+    {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated parameters are unsupported"));
+    }
+    Ok(params)
+}
+
+fn decode_rolz_deprecated_payload(
+    payload: RolzDeprecatedPayload<'_>,
+    decoded_size: usize,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(decoded_size).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("rolz_deprecated allocation failed")
+    })?;
+    let mut literals = LegacyLiteralCursor::new(payload.literals);
+    let mut reps = ROLZ_DEPRECATED_INITIAL_REPS;
+
+    for index in 0..payload.match_types.len() {
+        append_rolz_deprecated_literals(
+            &mut literals,
+            &mut output,
+            payload.literal_lengths[index],
+            decoded_size,
+        )?;
+        let match_type = payload.match_types[index];
+        let match_code = payload.match_codes[index];
+        let match_len = payload.match_lengths[index];
+        let (match_offset, match_len) = resolve_rolz_deprecated_match(
+            match_type,
+            match_code,
+            match_len,
+            payload.params,
+            &reps,
+        )?;
+        if match_offset == 0 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated offset is zero")
+            );
+        }
+        if match_offset > output.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated offset exceeds decoded prefix"));
+        }
+        let match_end = output
+            .len()
+            .checked_add(match_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if match_end > decoded_size {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match length exceeds output size"));
+        }
+        update_rolz_deprecated_reps(&mut reps, match_type, match_code, match_offset)?;
+        let out_pos = output.len();
+        append_lz_match(&mut output, out_pos, match_offset, match_len);
+    }
+
+    let remaining_literals = literals.remaining_len()?;
+    let output_end = output
+        .len()
+        .checked_add(remaining_literals)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_end != decoded_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated output size does not match prefix"));
+    }
+    literals.extend_remaining(&mut output)?;
+    Ok(output)
+}
+
+fn append_rolz_deprecated_literals(
+    literals: &mut LegacyLiteralCursor<'_>,
+    output: &mut Vec<u8>,
+    len: usize,
+    decoded_size: usize,
+) -> Result<()> {
+    let output_end = output
+        .len()
+        .checked_add(len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_end > decoded_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated literal length exceeds output size"));
+    }
+    literals.extend_next(len, output)
+}
+
+fn resolve_rolz_deprecated_match(
+    match_type: u8,
+    match_code: usize,
+    match_len: usize,
+    params: RolzDeprecatedParams,
+    reps: &[usize; 3],
+) -> Result<(usize, usize)> {
+    match match_type {
+        ROLZ_DEPRECATED_MATCH_TYPE_LZ => {
+            if match_code == 0 {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("rolz_deprecated lz offset is zero"));
+            }
+            let match_len = match_len
+                .checked_add(params.lz_min_length)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            Ok((match_code, match_len))
+        }
+        ROLZ_DEPRECATED_MATCH_TYPE_ROLZ => Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated rolz matches are unsupported")),
+        ROLZ_DEPRECATED_MATCH_TYPE_REP0 | ROLZ_DEPRECATED_MATCH_TYPE_REP => {
+            if match_code & 3 == 3 {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("rolz_deprecated rep code is invalid"));
+            }
+            let match_len = match_len
+                .checked_add(params.rep_min_length)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let match_offset = rolz_deprecated_rep_offset(match_code, reps)?;
+            Ok((match_offset, match_len))
+        }
+        _ => {
+            Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match type is invalid"))
+        }
+    }
+}
+
+fn rolz_deprecated_rep_offset(match_code: usize, reps: &[usize; 3]) -> Result<usize> {
+    let rep = match_code & 3;
+    let prev = reps
+        .get(rep)
+        .copied()
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
+    if match_code == 0 {
+        return Ok(prev);
+    }
+    let delta = match_code >> 2;
+    if delta >= ROLZ_DEPRECATED_REP_SUB {
+        prev.checked_add(delta - ROLZ_DEPRECATED_REP_SUB)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    } else {
+        prev.checked_sub(ROLZ_DEPRECATED_REP_SUB - delta)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("rolz_deprecated rep offset is invalid")
+            })
+    }
+}
+
+fn update_rolz_deprecated_reps(
+    reps: &mut [usize; 3],
+    match_type: u8,
+    match_code: usize,
+    offset: usize,
+) -> Result<()> {
+    match match_type {
+        ROLZ_DEPRECATED_MATCH_TYPE_LZ | ROLZ_DEPRECATED_MATCH_TYPE_ROLZ => {
+            reps[2] = reps[1];
+            reps[1] = reps[0];
+            reps[0] = offset;
+        }
+        ROLZ_DEPRECATED_MATCH_TYPE_REP0 | ROLZ_DEPRECATED_MATCH_TYPE_REP => match match_code & 3 {
+            0 => {}
+            1 => {
+                reps[1] = reps[0];
+                reps[0] = offset;
+            }
+            2 => {
+                reps[2] = reps[1];
+                reps[1] = reps[0];
+                reps[0] = offset;
+            }
+            _ => {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("rolz_deprecated rep code is invalid"));
+            }
+        },
+        _ => {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match type is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn decode_rolz_deprecated_seq_values(
+    source: &[u8],
+    offset: &mut usize,
+    match_types: &[u8],
+    limits: Limits,
+    transform_name: &str,
+) -> Result<Vec<usize>> {
+    let num_sequences = match_types.len();
+    let mut values = Vec::new();
+    values.try_reserve_exact(num_sequences).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    if num_sequences == 0 {
+        return Ok(values);
+    }
+
+    let bit_size = usize::try_from(read_deprecated_lz_le_u32(source, *offset, transform_name)?)
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} bitstream is too large"))
+        })?;
+    *offset = (*offset)
+        .checked_add(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut totals = [0usize; ROLZ_DEPRECATED_MARKOV_STATES];
+    for total in &mut totals {
+        *total = usize::try_from(read_deprecated_lz_le_u32(source, *offset, transform_name)?)
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail(format!("{transform_name} state total is too large"))
+            })?;
+        *offset = (*offset)
+            .checked_add(4)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    validate_rolz_deprecated_seq_totals(&totals, num_sequences, transform_name)?;
+
+    let bit_end = (*offset)
+        .checked_add(bit_size)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bitstream = source.get(*offset..bit_end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail(format!("{transform_name} is truncated"))
+    })?;
+    *offset = bit_end;
+
+    let mut codes = Vec::new();
+    codes.try_reserve_exact(num_sequences).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} code allocation failed"))
+    })?;
+    codes.resize(num_sequences, 0);
+    for state in 0..ROLZ_DEPRECATED_MARKOV_STATES {
+        let begin = if state == 0 { 0 } else { totals[state - 1] };
+        let end = totals[state];
+        let decoded = decode_deprecated_lz_entropy_payload_to_vec(
+            source,
+            offset,
+            end - begin,
+            limits,
+            transform_name,
+        )?;
+        codes[begin..end].copy_from_slice(&decoded);
+    }
+
+    let mut reader = ReverseBitReader::new(bitstream)
+        .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+    let mut positions = [0usize; ROLZ_DEPRECATED_MARKOV_STATES];
+    for state in 1..ROLZ_DEPRECATED_MARKOV_STATES {
+        positions[state] = totals[state - 1];
+    }
+    let mut state = 0usize;
+    for &match_type in match_types {
+        state = rolz_deprecated_markov_next_state(state, match_type)?;
+        let index = positions[state];
+        if index >= totals[state] {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} state totals are invalid")));
+        }
+        positions[state] = positions[state]
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let code = usize::from(codes[index]);
+        let base = *ROLZ_DEPRECATED_VALUE_BASE.get(code).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} code is invalid"))
+        })?;
+        let bits = *ROLZ_DEPRECATED_VALUE_BITS.get(code).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} code is invalid"))
+        })?;
+        let extra = usize::try_from(reader.read_bits(bits).map_err(|err| {
+            Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name}: {err}"))
+        })?)
+        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        values.push(
+            base.checked_add(extra)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?,
+        );
+    }
+    validate_rolz_deprecated_seq_positions(&positions, &totals, transform_name)?;
+    if reader.bits_remaining() != 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} bitstream has trailing bits")));
+    }
+    Ok(values)
+}
+
+fn validate_rolz_deprecated_seq_totals(
+    totals: &[usize; ROLZ_DEPRECATED_MARKOV_STATES],
+    num_sequences: usize,
+    transform_name: &str,
+) -> Result<()> {
+    let mut previous = 0usize;
+    for &total in totals {
+        if total < previous {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} state totals are invalid")));
+        }
+        previous = total;
+    }
+    if totals[ROLZ_DEPRECATED_MARKOV_STATES - 1] != num_sequences {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} sequence count is invalid")));
+    }
+    Ok(())
+}
+
+fn validate_rolz_deprecated_seq_positions(
+    positions: &[usize; ROLZ_DEPRECATED_MARKOV_STATES],
+    totals: &[usize; ROLZ_DEPRECATED_MARKOV_STATES],
+    transform_name: &str,
+) -> Result<()> {
+    for state in 0..ROLZ_DEPRECATED_MARKOV_STATES {
+        if positions[state] != totals[state] {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} state totals are invalid")));
+        }
+    }
+    Ok(())
+}
+
+fn rolz_deprecated_markov_next_state(state: usize, match_type: u8) -> Result<usize> {
+    const NEXT: [[usize; 4]; ROLZ_DEPRECATED_MARKOV_STATES] = [
+        [0, 1, 2, 5],
+        [0, 1, 3, 5],
+        [0, 1, 4, 5],
+        [0, 1, 4, 5],
+        [0, 1, 4, 5],
+        [0, 1, 2, 5],
+    ];
+    let match_type = usize::from(match_type);
+    NEXT.get(state)
+        .and_then(|row| row.get(match_type))
+        .copied()
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated match type is invalid")
+        })
+}
+
+fn decode_deprecated_lz_entropy_payload_to_vec(
+    source: &[u8],
+    offset: &mut usize,
+    expected_len: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
+    let payload = parse_legacy_literal_entropy_payload(source, offset, 1, transform_name)?;
+    if payload.byte_len()? != expected_len {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} count is invalid")));
+    }
+    if expected_len > limits.max_buffer_bytes {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} exceeds buffer limit")));
+    }
+    copy_deprecated_lz_literals(payload, transform_name)
 }
 
 fn parse_deprecated_lz_stored_stream<'a>(
@@ -1087,6 +1562,20 @@ fn legacy_entropy_output_len(decoded_elements: usize, element_width: usize) -> R
     decoded_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn read_deprecated_lz_le_u32(source: &[u8], offset: usize, transform_name: &str) -> Result<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bytes = source.get(offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail(format!("{transform_name} is truncated"))
+    })?;
+    Ok(u32::from_le_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| Error::new(ErrorKind::Malformed))?,
+    ))
 }
 
 fn read_deprecated_lz_sized_slice<'a>(

@@ -345,16 +345,117 @@ fn empty_fastlz_deprecated_stream() -> Vec<u8> {
     fastlz_deprecated_literal_only_stream(&[])
 }
 
-fn rolz_deprecated_literal_entropy_stream(decoded_size: usize, literal_entropy: &[u8]) -> Vec<u8> {
+const ROLZ_TEST_MARKOV_STATES: usize = 6;
+
+fn rolz_deprecated_stream(
+    decoded_size: usize,
+    num_literals: usize,
+    literal_entropy: &[u8],
+    match_types: &[u8],
+    literal_lengths: &[usize],
+    match_lengths: &[usize],
+    match_codes: &[usize],
+) -> Vec<u8> {
     let mut payload = vec![2, 12, 4, 3, 1, 7, 3];
-    payload.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());
-    payload.extend_from_slice(&0u32.to_le_bytes());
-    if decoded_size != 0 {
+    payload.extend_from_slice(&u32::try_from(num_literals).unwrap().to_le_bytes());
+    payload.extend_from_slice(&u32::try_from(match_types.len()).unwrap().to_le_bytes());
+    if num_literals != 0 {
         payload.push(0);
         payload.extend_from_slice(literal_entropy);
     }
-    payload.extend_from_slice(&legacy_entropy_raw_payload(&[], 1));
+    payload.extend_from_slice(&legacy_entropy_raw_payload(match_types, 1));
+    if !match_types.is_empty() {
+        payload.extend_from_slice(&rolz_deprecated_sequence_values(
+            literal_lengths,
+            match_types,
+        ));
+        payload.extend_from_slice(&rolz_deprecated_sequence_values(match_lengths, match_types));
+        payload.extend_from_slice(&rolz_deprecated_sequence_values(match_codes, match_types));
+    }
     deprecated_lz_stored_stream(decoded_size, &payload)
+}
+
+fn rolz_deprecated_sequence_values(values: &[usize], match_types: &[u8]) -> Vec<u8> {
+    assert_eq!(values.len(), match_types.len());
+
+    let mut states = Vec::new();
+    let mut sizes = [0usize; ROLZ_TEST_MARKOV_STATES];
+    let mut state = 0usize;
+    for &match_type in match_types {
+        state = rolz_test_next_state(state, match_type);
+        states.push(state);
+        sizes[state] += 1;
+    }
+
+    let mut codes = Vec::new();
+    let mut widths = Vec::new();
+    let mut extras = Vec::new();
+    for &value in values {
+        let (code, width, extra) = rolz_test_value_code(value);
+        codes.push(code);
+        widths.push(width);
+        extras.push(extra);
+    }
+
+    let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+    for index in (0..values.len()).rev() {
+        writer.write_bits(u32::try_from(extras[index]).unwrap(), widths[index]);
+    }
+    writer.close_reverse_stream();
+    let bitstream = writer.into_bytes();
+
+    let mut grouped = vec![Vec::new(); ROLZ_TEST_MARKOV_STATES];
+    for index in 0..values.len() {
+        grouped[states[index]].push(codes[index]);
+    }
+
+    let mut output = Vec::new();
+    output.extend_from_slice(&u32::try_from(bitstream.len()).unwrap().to_le_bytes());
+    let mut total = 0usize;
+    for size in sizes {
+        total += size;
+        output.extend_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+    }
+    output.extend_from_slice(&bitstream);
+    for state_codes in grouped {
+        output.extend_from_slice(&legacy_entropy_raw_payload(&state_codes, 1));
+    }
+    output
+}
+
+fn rolz_test_next_state(state: usize, match_type: u8) -> usize {
+    const NEXT: [[usize; 4]; ROLZ_TEST_MARKOV_STATES] = [
+        [0, 1, 2, 5],
+        [0, 1, 3, 5],
+        [0, 1, 4, 5],
+        [0, 1, 4, 5],
+        [0, 1, 4, 5],
+        [0, 1, 2, 5],
+    ];
+    NEXT[state][usize::from(match_type)]
+}
+
+fn rolz_test_value_code(value: usize) -> (u8, u8, usize) {
+    if value < 32 {
+        return (u8::try_from(value).unwrap(), 0, 0);
+    }
+    let highbit = usize::BITS - 1 - value.leading_zeros();
+    let code = 27 + highbit;
+    let width = u8::try_from(highbit).unwrap();
+    let base = 1usize << highbit;
+    (u8::try_from(code).unwrap(), width, value - base)
+}
+
+fn rolz_deprecated_literal_entropy_stream(decoded_size: usize, literal_entropy: &[u8]) -> Vec<u8> {
+    rolz_deprecated_stream(
+        decoded_size,
+        decoded_size,
+        literal_entropy,
+        &[],
+        &[],
+        &[],
+        &[],
+    )
 }
 
 fn rolz_deprecated_literal_only_stream(literals: &[u8]) -> Vec<u8> {
@@ -4536,6 +4637,116 @@ fn decodes_v21_rolz_deprecated_constant_literals_frame() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_raw_lz_sequence_frame() {
+    let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
+    let stored = rolz_deprecated_stream(
+        41,
+        literals.len(),
+        &legacy_entropy_raw_payload(literals, 1),
+        &[0],
+        &[33],
+        &[0],
+        &[33],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        41,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 41);
+    assert_eq!(output, b"abcdefghijklmnopqrstuvwxyzABCDEFGabcdefg!");
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_rep0_sequence_frame() {
+    let literals = b"abc!";
+    let stored = rolz_deprecated_stream(
+        7,
+        literals.len(),
+        &legacy_entropy_raw_payload(literals, 1),
+        &[2],
+        &[3],
+        &[0],
+        &[0],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        7,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
+    assert_eq!(output, b"abcccc!");
+}
+
+#[test]
+fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
+    let stored = rolz_deprecated_stream(
+        7,
+        4,
+        &legacy_entropy_raw_payload(b"abcd", 1),
+        &[3],
+        &[4],
+        &[0],
+        &[1],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        7,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn rejects_rolz_deprecated_rolz_match_without_mutating_destination() {
+    let stored = rolz_deprecated_stream(
+        5,
+        2,
+        &legacy_entropy_raw_payload(b"ab", 1),
+        &[1],
+        &[2],
+        &[0],
+        &[0],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        5,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(output, [1, 2]);
 }
 
 #[test]
