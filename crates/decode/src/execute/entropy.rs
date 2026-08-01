@@ -739,6 +739,10 @@ fn decode_fse_symbols(
     table: &[FseDecodeEntry],
     accuracy_log: u8,
 ) -> Result<Vec<u8>> {
+    if output_len < nb_states {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fse_v2 output count is smaller than state count"));
+    }
     let mut reader = ReverseBitReader::new(bits)
         .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
 

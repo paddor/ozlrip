@@ -5327,6 +5327,35 @@ fn decodes_v21_fse_v2_frame() {
 }
 
 #[test]
+fn rejects_fse_v2_output_shorter_than_state_count() {
+    let distribution = [16i16, 16];
+    let norm = distribution
+        .into_iter()
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+
+    let err = decode_fse_v2_node(
+        &[
+            StreamInput {
+                bytes: &norm,
+                element_width: 2,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[4, 2],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
 fn decodes_v21_huffman_v2_frame() {
     let expected = [0, 1, 1, 0];
     let output_len = u8::try_from(expected.len()).unwrap();
