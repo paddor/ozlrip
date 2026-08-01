@@ -272,6 +272,10 @@ fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
     standard_transform_serial_frame(21, 22, stored, decoded_len, &[])
 }
 
+fn zstd_fixed_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
+    standard_transform_serial_frame(21, 23, stored, decoded_len, &[])
+}
+
 #[cfg(feature = "zstd")]
 fn zstd_stored_stream(decoded: &[u8]) -> Vec<u8> {
     let compressed = zrip::compress(decoded, 1).unwrap();
@@ -635,6 +639,8 @@ fn supported_standard_nodes_have_decode_coverage() {
     supported.push(standard::LZ4_ID);
     #[cfg(feature = "zstd")]
     supported.push(standard::ZSTD_ID);
+    #[cfg(feature = "zstd")]
+    supported.push(standard::ZSTD_FIXED_ID);
 
     let mut covered = covered_standard_node_ids();
     #[cfg(not(feature = "dev-format"))]
@@ -643,6 +649,8 @@ fn supported_standard_nodes_have_decode_coverage() {
     covered.retain(|&id| id != standard::LZ4_ID);
     #[cfg(not(feature = "zstd"))]
     covered.retain(|&id| id != standard::ZSTD_ID);
+    #[cfg(not(feature = "zstd"))]
+    covered.retain(|&id| id != standard::ZSTD_FIXED_ID);
 
     supported.sort_unstable();
     covered.sort_unstable();
@@ -3801,6 +3809,21 @@ fn decodes_v21_zstd_serial_chunk() {
 
 #[cfg(feature = "zstd")]
 #[test]
+fn decodes_v21_zstd_fixed_serial_chunk() {
+    let expected = b"legacy zstd fixed OpenZL serial chunk";
+    let stored = zstd_stored_stream(expected);
+    let input = zstd_fixed_serial_frame(&stored, expected.len());
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
 fn rejects_malformed_zstd_chunk_without_mutating_destination() {
     let mut stored = Vec::new();
     push_var_u64(&mut stored, 1);
@@ -3891,6 +3914,19 @@ fn enforces_zstd_output_limit_without_mutating_destination() {
 #[test]
 fn rejects_zstd_chunk_when_feature_is_disabled() {
     let input = zstd_serial_frame(&[1, 0], 8);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(output, [1, 2]);
+}
+
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn rejects_zstd_fixed_chunk_when_feature_is_disabled() {
+    let input = zstd_fixed_serial_frame(&[1, 0], 8);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
 

@@ -16,6 +16,7 @@ id	name	coverage
 18	sentinel	unit+inline-frame
 19	lz	unit+inline-frame
 22	zstd	unit+fuzz+interop
+23	zstd_fixed_legacy	unit+inline-frame
 24	field_lz	unit+fuzz
 25	quantize_offsets	unit+inline-frame
 26	quantize_lengths	unit+inline-frame

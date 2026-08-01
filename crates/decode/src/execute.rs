@@ -1303,6 +1303,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::DISPATCH_STRING_ID
         | standard::LZ4_ID
         | standard::ZSTD_ID
+        | standard::ZSTD_FIXED_ID
         | standard::BITPACK_SERIAL_ID
         | standard::BITPACK_INT_ID
         | standard::CONSTANT_SERIAL_ID
@@ -1501,7 +1502,7 @@ fn execute_standard_node(
             ctx.scratch,
         )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),
-        standard::ZSTD_ID => one_serial(decode_zstd_chunk(
+        standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_serial(decode_zstd_chunk(
             single_input(inputs)?,
             header,
             dict_index,
