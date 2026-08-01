@@ -666,11 +666,32 @@ struct RolzDeprecatedParams {
 
 struct RolzDeprecatedPayload<'a> {
     params: RolzDeprecatedParams,
-    literals: LegacyLiteralPayload<'a>,
+    literals: RolzDeprecatedLiterals<'a>,
     match_types: Vec<u8>,
     literal_lengths: Vec<usize>,
     match_lengths: Vec<usize>,
     match_codes: Vec<usize>,
+}
+
+enum RolzDeprecatedLiterals<'a> {
+    Linear(LegacyLiteralPayload<'a>),
+    O1(RolzDeprecatedO1Literals<'a>),
+}
+
+struct RolzDeprecatedO1Literals<'a> {
+    max_context: u8,
+    context_to_cluster: [u8; 256],
+    clusters: Vec<LegacyLiteralPayload<'a>>,
+    total_len: usize,
+}
+
+enum RolzDeprecatedLiteralCursor<'a> {
+    Linear(LegacyLiteralCursor<'a>),
+    O1 {
+        payload: RolzDeprecatedO1Literals<'a>,
+        cluster_offsets: [usize; 256],
+        consumed: usize,
+    },
 }
 
 #[derive(Clone, Copy, Default)]
@@ -829,6 +850,96 @@ impl RolzDeprecatedTable {
         entry.predicted_match_length = u8::try_from(match_length.min(usize::from(u8::MAX)))
             .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
         Ok(())
+    }
+}
+
+impl RolzDeprecatedLiterals<'_> {
+    fn byte_len(&self) -> Result<usize> {
+        match self {
+            Self::Linear(payload) => payload.byte_len(),
+            Self::O1(payload) => Ok(payload.total_len),
+        }
+    }
+}
+
+impl<'a> RolzDeprecatedLiteralCursor<'a> {
+    fn new(payload: RolzDeprecatedLiterals<'a>) -> Self {
+        match payload {
+            RolzDeprecatedLiterals::Linear(payload) => {
+                Self::Linear(LegacyLiteralCursor::new(payload))
+            }
+            RolzDeprecatedLiterals::O1(payload) => Self::O1 {
+                payload,
+                cluster_offsets: [0; 256],
+                consumed: 0,
+            },
+        }
+    }
+
+    fn remaining_len(&self) -> Result<usize> {
+        match self {
+            Self::Linear(cursor) => cursor.remaining_len(),
+            Self::O1 {
+                payload, consumed, ..
+            } => payload.total_len.checked_sub(*consumed).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("rolz_deprecated literal stream is too short")
+            }),
+        }
+    }
+
+    fn extend_next(&mut self, len: usize, output: &mut Vec<u8>) -> Result<()> {
+        match self {
+            Self::Linear(cursor) => cursor.extend_next(len, output),
+            Self::O1 {
+                payload,
+                cluster_offsets,
+                consumed,
+            } => {
+                let end = consumed
+                    .checked_add(len)
+                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                if end > payload.total_len {
+                    return Err(Error::new(ErrorKind::Malformed)
+                        .with_detail("rolz_deprecated literal stream is too short"));
+                }
+
+                let mut context = output.last().copied().unwrap_or(0);
+                for _ in 0..len {
+                    if context > payload.max_context {
+                        return Err(Error::new(ErrorKind::Malformed)
+                            .with_detail("rolz_deprecated literal context is invalid"));
+                    }
+                    let cluster = usize::from(payload.context_to_cluster[usize::from(context)]);
+                    let cluster_payload = payload.clusters.get(cluster).ok_or_else(|| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail("rolz_deprecated literal cluster is invalid")
+                    })?;
+                    let cluster_offset = cluster_offsets.get_mut(cluster).ok_or_else(|| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail("rolz_deprecated literal cluster is invalid")
+                    })?;
+                    context = read_legacy_literal_byte(
+                        cluster_payload,
+                        *cluster_offset,
+                        "rolz_deprecated literals",
+                    )?;
+                    *cluster_offset = (*cluster_offset)
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                    *consumed = (*consumed)
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+                    output.push(context);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn extend_remaining(&mut self, output: &mut Vec<u8>) -> Result<()> {
+        let len = self.remaining_len()?;
+        self.extend_next(len, output)
     }
 }
 
@@ -1098,22 +1209,7 @@ fn parse_rolz_deprecated_payload(
     }
 
     let mut offset = ROLZ_DEPRECATED_HEADER_LEN;
-    let literals = if num_literals == 0 {
-        LegacyLiteralPayload::Raw(&[])
-    } else {
-        let order = *payload.get(offset).ok_or_else(|| {
-            Error::new(ErrorKind::Truncated)
-                .with_detail("rolz_deprecated literal order flag is truncated")
-        })?;
-        offset = offset
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if order != 0 {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("rolz_deprecated order-1 literals are unsupported"));
-        }
-        parse_legacy_literal_entropy_payload(payload, &mut offset, 1, "rolz_deprecated literals")?
-    };
+    let literals = parse_rolz_deprecated_literals(payload, &mut offset, num_literals, limits)?;
     if literals.byte_len()? != num_literals {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal count is invalid"));
@@ -1167,6 +1263,125 @@ fn parse_rolz_deprecated_payload(
     })
 }
 
+fn parse_rolz_deprecated_literals<'a>(
+    payload: &'a [u8],
+    offset: &mut usize,
+    num_literals: usize,
+    limits: Limits,
+) -> Result<RolzDeprecatedLiterals<'a>> {
+    if num_literals == 0 {
+        return Ok(RolzDeprecatedLiterals::Linear(LegacyLiteralPayload::Raw(
+            &[],
+        )));
+    }
+
+    let order = *payload.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail("rolz_deprecated literal order flag is truncated")
+    })?;
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    match order {
+        0 => parse_legacy_literal_entropy_payload(payload, offset, 1, "rolz_deprecated literals")
+            .map(RolzDeprecatedLiterals::Linear),
+        1 => parse_rolz_deprecated_o1_literals(payload, offset, num_literals, limits),
+        _ => Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated literal order flag is invalid")),
+    }
+}
+
+fn parse_rolz_deprecated_o1_literals<'a>(
+    payload: &'a [u8],
+    offset: &mut usize,
+    num_literals: usize,
+    limits: Limits,
+) -> Result<RolzDeprecatedLiterals<'a>> {
+    let max_context = *payload.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail("rolz_deprecated literal clustering is truncated")
+    })?;
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+
+    let map_len = usize::from(max_context)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let map_end = (*offset)
+        .checked_add(map_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let map = payload.get(*offset..map_end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail("rolz_deprecated literal clustering is truncated")
+    })?;
+    *offset = map_end;
+
+    let mut context_to_cluster = [0u8; 256];
+    context_to_cluster[..map_len].copy_from_slice(map);
+    let num_clusters = map
+        .iter()
+        .copied()
+        .max()
+        .map(|cluster| usize::from(cluster) + 1)
+        .unwrap_or(0);
+    let cluster_limit = limits
+        .max_buffer_bytes
+        .checked_div(core::mem::size_of::<LegacyLiteralPayload<'_>>().max(1))
+        .unwrap_or(0);
+    if num_clusters > cluster_limit {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated literal clusters exceed buffer limit"));
+    }
+
+    let mut clusters = Vec::new();
+    clusters.try_reserve_exact(num_clusters).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated literal cluster allocation failed")
+    })?;
+    let mut total = 0usize;
+    for _ in 0..num_clusters {
+        let count = usize::try_from(read_deprecated_lz_le_u32(
+            payload,
+            *offset,
+            "rolz_deprecated literal cluster",
+        )?)
+        .map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail("rolz_deprecated literal cluster is too large")
+        })?;
+        *offset = (*offset)
+            .checked_add(4)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        total = total
+            .checked_add(count)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if total > num_literals {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated literal cluster count is invalid"));
+        }
+
+        let cluster =
+            parse_legacy_literal_entropy_payload(payload, offset, 1, "rolz_deprecated literals")?;
+        if cluster.byte_len()? != count {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated literal cluster count is invalid"));
+        }
+        clusters.push(cluster);
+    }
+    if total != num_literals {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated literal cluster count is invalid"));
+    }
+
+    Ok(RolzDeprecatedLiterals::O1(RolzDeprecatedO1Literals {
+        max_context,
+        context_to_cluster,
+        clusters,
+        total_len: num_literals,
+    }))
+}
+
 fn parse_rolz_deprecated_params(header: &[u8]) -> Result<RolzDeprecatedParams> {
     let params = RolzDeprecatedParams {
         context_depth: usize::from(header[0]),
@@ -1200,7 +1415,7 @@ fn decode_rolz_deprecated_payload(
     output.try_reserve_exact(decoded_size).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("rolz_deprecated allocation failed")
     })?;
-    let mut literals = LegacyLiteralCursor::new(payload.literals);
+    let mut literals = RolzDeprecatedLiteralCursor::new(payload.literals);
     let mut reps = ROLZ_DEPRECATED_INITIAL_REPS;
     let mut table = if payload
         .match_types
@@ -1303,7 +1518,7 @@ fn decode_rolz_deprecated_payload(
 }
 
 fn append_rolz_deprecated_literals(
-    literals: &mut LegacyLiteralCursor<'_>,
+    literals: &mut RolzDeprecatedLiteralCursor<'_>,
     output: &mut Vec<u8>,
     len: usize,
     decoded_size: usize,
@@ -1865,6 +2080,38 @@ fn legacy_entropy_output_len(decoded_elements: usize, element_width: usize) -> R
     decoded_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn read_legacy_literal_byte(
+    literals: &LegacyLiteralPayload<'_>,
+    offset: usize,
+    transform_name: &str,
+) -> Result<u8> {
+    match literals {
+        LegacyLiteralPayload::Raw(bytes) => bytes.get(offset).copied().ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} stream is too short"))
+        }),
+        LegacyLiteralPayload::Constant {
+            value,
+            decoded_elements,
+            element_width,
+        } => {
+            let len = legacy_entropy_output_len(*decoded_elements, *element_width)?;
+            if offset >= len {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{transform_name} stream is too short")));
+            }
+            let value_offset = offset.checked_rem(*element_width).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{transform_name} literal width is invalid"))
+            })?;
+            value.get(value_offset).copied().ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{transform_name} stream is too short"))
+            })
+        }
+    }
 }
 
 fn read_deprecated_lz_le_u32(source: &[u8], offset: usize, transform_name: &str) -> Result<u32> {

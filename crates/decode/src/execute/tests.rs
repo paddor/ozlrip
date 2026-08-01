@@ -356,12 +356,34 @@ fn rolz_deprecated_stream(
     match_lengths: &[usize],
     match_codes: &[usize],
 ) -> Vec<u8> {
+    rolz_deprecated_stream_with_literal_order(
+        decoded_size,
+        num_literals,
+        0,
+        literal_entropy,
+        match_types,
+        literal_lengths,
+        match_lengths,
+        match_codes,
+    )
+}
+
+fn rolz_deprecated_stream_with_literal_order(
+    decoded_size: usize,
+    num_literals: usize,
+    literal_order: u8,
+    literal_payload: &[u8],
+    match_types: &[u8],
+    literal_lengths: &[usize],
+    match_lengths: &[usize],
+    match_codes: &[usize],
+) -> Vec<u8> {
     let mut payload = vec![2, 12, 4, 3, 1, 7, 3];
     payload.extend_from_slice(&u32::try_from(num_literals).unwrap().to_le_bytes());
     payload.extend_from_slice(&u32::try_from(match_types.len()).unwrap().to_le_bytes());
     if num_literals != 0 {
-        payload.push(0);
-        payload.extend_from_slice(literal_entropy);
+        payload.push(literal_order);
+        payload.extend_from_slice(literal_payload);
     }
     payload.extend_from_slice(&legacy_entropy_raw_payload(match_types, 1));
     if !match_types.is_empty() {
@@ -373,6 +395,26 @@ fn rolz_deprecated_stream(
         payload.extend_from_slice(&rolz_deprecated_sequence_values(match_codes, match_types));
     }
     deprecated_lz_stored_stream(decoded_size, &payload)
+}
+
+fn rolz_deprecated_o1_literal_payload(
+    max_context: u8,
+    contexts: &[(u8, u8)],
+    clusters: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut context_to_cluster = vec![0u8; usize::from(max_context) + 1];
+    for &(context, cluster) in contexts {
+        context_to_cluster[usize::from(context)] = cluster;
+    }
+
+    let mut output = Vec::new();
+    output.push(max_context);
+    output.extend_from_slice(&context_to_cluster);
+    for cluster in clusters {
+        output.extend_from_slice(&u32::try_from(cluster.len()).unwrap().to_le_bytes());
+        output.extend_from_slice(&legacy_entropy_raw_payload(cluster, 1));
+    }
+    output
 }
 
 fn rolz_deprecated_sequence_values(values: &[usize], match_types: &[u8]) -> Vec<u8> {
@@ -4637,6 +4679,98 @@ fn decodes_v21_rolz_deprecated_constant_literals_frame() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_o1_literals_frame() {
+    let expected = b"ababa!";
+    let literal_payload = rolz_deprecated_o1_literal_payload(
+        b'b',
+        &[(0, 0), (b'a', 1), (b'b', 2)],
+        &[b"a".to_vec(), b"bb!".to_vec(), b"aa".to_vec()],
+    );
+    let stored = rolz_deprecated_stream_with_literal_order(
+        expected.len(),
+        expected.len(),
+        1,
+        &literal_payload,
+        &[],
+        &[],
+        &[],
+        &[],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_o1_rep0_sequence_frame() {
+    let literal_payload = rolz_deprecated_o1_literal_payload(
+        b'c',
+        &[(0, 0), (b'a', 1), (b'b', 2), (b'c', 3)],
+        &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"!".to_vec()],
+    );
+    let stored = rolz_deprecated_stream_with_literal_order(
+        7,
+        4,
+        1,
+        &literal_payload,
+        &[2],
+        &[3],
+        &[0],
+        &[0],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        7,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 7);
+    assert_eq!(output, b"abcccc!");
+}
+
+#[test]
+fn rejects_rolz_deprecated_o1_unknown_context_without_mutating_destination() {
+    let literal_payload = rolz_deprecated_o1_literal_payload(
+        b'a',
+        &[(0, 0), (b'a', 1)],
+        &[b"a".to_vec(), b"bx".to_vec()],
+    );
+    let stored =
+        rolz_deprecated_stream_with_literal_order(3, 3, 1, &literal_payload, &[], &[], &[], &[]);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        3,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
 }
 
 #[test]
