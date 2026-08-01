@@ -655,7 +655,7 @@ impl<'a> LegacyLiteralCursor<'a> {
 
 struct FastLzDeprecatedPayload<'a> {
     literals: LegacyLiteralPayload<'a>,
-    tokens: &'a [u8],
+    tokens: LegacyLiteralPayload<'a>,
     offsets: &'a [u8],
     extras: &'a [u8],
 }
@@ -994,8 +994,13 @@ fn parse_fastlz_deprecated_payload(
         limits,
         "fastlz_deprecated literals",
     )?;
-    let tokens =
-        parse_legacy_raw_entropy_slice(payload, &mut offset, 2, "fastlz_deprecated tokens")?;
+    let tokens = parse_legacy_literal_entropy_payload(
+        payload,
+        &mut offset,
+        2,
+        limits,
+        "fastlz_deprecated tokens",
+    )?;
     let offsets =
         read_deprecated_lz_sized_slice(payload, &mut offset, "fastlz_deprecated offsets")?;
     let extras = read_deprecated_lz_sized_slice(payload, &mut offset, "fastlz_deprecated extras")?;
@@ -1020,11 +1025,12 @@ fn decode_fastlz_deprecated_payload(
         Error::new(ErrorKind::LimitExceeded).with_detail("fastlz_deprecated allocation failed")
     })?;
     let mut literals = LegacyLiteralCursor::new(payload.literals);
+    let tokens = copy_deprecated_lz_literals(payload.tokens, "fastlz_deprecated tokens")?;
     let mut offsets_pos = 0usize;
     let mut extras_pos = 0usize;
     let mut rep = FASTLZ_DEPRECATED_MIN_OFFSET;
 
-    for (index, token) in payload.tokens.chunks_exact(2).enumerate() {
+    for (index, token) in tokens.chunks_exact(2).enumerate() {
         let token = u16::from_le_bytes([token[0], token[1]]);
         if index == 0 && token == 60 {
             append_fastlz_deprecated_literals(
@@ -2061,37 +2067,6 @@ fn parse_legacy_literal_entropy_payload<'a>(
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail(format!("{transform_name} entropy mode is unsupported"))),
     }
-}
-
-fn parse_legacy_raw_entropy_slice<'a>(
-    source: &'a [u8],
-    offset: &mut usize,
-    element_width: usize,
-    transform_name: &str,
-) -> Result<&'a [u8]> {
-    let (entropy_type, decoded_elements) =
-        read_legacy_entropy_header(source, offset, transform_name)?;
-    match entropy_type {
-        3 => {}
-        6 | 7 => {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{transform_name} entropy mode is reserved")));
-        }
-        _ => {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail(format!("{transform_name} entropy mode is unsupported")));
-        }
-    }
-
-    let output_len = legacy_entropy_output_len(decoded_elements, element_width)?;
-    let end = (*offset)
-        .checked_add(output_len)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let payload = source
-        .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
-    *offset = end;
-    Ok(payload)
 }
 
 fn decode_legacy_bit_entropy_payload(

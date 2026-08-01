@@ -4659,6 +4659,32 @@ fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
 }
 
 #[test]
+fn decodes_v21_fastlz_deprecated_bit_token_frame() {
+    let literals = b"abcdefghijklmnop!";
+    let stored = fastlz_deprecated_stream(
+        33,
+        &legacy_entropy_raw_payload(literals, 1),
+        &legacy_entropy_bit_payload(&[1], 1),
+        &[16],
+        &[16, 16],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        33,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 33);
+    assert_eq!(output, b"abcdefghijklmnopabcdefghijklmnop!");
+}
+
+#[test]
 fn decodes_empty_rolz_deprecated_node() {
     let stored = empty_rolz_deprecated_stream();
     let output = decode_rolz_deprecated_node(
