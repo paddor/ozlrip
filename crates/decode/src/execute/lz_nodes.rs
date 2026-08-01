@@ -557,6 +557,7 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
     }
 }
 
+#[derive(Clone, Copy)]
 enum LegacyLiteralPayload<'a> {
     Raw(&'a [u8]),
     Constant {
@@ -579,6 +580,78 @@ impl LegacyLiteralPayload<'_> {
     }
 }
 
+struct LegacyLiteralCursor<'a> {
+    payload: LegacyLiteralPayload<'a>,
+    offset: usize,
+}
+
+impl<'a> LegacyLiteralCursor<'a> {
+    const fn new(payload: LegacyLiteralPayload<'a>) -> Self {
+        Self { payload, offset: 0 }
+    }
+
+    fn remaining_len(&self) -> Result<usize> {
+        self.payload
+            .byte_len()?
+            .checked_sub(self.offset)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("fastlz_deprecated literal stream is too short")
+            })
+    }
+
+    fn extend_next(&mut self, len: usize, output: &mut Vec<u8>) -> Result<()> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if end > self.payload.byte_len()? {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("fastlz_deprecated literal stream is too short"));
+        }
+        match self.payload {
+            LegacyLiteralPayload::Raw(bytes) => {
+                let chunk = bytes.get(self.offset..end).ok_or_else(|| {
+                    Error::new(ErrorKind::Malformed)
+                        .with_detail("fastlz_deprecated literal stream is too short")
+                })?;
+                output.extend_from_slice(chunk);
+            }
+            LegacyLiteralPayload::Constant {
+                value,
+                element_width,
+                ..
+            } => {
+                if !self.offset.is_multiple_of(element_width) || !len.is_multiple_of(element_width)
+                {
+                    return Err(Error::new(ErrorKind::Malformed)
+                        .with_detail("deprecated lz constant literal range is misaligned"));
+                }
+                let elements = len / element_width;
+                for _ in 0..elements {
+                    output.extend_from_slice(value);
+                }
+            }
+        }
+        self.offset = end;
+        Ok(())
+    }
+
+    fn extend_remaining(&mut self, output: &mut Vec<u8>) -> Result<()> {
+        let len = self.remaining_len()?;
+        self.extend_next(len, output)
+    }
+}
+
+struct FastLzDeprecatedPayload<'a> {
+    literals: LegacyLiteralPayload<'a>,
+    tokens: &'a [u8],
+    offsets: &'a [u8],
+    extras: &'a [u8],
+}
+
+const FASTLZ_DEPRECATED_MIN_OFFSET: usize = 16;
+
 pub(super) fn decode_fastlz_deprecated_node(
     source: StreamInput<'_>,
     header: &[u8],
@@ -590,12 +663,8 @@ pub(super) fn decode_fastlz_deprecated_node(
     }
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "fastlz_deprecated")?;
-    let literals = decode_fastlz_deprecated_literal_only_payload(payload)?;
-    if literals.byte_len()? != decoded_size {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("fastlz_deprecated output size does not match prefix"));
-    }
-    copy_deprecated_lz_literals(literals, "fastlz_deprecated")
+    let payload = parse_fastlz_deprecated_payload(payload)?;
+    decode_fastlz_deprecated_payload(payload, decoded_size)
 }
 
 pub(super) fn decode_rolz_deprecated_node(
@@ -617,9 +686,7 @@ pub(super) fn decode_rolz_deprecated_node(
     copy_deprecated_lz_literals(literals, "rolz_deprecated")
 }
 
-fn decode_fastlz_deprecated_literal_only_payload(
-    payload: &[u8],
-) -> Result<LegacyLiteralPayload<'_>> {
+fn parse_fastlz_deprecated_payload(payload: &[u8]) -> Result<FastLzDeprecatedPayload<'_>> {
     let mut offset = 0usize;
     let literals = parse_legacy_literal_entropy_payload(
         payload,
@@ -629,17 +696,198 @@ fn decode_fastlz_deprecated_literal_only_payload(
     )?;
     let tokens =
         parse_legacy_raw_entropy_slice(payload, &mut offset, 2, "fastlz_deprecated tokens")?;
-    if !tokens.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("fastlz_deprecated sequences are unsupported"));
-    }
-    read_zero_deprecated_lz_size(payload, &mut offset, "fastlz_deprecated offsets")?;
-    read_zero_deprecated_lz_size(payload, &mut offset, "fastlz_deprecated extras")?;
+    let offsets =
+        read_deprecated_lz_sized_slice(payload, &mut offset, "fastlz_deprecated offsets")?;
+    let extras = read_deprecated_lz_sized_slice(payload, &mut offset, "fastlz_deprecated extras")?;
     if offset != payload.len() {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("fastlz_deprecated payload has trailing bytes"));
     }
-    Ok(literals)
+    Ok(FastLzDeprecatedPayload {
+        literals,
+        tokens,
+        offsets,
+        extras,
+    })
+}
+
+fn decode_fastlz_deprecated_payload(
+    payload: FastLzDeprecatedPayload<'_>,
+    decoded_size: usize,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(decoded_size).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("fastlz_deprecated allocation failed")
+    })?;
+    let mut literals = LegacyLiteralCursor::new(payload.literals);
+    let mut offsets_pos = 0usize;
+    let mut extras_pos = 0usize;
+    let mut rep = FASTLZ_DEPRECATED_MIN_OFFSET;
+
+    for (index, token) in payload.tokens.chunks_exact(2).enumerate() {
+        let token = u16::from_le_bytes([token[0], token[1]]);
+        if index == 0 && token == 60 {
+            append_fastlz_deprecated_literals(
+                &mut literals,
+                &mut output,
+                usize::from((token >> 2) & 0x0f),
+                decoded_size,
+            )?;
+            continue;
+        }
+
+        let offset = read_fastlz_deprecated_offset(
+            token & 0x03,
+            payload.offsets,
+            &mut offsets_pos,
+            &mut rep,
+        )?;
+        let (literal_len, match_len) = if token & !0x03 == 0 {
+            (
+                read_fastlz_deprecated_extra(payload.extras, &mut extras_pos)?,
+                read_fastlz_deprecated_extra(payload.extras, &mut extras_pos)?,
+            )
+        } else {
+            (
+                usize::from((token >> 2) & 0x0f),
+                usize::from((token >> 6) & 0x1f),
+            )
+        };
+        append_fastlz_deprecated_literals(&mut literals, &mut output, literal_len, decoded_size)?;
+        if offset < FASTLZ_DEPRECATED_MIN_OFFSET {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("fastlz_deprecated offset is too small"));
+        }
+        if offset > output.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("fastlz_deprecated offset exceeds decoded prefix"));
+        }
+        let match_end = output
+            .len()
+            .checked_add(match_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if match_end > decoded_size {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("fastlz_deprecated match length exceeds output size"));
+        }
+        let out_pos = output.len();
+        append_lz_match(&mut output, out_pos, offset, match_len);
+    }
+
+    if offsets_pos != payload.offsets.len() || extras_pos != payload.extras.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated auxiliary stream was not fully consumed"));
+    }
+    let remaining_literals = literals.remaining_len()?;
+    let output_end = output
+        .len()
+        .checked_add(remaining_literals)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_end != decoded_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated output size does not match prefix"));
+    }
+    literals.extend_remaining(&mut output)?;
+    Ok(output)
+}
+
+fn append_fastlz_deprecated_literals(
+    literals: &mut LegacyLiteralCursor<'_>,
+    output: &mut Vec<u8>,
+    len: usize,
+    decoded_size: usize,
+) -> Result<()> {
+    let output_end = output
+        .len()
+        .checked_add(len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_end > decoded_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated literal length exceeds output size"));
+    }
+    literals.extend_next(len, output)
+}
+
+fn read_fastlz_deprecated_offset(
+    code: u16,
+    offsets: &[u8],
+    offsets_pos: &mut usize,
+    rep: &mut usize,
+) -> Result<usize> {
+    let offset = match code {
+        0 => *rep,
+        1 => {
+            let offset = usize::from(*offsets.get(*offsets_pos).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("fastlz_deprecated offsets stream is exhausted")
+            })?);
+            *offsets_pos = (*offsets_pos)
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            *rep = offset;
+            offset
+        }
+        2 => {
+            let end = (*offsets_pos)
+                .checked_add(2)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let offset = offsets.get(*offsets_pos..end).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("fastlz_deprecated offsets stream is exhausted")
+            })?;
+            let offset = usize::from(u16::from_le_bytes([offset[0], offset[1]]));
+            *offsets_pos = end;
+            *rep = offset;
+            offset
+        }
+        3 => {
+            let end = (*offsets_pos)
+                .checked_add(3)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let offset = offsets.get(*offsets_pos..end).ok_or_else(|| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("fastlz_deprecated offsets stream is exhausted")
+            })?;
+            let offset = usize::from(offset[0])
+                | (usize::from(offset[1]) << 8)
+                | (usize::from(offset[2]) << 16);
+            *offsets_pos = end;
+            *rep = offset;
+            offset
+        }
+        _ => unreachable!("fastlz offset code is masked to two bits"),
+    };
+    Ok(offset)
+}
+
+fn read_fastlz_deprecated_extra(extras: &[u8], extras_pos: &mut usize) -> Result<usize> {
+    let mut length = usize::from(*extras.get(*extras_pos).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("fastlz_deprecated extras stream is exhausted")
+    })?);
+    *extras_pos = (*extras_pos)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if length != 255 {
+        return Ok(length);
+    }
+    loop {
+        let end = (*extras_pos)
+            .checked_add(2)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let extra = extras.get(*extras_pos..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail("fastlz_deprecated extras stream is exhausted")
+        })?;
+        let extra = usize::from(u16::from_le_bytes([extra[0], extra[1]]));
+        *extras_pos = end;
+        length = length
+            .checked_add(extra)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if extra < usize::from(u16::MAX) {
+            break;
+        }
+    }
+    Ok(length)
 }
 
 fn decode_rolz_deprecated_literal_only_payload(payload: &[u8]) -> Result<LegacyLiteralPayload<'_>> {
@@ -841,17 +1089,24 @@ fn legacy_entropy_output_len(decoded_elements: usize, element_width: usize) -> R
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
-fn read_zero_deprecated_lz_size(
-    source: &[u8],
+fn read_deprecated_lz_sized_slice<'a>(
+    source: &'a [u8],
     offset: &mut usize,
     transform_name: &str,
-) -> Result<()> {
-    let size = read_var_u64(source, offset)?;
-    if size != 0 {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{transform_name} stream must be empty")));
-    }
-    Ok(())
+) -> Result<&'a [u8]> {
+    let size = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} stream is too large"))
+    })?;
+    let end = (*offset)
+        .checked_add(size)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let slice = source.get(*offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail(format!("{transform_name} stream is truncated"))
+    })?;
+    *offset = end;
+    Ok(slice)
 }
 
 fn copy_deprecated_lz_literals(
