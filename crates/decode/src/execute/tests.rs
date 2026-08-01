@@ -463,6 +463,10 @@ fn rolz_deprecated_stream(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test frame builder mirrors deprecated ROLZ wire fields"
+)]
 fn rolz_deprecated_stream_with_literal_order(
     decoded_size: usize,
     num_literals: usize,
@@ -486,6 +490,10 @@ fn rolz_deprecated_stream_with_literal_order(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test frame builder mirrors deprecated ROLZ wire fields"
+)]
 fn rolz_deprecated_stream_with_entropy(
     decoded_size: usize,
     num_literals: usize,

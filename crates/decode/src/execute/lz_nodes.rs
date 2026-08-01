@@ -1,4 +1,4 @@
-use alloc::{format, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use zrip_core::{
@@ -688,7 +688,7 @@ struct RolzDeprecatedPayload<'a> {
 
 enum RolzDeprecatedLiterals<'a> {
     Linear(LegacyLiteralPayload<'a>),
-    O1(RolzDeprecatedO1Literals<'a>),
+    O1(Box<RolzDeprecatedO1Literals<'a>>),
 }
 
 struct RolzDeprecatedO1Literals<'a> {
@@ -701,8 +701,8 @@ struct RolzDeprecatedO1Literals<'a> {
 enum RolzDeprecatedLiteralCursor<'a> {
     Linear(LegacyLiteralCursor<'a>),
     O1 {
-        payload: RolzDeprecatedO1Literals<'a>,
-        cluster_offsets: [usize; 256],
+        payload: Box<RolzDeprecatedO1Literals<'a>>,
+        cluster_offsets: Box<[usize; 256]>,
         consumed: usize,
     },
 }
@@ -739,10 +739,65 @@ const ROLZ_DEPRECATED_MATCH_TYPE_REP0: u8 = 2;
 const ROLZ_DEPRECATED_MATCH_TYPE_REP: u8 = 3;
 const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
 const ROLZ_DEPRECATED_VALUE_BASE: [usize; 59] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-    26, 27, 28, 29, 30, 31, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000,
-    0x8000, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000, 0x200000, 0x400000, 0x800000, 0x1000000,
-    0x2000000, 0x4000000, 0x8000000, 0x10000000, 0x20000000, 0x40000000, 0x80000000,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    0x20,
+    0x40,
+    0x80,
+    0x100,
+    0x200,
+    0x400,
+    0x800,
+    0x1000,
+    0x2000,
+    0x4000,
+    0x8000,
+    0x1_0000,
+    0x2_0000,
+    0x4_0000,
+    0x8_0000,
+    0x10_0000,
+    0x20_0000,
+    0x40_0000,
+    0x80_0000,
+    0x100_0000,
+    0x200_0000,
+    0x400_0000,
+    0x800_0000,
+    0x1000_0000,
+    0x2000_0000,
+    0x4000_0000,
+    0x8000_0000,
 ];
 const ROLZ_DEPRECATED_VALUE_BITS: [u8; 59] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -884,7 +939,7 @@ impl<'a> RolzDeprecatedLiteralCursor<'a> {
             }
             RolzDeprecatedLiterals::O1(payload) => Self::O1 {
                 payload,
-                cluster_offsets: [0; 256],
+                cluster_offsets: Box::new([0; 256]),
                 consumed: 0,
             },
         }
@@ -1353,8 +1408,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
         .iter()
         .copied()
         .max()
-        .map(|cluster| usize::from(cluster) + 1)
-        .unwrap_or(0);
+        .map_or(0, |cluster| usize::from(cluster) + 1);
     let cluster_limit = limits
         .max_buffer_bytes
         .checked_div(core::mem::size_of::<LegacyLiteralPayload<'_>>().max(1))
@@ -1409,12 +1463,14 @@ fn parse_rolz_deprecated_o1_literals<'a>(
             .with_detail("rolz_deprecated literal cluster count is invalid"));
     }
 
-    Ok(RolzDeprecatedLiterals::O1(RolzDeprecatedO1Literals {
-        max_context,
-        context_to_cluster,
-        clusters,
-        total_len: num_literals,
-    }))
+    Ok(RolzDeprecatedLiterals::O1(Box::new(
+        RolzDeprecatedO1Literals {
+            max_context,
+            context_to_cluster,
+            clusters,
+            total_len: num_literals,
+        },
+    )))
 }
 
 fn parse_rolz_deprecated_params(header: &[u8]) -> Result<RolzDeprecatedParams> {
@@ -1858,9 +1914,8 @@ fn decode_rolz_deprecated_seq_values(
     let mut reader = ReverseBitReader::new(bitstream)
         .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
     let mut positions = [0usize; ROLZ_DEPRECATED_MARKOV_STATES];
-    for state in 1..ROLZ_DEPRECATED_MARKOV_STATES {
-        positions[state] = totals[state - 1];
-    }
+    positions[1..ROLZ_DEPRECATED_MARKOV_STATES]
+        .copy_from_slice(&totals[..(ROLZ_DEPRECATED_MARKOV_STATES - 1)]);
     let mut state = 0usize;
     for &match_type in match_types {
         state = rolz_deprecated_markov_next_state(state, match_type)?;

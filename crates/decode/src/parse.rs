@@ -1032,13 +1032,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
             min_outputs: 1,
             max_outputs: None,
         }),
-        standard::DEDUP_NUM_ID => Some(StandardNodeShape {
-            static_inputs: 1,
-            allows_variable_inputs: false,
-            min_outputs: 1,
-            max_outputs: None,
-        }),
-        standard::INTERLEAVE_STRING_ID => Some(StandardNodeShape {
+        standard::DEDUP_NUM_ID | standard::INTERLEAVE_STRING_ID => Some(StandardNodeShape {
             static_inputs: 1,
             allows_variable_inputs: false,
             min_outputs: 1,

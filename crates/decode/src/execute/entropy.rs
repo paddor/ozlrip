@@ -69,8 +69,7 @@ pub(super) fn decode_fse_deprecated_node(
 ) -> Result<Vec<u8>> {
     require_legacy_serial_input(source, "fse_deprecated")?;
     let nb_states = match header {
-        [] => 2,
-        [2] => 2,
+        [] | [2] => 2,
         [4] => 4,
         [_] => {
             return Err(Error::new(ErrorKind::Malformed)
@@ -409,6 +408,10 @@ fn decode_legacy_entropy_constant(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "legacy entropy recursion threads limits and format labels for errors"
+)]
 fn decode_legacy_entropy_multi(
     source: &[u8],
     offset: &mut usize,
@@ -1440,7 +1443,11 @@ fn decode_large_huffman_stream(
         let bits = if remaining >= tl {
             reader.peek_bits(table_log)
         } else {
-            reader.peek_bits(remaining as u8) << (tl - remaining)
+            let remaining = u8::try_from(remaining).map_err(|_| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail("huffman_struct_v2 bitstream is malformed")
+            })?;
+            reader.peek_bits(remaining) << (tl - usize::from(remaining))
         };
         let entry = table
             .get(bits as usize)
