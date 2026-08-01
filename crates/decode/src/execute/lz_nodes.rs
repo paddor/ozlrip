@@ -1,8 +1,12 @@
 use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
-use zrip_core::bitstream::reader_reverse::ReverseBitReader;
+use zrip_core::{
+    bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
+    fse::table_builder::{build_decode_table, parse_fse_table_description},
+};
 
+use super::entropy::decode_fse_symbols;
 use super::{
     DecodeScratch, OwnedStream, StreamInput, numeric_element_count, read_usize_numeric_element,
     read_var_u64, require_numeric_width, validate_numeric_stream_width,
@@ -2043,6 +2047,16 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
         )
         .map(LegacyLiteralPayload::Decoded);
     }
+    if header & 0x07 == 1 {
+        return decode_legacy_fse_entropy_payload(
+            source,
+            offset,
+            element_width,
+            limits,
+            transform_name,
+        )
+        .map(LegacyLiteralPayload::Decoded);
+    }
 
     let (entropy_type, decoded_elements) =
         read_legacy_entropy_header(source, offset, transform_name)?;
@@ -2147,6 +2161,113 @@ fn decode_legacy_multi_entropy_payload(
         append_legacy_literal_payload(block, &mut output);
     }
     Ok(output)
+}
+
+struct LegacyCompressedEntropyHeader {
+    decoded_elements: usize,
+    encoded_len: usize,
+}
+
+fn decode_legacy_fse_entropy_payload(
+    source: &[u8],
+    offset: &mut usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
+    if element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported).with_detail(format!(
+            "{transform_name} fse entropy element width is unsupported"
+        )));
+    }
+    let header = read_legacy_compressed_entropy_header(source, offset, transform_name)?;
+    let output_len = legacy_entropy_output_len(header.decoded_elements, element_width)?;
+    if output_len > limits.max_buffer_bytes {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} exceeds buffer limit")));
+    }
+
+    let end = (*offset)
+        .checked_add(header.encoded_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded = source
+        .get(*offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    let mut reader = BitReader::new(encoded);
+    let (distribution, accuracy_log) =
+        parse_fse_table_description(&mut reader, u8::MAX).map_err(|err| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} fse table is invalid: {err}"))
+        })?;
+    let bits_offset = reader.bytes_consumed();
+    let bits = encoded.get(bits_offset..).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} fse bitstream is missing"))
+    })?;
+    let table = build_decode_table(&distribution, accuracy_log).map_err(|err| {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} fse table is invalid: {err}"))
+    })?;
+    let bytes = decode_fse_symbols(
+        bits,
+        header.decoded_elements,
+        2,
+        &table,
+        accuracy_log,
+        transform_name,
+    )?;
+    debug_assert_eq!(bytes.len(), output_len);
+    *offset = end;
+    Ok(bytes)
+}
+
+fn read_legacy_compressed_entropy_header(
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<LegacyCompressedEntropyHeader> {
+    let end = (*offset)
+        .checked_add(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let header = source.get(*offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail(format!(
+            "{transform_name} compressed entropy header is truncated"
+        ))
+    })?;
+    let header = u16::from_le_bytes(header.try_into().map_err(|_| {
+        Error::new(ErrorKind::Malformed).with_detail(format!(
+            "{transform_name} compressed entropy header is malformed"
+        ))
+    })?);
+    *offset = end;
+
+    let has_varints = ((header >> 6) & 1) != 0;
+    let mut decoded_elements = u64::from((header >> 7) & 0x1f);
+    let mut encoded_len = u64::from((header >> 12) & 0x0f);
+    if has_varints {
+        let decoded_high = read_var_u64(source, offset)?;
+        if decoded_high > (u64::MAX >> 5) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        decoded_elements |= decoded_high << 5;
+
+        let encoded_high = read_var_u64(source, offset)?;
+        if encoded_high > (u64::MAX >> 4) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        encoded_len |= encoded_high << 4;
+    }
+
+    Ok(LegacyCompressedEntropyHeader {
+        decoded_elements: usize::try_from(decoded_elements).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} output size is too large"))
+        })?,
+        encoded_len: usize::try_from(encoded_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} encoded size is too large"))
+        })?,
+    })
 }
 
 fn decode_legacy_bit_entropy_payload(

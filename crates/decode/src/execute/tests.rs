@@ -4863,6 +4863,30 @@ fn decodes_v21_fastlz_deprecated_bit_literals_frame() {
 }
 
 #[test]
+fn decodes_v21_fastlz_deprecated_fse_literals_frame() {
+    let expected = [
+        0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0,
+        1, 1,
+    ];
+    let literal_entropy = legacy_entropy_fse_payload(&expected, 2);
+    let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_v21_fastlz_deprecated_multi_literals_frame() {
     let expected = b"ab\x00\x01\x02";
     let literal_entropy = legacy_entropy_multi_payload(&[

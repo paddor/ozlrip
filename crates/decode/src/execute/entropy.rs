@@ -859,7 +859,7 @@ impl<'a> OpenZlFseState<'a> {
     }
 }
 
-fn decode_fse_symbols(
+pub(super) fn decode_fse_symbols(
     bits: &[u8],
     output_len: usize,
     nb_states: usize,
