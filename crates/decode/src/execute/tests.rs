@@ -578,6 +578,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::CONCAT_SERIAL_ID,
         standard::CONCAT_NUM_ID,
         standard::CONCAT_STRUCT_ID,
+        standard::CONCAT_STRING_ID,
         standard::CONSTANT_FIXED_ID,
         standard::CONSTANT_SERIAL_ID,
         standard::CONVERT_NUM_TO_SERIAL_LE_ID,
@@ -798,6 +799,38 @@ fn decodes_concat_typed_outputs() {
     assert_eq!(outputs[0].bytes, [1, 0, 2, 0]);
     assert_eq!(outputs[1].element_width, 2);
     assert_eq!(outputs[1].bytes, [3, 0]);
+}
+
+#[test]
+fn decodes_concat_string_outputs() {
+    let sizes = [2u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+    let string_lengths = [1, 2, 3];
+    let outputs = decode_concat_string_node(
+        &[
+            StreamInput {
+                bytes: &sizes,
+                element_width: 4,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: b"aBBccc",
+                element_width: 1,
+                string_lengths: Some(&string_lengths),
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].bytes, b"aBB");
+    assert_eq!(
+        outputs[0].string_lengths.as_deref(),
+        Some([1, 2].as_slice())
+    );
+    assert_eq!(outputs[1].bytes, b"ccc");
+    assert_eq!(outputs[1].string_lengths.as_deref(), Some([3].as_slice()));
 }
 
 #[test]
@@ -2132,6 +2165,51 @@ fn decodes_v21_string_components_to_serial_graph() {
 
     assert_eq!(written, 4);
     assert_eq!(output, b"abcd");
+}
+
+#[test]
+fn decodes_v21_concat_string_graph_to_serial() {
+    let sizes = [2u32.to_le_bytes(), 1u32.to_le_bytes()].concat();
+    let field_sizes = [1, 2, 3];
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        3,
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONCAT_STRING_ID,
+                variable_inputs: 0,
+                outputs: 2,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&sizes, b"aBBccc", &field_sizes],
+        &[1, 1, 0, 1, 1],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, b"aBB");
 }
 
 #[test]

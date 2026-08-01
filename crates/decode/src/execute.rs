@@ -1274,6 +1274,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::CONCAT_SERIAL_ID
         | standard::CONCAT_NUM_ID
         | standard::CONCAT_STRUCT_ID
+        | standard::CONCAT_STRING_ID
         | standard::DISPATCH_N_BY_TAG_ID
         | standard::FLATPACK_ID
         | standard::SENTINEL_ID
@@ -1420,6 +1421,9 @@ fn execute_standard_node(
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
             decode_concat_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
+        }
+        standard::CONCAT_STRING_ID => {
+            decode_concat_string_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
         }
         standard::SPLITN_ID => one_serial(decode_splitn_node(
             inputs,
@@ -1795,6 +1799,94 @@ fn decode_concat_node(
     }
 
     if consumed_elements != total_elements || consumed_bytes != concatenated.bytes.len() {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("concat sizes do not consume input")
+        );
+    }
+    Ok(outputs)
+}
+
+fn decode_concat_string_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<OwnedStream>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("concat transform headers are unsupported"));
+    }
+    let [sizes, concatenated] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("concat input count does not match node shape"));
+    };
+    let output_count = concat_size_count(sizes)?;
+    if output_count == 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("concat size table is empty"));
+    }
+    if concatenated.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("concat_string input must be byte strings"));
+    }
+    let string_lengths = concatenated.string_lengths.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidType).with_detail("concat_string input is missing lengths")
+    })?;
+    if checked_sum_u32(string_lengths)? != concatenated.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("concat_string lengths do not sum to content size"));
+    }
+
+    let mut consumed_elements = 0usize;
+    let mut consumed_bytes = 0usize;
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("concat output allocation failed")
+    })?;
+
+    for output_index in 0..output_count {
+        let output_elements = read_concat_size(sizes, output_index)?;
+        let next_elements = consumed_elements
+            .checked_add(output_elements)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if next_elements > string_lengths.len() {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("concat size exceeds input"));
+        }
+        let output_lengths = &string_lengths[consumed_elements..next_elements];
+        let output_bytes = checked_sum_u32(output_lengths)?;
+        if output_bytes > limits.max_decoded_bytes || output_bytes > limits.max_buffer_bytes {
+            return Err(
+                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+            );
+        }
+        let next_bytes = consumed_bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if next_bytes > concatenated.bytes.len() {
+            return Err(Error::new(ErrorKind::Malformed).with_detail("concat size exceeds input"));
+        }
+
+        let mut output = Vec::new();
+        output.try_reserve_exact(output_bytes).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+        })?;
+        output.extend_from_slice(&concatenated.bytes[consumed_bytes..next_bytes]);
+        let mut lengths = Vec::new();
+        lengths
+            .try_reserve_exact(output_lengths.len())
+            .map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded).with_detail("concat length allocation failed")
+            })?;
+        lengths.extend_from_slice(output_lengths);
+        outputs.push(OwnedStream {
+            bytes: output,
+            element_width: 1,
+            string_lengths: Some(lengths),
+            recyclable: false,
+        });
+        consumed_elements = next_elements;
+        consumed_bytes = next_bytes;
+    }
+
+    if consumed_elements != string_lengths.len() || consumed_bytes != concatenated.bytes.len() {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("concat sizes do not consume input")
         );

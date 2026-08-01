@@ -52,6 +52,7 @@ pub(crate) const HUFFMAN_V2_ID: u32 = 50;
 pub(crate) const FSE_NCOUNT_ID: u32 = 52;
 pub(crate) const DIVIDE_BY_ID: u32 = 53;
 pub(crate) const DEDUP_NUM_ID: u32 = 56;
+pub(crate) const CONCAT_STRING_ID: u32 = 59;
 pub(crate) const PIVCO_HUFFMAN_ID: u32 = 67;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {

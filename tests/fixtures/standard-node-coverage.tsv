@@ -45,6 +45,7 @@ id	name	coverage
 56	dedup_num	unit+inline-frame
 57	concat_num	unit+inline-frame
 58	concat_struct	unit+inline-frame
+59	concat_string	unit+inline-frame
 60	parse_int	unit+inline-frame
 62	lz4	unit+fuzz+interop
 63	bit_split	unit+inline-frame
