@@ -299,6 +299,14 @@ fn legacy_entropy_constant_payload(value: &[u8], decoded_elements: usize) -> Vec
     output
 }
 
+fn legacy_entropy_bit_payload(values: &[u64], bits: u8) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.push(4 | (bits << 3));
+    push_var_u64(&mut output, u64::try_from(values.len()).unwrap());
+    output.extend_from_slice(&pack_lsb_values(values, bits));
+    output
+}
+
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());
@@ -378,6 +386,30 @@ fn rolz_deprecated_stream_with_literal_order(
     match_lengths: &[usize],
     match_codes: &[usize],
 ) -> Vec<u8> {
+    rolz_deprecated_stream_with_entropy(
+        decoded_size,
+        num_literals,
+        literal_order,
+        literal_payload,
+        &legacy_entropy_raw_payload(match_types, 1),
+        match_types,
+        literal_lengths,
+        match_lengths,
+        match_codes,
+    )
+}
+
+fn rolz_deprecated_stream_with_entropy(
+    decoded_size: usize,
+    num_literals: usize,
+    literal_order: u8,
+    literal_payload: &[u8],
+    match_type_entropy: &[u8],
+    match_types: &[u8],
+    literal_lengths: &[usize],
+    match_lengths: &[usize],
+    match_codes: &[usize],
+) -> Vec<u8> {
     let mut payload = vec![2, 12, 4, 3, 1, 7, 3];
     payload.extend_from_slice(&u32::try_from(num_literals).unwrap().to_le_bytes());
     payload.extend_from_slice(&u32::try_from(match_types.len()).unwrap().to_le_bytes());
@@ -385,7 +417,7 @@ fn rolz_deprecated_stream_with_literal_order(
         payload.push(literal_order);
         payload.extend_from_slice(literal_payload);
     }
-    payload.extend_from_slice(&legacy_entropy_raw_payload(match_types, 1));
+    payload.extend_from_slice(match_type_entropy);
     if !match_types.is_empty() {
         payload.extend_from_slice(&rolz_deprecated_sequence_values(
             literal_lengths,
@@ -4578,6 +4610,28 @@ fn decodes_v21_fastlz_deprecated_constant_literals_frame() {
 }
 
 #[test]
+fn decodes_v21_fastlz_deprecated_bit_literals_frame() {
+    let expected = [0u8, 1, 2, 3, 2, 1, 0];
+    let values = expected.iter().copied().map(u64::from).collect::<Vec<_>>();
+    let literal_entropy = legacy_entropy_bit_payload(&values, 2);
+    let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
     let literals = b"abcdefghijklmnop!";
     let token = 1u16.to_le_bytes();
@@ -4780,6 +4834,36 @@ fn decodes_v21_rolz_deprecated_raw_lz_sequence_frame() {
         41,
         literals.len(),
         &legacy_entropy_raw_payload(literals, 1),
+        &[0],
+        &[33],
+        &[0],
+        &[33],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        41,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 41);
+    assert_eq!(output, b"abcdefghijklmnopqrstuvwxyzABCDEFGabcdefg!");
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_bit_match_type_frame() {
+    let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
+    let stored = rolz_deprecated_stream_with_entropy(
+        41,
+        literals.len(),
+        0,
+        &legacy_entropy_raw_payload(literals, 1),
+        &legacy_entropy_bit_payload(&[0], 1),
         &[0],
         &[33],
         &[0],

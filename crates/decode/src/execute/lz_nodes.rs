@@ -558,7 +558,6 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
     }
 }
 
-#[derive(Clone, Copy)]
 enum LegacyLiteralPayload<'a> {
     Raw(&'a [u8]),
     Constant {
@@ -566,6 +565,7 @@ enum LegacyLiteralPayload<'a> {
         decoded_elements: usize,
         element_width: usize,
     },
+    Decoded(Vec<u8>),
 }
 
 impl LegacyLiteralPayload<'_> {
@@ -577,6 +577,7 @@ impl LegacyLiteralPayload<'_> {
                 element_width,
                 ..
             } => legacy_entropy_output_len(*decoded_elements, *element_width),
+            Self::Decoded(bytes) => Ok(bytes.len()),
         }
     }
 }
@@ -610,8 +611,15 @@ impl<'a> LegacyLiteralCursor<'a> {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("fastlz_deprecated literal stream is too short"));
         }
-        match self.payload {
+        match &self.payload {
             LegacyLiteralPayload::Raw(bytes) => {
+                let chunk = bytes.get(self.offset..end).ok_or_else(|| {
+                    Error::new(ErrorKind::Malformed)
+                        .with_detail("fastlz_deprecated literal stream is too short")
+                })?;
+                output.extend_from_slice(chunk);
+            }
+            LegacyLiteralPayload::Decoded(bytes) => {
                 let chunk = bytes.get(self.offset..end).ok_or_else(|| {
                     Error::new(ErrorKind::Malformed)
                         .with_detail("fastlz_deprecated literal stream is too short")
@@ -623,12 +631,13 @@ impl<'a> LegacyLiteralCursor<'a> {
                 element_width,
                 ..
             } => {
-                if !self.offset.is_multiple_of(element_width) || !len.is_multiple_of(element_width)
+                if !self.offset.is_multiple_of(*element_width)
+                    || !len.is_multiple_of(*element_width)
                 {
                     return Err(Error::new(ErrorKind::Malformed)
                         .with_detail("deprecated lz constant literal range is misaligned"));
                 }
-                let elements = len / element_width;
+                let elements = len / *element_width;
                 for _ in 0..elements {
                     output.extend_from_slice(value);
                 }
@@ -954,7 +963,7 @@ pub(super) fn decode_fastlz_deprecated_node(
     }
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "fastlz_deprecated")?;
-    let payload = parse_fastlz_deprecated_payload(payload)?;
+    let payload = parse_fastlz_deprecated_payload(payload, limits)?;
     decode_fastlz_deprecated_payload(payload, decoded_size)
 }
 
@@ -973,12 +982,16 @@ pub(super) fn decode_rolz_deprecated_node(
     decode_rolz_deprecated_payload(payload, decoded_size, limits)
 }
 
-fn parse_fastlz_deprecated_payload(payload: &[u8]) -> Result<FastLzDeprecatedPayload<'_>> {
+fn parse_fastlz_deprecated_payload(
+    payload: &[u8],
+    limits: Limits,
+) -> Result<FastLzDeprecatedPayload<'_>> {
     let mut offset = 0usize;
     let literals = parse_legacy_literal_entropy_payload(
         payload,
         &mut offset,
         1,
+        limits,
         "fastlz_deprecated literals",
     )?;
     let tokens =
@@ -1283,8 +1296,14 @@ fn parse_rolz_deprecated_literals<'a>(
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     match order {
-        0 => parse_legacy_literal_entropy_payload(payload, offset, 1, "rolz_deprecated literals")
-            .map(RolzDeprecatedLiterals::Linear),
+        0 => parse_legacy_literal_entropy_payload(
+            payload,
+            offset,
+            1,
+            limits,
+            "rolz_deprecated literals",
+        )
+        .map(RolzDeprecatedLiterals::Linear),
         1 => parse_rolz_deprecated_o1_literals(payload, offset, num_literals, limits),
         _ => Err(Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal order flag is invalid")),
@@ -1361,8 +1380,13 @@ fn parse_rolz_deprecated_o1_literals<'a>(
                 .with_detail("rolz_deprecated literal cluster count is invalid"));
         }
 
-        let cluster =
-            parse_legacy_literal_entropy_payload(payload, offset, 1, "rolz_deprecated literals")?;
+        let cluster = parse_legacy_literal_entropy_payload(
+            payload,
+            offset,
+            1,
+            limits,
+            "rolz_deprecated literals",
+        )?;
         if cluster.byte_len()? != count {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("rolz_deprecated literal cluster count is invalid"));
@@ -1922,7 +1946,7 @@ fn decode_deprecated_lz_entropy_payload_to_vec(
     limits: Limits,
     transform_name: &str,
 ) -> Result<Vec<u8>> {
-    let payload = parse_legacy_literal_entropy_payload(source, offset, 1, transform_name)?;
+    let payload = parse_legacy_literal_entropy_payload(source, offset, 1, limits, transform_name)?;
     if payload.byte_len()? != expected_len {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} count is invalid")));
@@ -1967,12 +1991,43 @@ fn parse_legacy_literal_entropy_payload<'a>(
     source: &'a [u8],
     offset: &mut usize,
     element_width: usize,
+    limits: Limits,
     transform_name: &str,
 ) -> Result<LegacyLiteralPayload<'a>> {
+    let header = *source.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail(format!("{transform_name} entropy header is truncated"))
+    })?;
+    if header & 0x07 == 4 {
+        *offset = (*offset)
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let num_bits = usize::from(header >> 3);
+        let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} output size is too large"))
+        })?;
+        return decode_legacy_bit_entropy_payload(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            num_bits,
+            limits,
+            transform_name,
+        )
+        .map(LegacyLiteralPayload::Decoded);
+    }
+
     let (entropy_type, decoded_elements) =
         read_legacy_entropy_header(source, offset, transform_name)?;
     match entropy_type {
         2 => {
+            let output_len = legacy_entropy_output_len(decoded_elements, element_width)?;
+            if output_len > limits.max_buffer_bytes {
+                return Err(Error::new(ErrorKind::LimitExceeded)
+                    .with_detail(format!("{transform_name} exceeds buffer limit")));
+            }
             let end = (*offset)
                 .checked_add(element_width)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -1988,6 +2043,10 @@ fn parse_legacy_literal_entropy_payload<'a>(
         }
         3 => {
             let output_len = legacy_entropy_output_len(decoded_elements, element_width)?;
+            if output_len > limits.max_buffer_bytes {
+                return Err(Error::new(ErrorKind::LimitExceeded)
+                    .with_detail(format!("{transform_name} exceeds buffer limit")));
+            }
             let end = (*offset)
                 .checked_add(output_len)
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -2033,6 +2092,106 @@ fn parse_legacy_raw_entropy_slice<'a>(
         .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
     *offset = end;
     Ok(payload)
+}
+
+fn decode_legacy_bit_entropy_payload(
+    source: &[u8],
+    offset: &mut usize,
+    decoded_elements: usize,
+    element_width: usize,
+    num_bits: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
+    let max_bits = element_width.checked_mul(8).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow)
+            .with_detail(format!("{transform_name} element width is too large"))
+    })?;
+    if !matches!(element_width, 1 | 2 | 4 | 8) || num_bits > max_bits {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} bit width is invalid")));
+    }
+
+    let output_len = legacy_entropy_output_len(decoded_elements, element_width)?;
+    if output_len > limits.max_buffer_bytes {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} exceeds buffer limit")));
+    }
+    let encoded_bits = decoded_elements
+        .checked_mul(num_bits)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded_len = encoded_bits
+        .checked_add(7)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+        / 8;
+    let end = (*offset)
+        .checked_add(encoded_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded = source
+        .get(*offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    *offset = end;
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    if num_bits == 0 {
+        output.resize(output_len, 0);
+        return Ok(output);
+    }
+
+    let mask = if num_bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << num_bits) - 1
+    };
+    let mut bit_pos = 0usize;
+    for _ in 0..decoded_elements {
+        let mut value = 0u64;
+        let mut bits_read = 0usize;
+        while bits_read < num_bits {
+            let byte = encoded.get(bit_pos / 8).ok_or_else(|| {
+                Error::new(ErrorKind::Truncated)
+                    .with_detail(format!("{transform_name} bit stream is truncated"))
+            })?;
+            let take = (8 - (bit_pos & 7)).min(num_bits - bits_read);
+            let chunk_mask = (1u16 << take) - 1;
+            let chunk = u16::from(*byte >> (bit_pos & 7)) & chunk_mask;
+            value |= u64::from(chunk) << bits_read;
+            bit_pos = bit_pos
+                .checked_add(take)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            bits_read += take;
+        }
+        value &= mask;
+        match element_width {
+            1 => output.push(u8::try_from(value).map_err(|_| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{transform_name} bit value is too large"))
+            })?),
+            2 => output.extend_from_slice(
+                &u16::try_from(value)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail(format!("{transform_name} bit value is too large"))
+                    })?
+                    .to_le_bytes(),
+            ),
+            4 => output.extend_from_slice(
+                &u32::try_from(value)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail(format!("{transform_name} bit value is too large"))
+                    })?
+                    .to_le_bytes(),
+            ),
+            8 => output.extend_from_slice(&value.to_le_bytes()),
+            _ => unreachable!("validated element width"),
+        }
+    }
+    Ok(output)
 }
 
 fn read_legacy_entropy_header(
@@ -2089,6 +2248,10 @@ fn read_legacy_literal_byte(
 ) -> Result<u8> {
     match literals {
         LegacyLiteralPayload::Raw(bytes) => bytes.get(offset).copied().ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} stream is too short"))
+        }),
+        LegacyLiteralPayload::Decoded(bytes) => bytes.get(offset).copied().ok_or_else(|| {
             Error::new(ErrorKind::Malformed)
                 .with_detail(format!("{transform_name} stream is too short"))
         }),
@@ -2160,6 +2323,7 @@ fn copy_deprecated_lz_literals(
     })?;
     match literals {
         LegacyLiteralPayload::Raw(bytes) => output.extend_from_slice(bytes),
+        LegacyLiteralPayload::Decoded(bytes) => output.extend_from_slice(&bytes),
         LegacyLiteralPayload::Constant {
             value,
             decoded_elements,
