@@ -599,6 +599,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::FLOAT_DECONSTRUCT_ID,
         standard::FSE_V2_ID,
         standard::FSE_NCOUNT_ID,
+        standard::HUFFMAN_STRUCT_V2_ID,
         standard::HUFFMAN_V2_ID,
         standard::INTERLEAVE_STRING_ID,
         standard::FLATPACK_ID,
@@ -4182,6 +4183,136 @@ fn decodes_v21_huffman_v2_frame() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_huffman_struct_v2_node() {
+    let expected = [0u16, 1, 1, 0];
+    let bits = huffman_struct_v2_bits(&expected);
+    let output = decode_huffman_struct_v2_node(
+        &[
+            StreamInput {
+                bytes: &[1, 1],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &bits,
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[0, u8::try_from(expected.len()).unwrap()],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(
+        output.bytes,
+        expected
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn decodes_huffman_struct_v2_x4_node() {
+    let expected = [0u16, 1, 1, 0];
+    let chunks = [
+        &expected[0..1],
+        &expected[1..2],
+        &expected[2..3],
+        &expected[3..4],
+    ];
+    let bits = huffman_struct_v2_x4_bits(&chunks);
+    let output = decode_huffman_struct_v2_node(
+        &[
+            StreamInput {
+                bytes: &[1, 1],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &bits,
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[1, u8::try_from(expected.len()).unwrap()],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(
+        output.bytes,
+        expected
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn decodes_v21_huffman_struct_v2_frame() {
+    let expected = [0u16, 1, 1, 0];
+    let bits = huffman_struct_v2_bits(&expected);
+    let output_len = u8::try_from(expected.len()).unwrap();
+    let input = standard_graph_serial_frame(
+        21,
+        expected.len() * 2,
+        &[StandardGraphNode {
+            transform_id: standard::HUFFMAN_STRUCT_V2_ID,
+            variable_inputs: 0,
+            outputs: 1,
+            header: &[0, output_len],
+        }],
+        &[&[1, 1], &bits],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len() * 2);
+    assert_eq!(
+        output,
+        expected
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn huffman_struct_v2_bits(symbols: &[u16]) -> Vec<u8> {
+    let stream = huffman_struct_v2_stream(symbols);
+    let mut bits = Vec::new();
+    bits.extend_from_slice(&u32::try_from(symbols.len()).unwrap().to_le_bytes());
+    bits.extend_from_slice(&u32::try_from(stream.len()).unwrap().to_le_bytes());
+    bits.extend_from_slice(&stream);
+    bits
+}
+
+fn huffman_struct_v2_x4_bits(chunks: &[&[u16]; 4]) -> Vec<u8> {
+    let mut bits = Vec::new();
+    for symbols in chunks {
+        let stream = huffman_struct_v2_stream(symbols);
+        bits.extend_from_slice(&u32::try_from(symbols.len()).unwrap().to_le_bytes());
+        bits.extend_from_slice(&u32::try_from(stream.len()).unwrap().to_le_bytes());
+        bits.extend_from_slice(&stream);
+    }
+    bits
+}
+
+fn huffman_struct_v2_stream(symbols: &[u16]) -> Vec<u8> {
+    let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+    for &symbol in symbols.iter().rev() {
+        writer.write_bits(u32::from(symbol), 1);
+    }
+    writer.close_reverse_stream();
+    writer.into_bytes()
 }
 
 fn reverse_bitstream(values: &[usize], bits: u8) -> Vec<u8> {

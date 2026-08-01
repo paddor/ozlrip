@@ -981,6 +981,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::FLOAT_DECONSTRUCT_ID
         | standard::FSE_V2_ID
         | standard::HUFFMAN_V2_ID
+        | standard::HUFFMAN_STRUCT_V2_ID
         | standard::MERGE_SORTED_ID
         | standard::QUANTIZE_OFFSETS_ID
         | standard::QUANTIZE_LENGTHS_ID

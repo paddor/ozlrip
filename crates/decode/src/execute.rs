@@ -32,7 +32,10 @@ use dispatch::{
     decode_dispatch_n_by_tag_node, decode_dispatch_string_node,
     decode_dispatch_string_node_to_serial_output,
 };
-use entropy::{decode_fse_ncount_node, decode_fse_v2_node, decode_huffman_v2_node};
+use entropy::{
+    decode_fse_ncount_node, decode_fse_v2_node, decode_huffman_struct_v2_node,
+    decode_huffman_v2_node,
+};
 use lz_nodes::{
     decode_field_lz_node, decode_field_lz_node_to_output, decode_lz_node, decode_lz_node_to_output,
 };
@@ -1282,6 +1285,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::SEPARATE_STRING_COMPONENTS_ID
         | standard::FSE_V2_ID
         | standard::HUFFMAN_V2_ID
+        | standard::HUFFMAN_STRUCT_V2_ID
         | standard::MERGE_SORTED_ID
         | standard::QUANTIZE_OFFSETS_ID
         | standard::QUANTIZE_LENGTHS_ID
@@ -1603,6 +1607,9 @@ fn execute_standard_node(
         )),
         standard::FSE_V2_ID => one_serial(decode_fse_v2_node(inputs, header, ctx.limits)),
         standard::HUFFMAN_V2_ID => one_serial(decode_huffman_v2_node(inputs, header, ctx.limits)),
+        standard::HUFFMAN_STRUCT_V2_ID => {
+            one_typed(decode_huffman_struct_v2_node(inputs, header, ctx.limits))
+        }
         standard::PIVCO_HUFFMAN_ID => {
             one_serial(pivco_huffman::decode_node(inputs, header, ctx.limits))
         }

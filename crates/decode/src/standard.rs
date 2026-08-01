@@ -52,6 +52,7 @@ pub(crate) const BIT_SPLIT_ID: u32 = 63;
 pub(crate) const MUX_LENGTHS_ID: u32 = 65;
 pub(crate) const FSE_V2_ID: u32 = 49;
 pub(crate) const HUFFMAN_V2_ID: u32 = 50;
+pub(crate) const HUFFMAN_STRUCT_V2_ID: u32 = 51;
 pub(crate) const FSE_NCOUNT_ID: u32 = 52;
 pub(crate) const DIVIDE_BY_ID: u32 = 53;
 pub(crate) const DEDUP_NUM_ID: u32 = 56;

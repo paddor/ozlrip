@@ -41,6 +41,7 @@ id	name	coverage
 48	splitn_num	unit+inline-frame
 49	fse_v2	unit+inline-frame
 50	huffman_v2	unit+inline-frame
+51	huffman_struct_v2	unit+inline-frame
 52	fse_ncount	unit+inline-frame
 53	divide_by	unit+inline-frame
 54	dispatch_string	unit+fuzz
