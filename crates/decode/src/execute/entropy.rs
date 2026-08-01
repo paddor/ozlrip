@@ -464,9 +464,9 @@ fn decode_legacy_entropy_multi(
     })
 }
 
-struct LegacyCompressedEntropyHeader {
-    decoded_elements: usize,
-    encoded_len: usize,
+pub(super) struct LegacyCompressedEntropyHeader {
+    pub(super) decoded_elements: usize,
+    pub(super) encoded_len: usize,
 }
 
 fn decode_legacy_entropy_fse(
@@ -523,7 +523,7 @@ fn decode_legacy_entropy_fse(
     })
 }
 
-fn read_legacy_compressed_entropy_header(
+pub(super) fn read_legacy_compressed_entropy_header(
     source: &[u8],
     offset: &mut usize,
     transform_name: &str,
