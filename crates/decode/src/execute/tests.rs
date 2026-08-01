@@ -596,11 +596,14 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::DISPATCH_N_BY_TAG_ID,
         standard::DISPATCH_STRING_ID,
         standard::FIELD_LZ_ID,
+        standard::FLOAT_DECONSTRUCT_ID,
         standard::FSE_V2_ID,
         standard::FSE_NCOUNT_ID,
         standard::HUFFMAN_V2_ID,
+        standard::INTERLEAVE_STRING_ID,
         standard::FLATPACK_ID,
         standard::LZ_ID,
+        standard::MERGE_SORTED_ID,
         standard::MUX_LENGTHS_ID,
         standard::PARTITION_ID,
         standard::PARSE_INT_ID,
@@ -831,6 +834,158 @@ fn decodes_concat_string_outputs() {
     );
     assert_eq!(outputs[1].bytes, b"ccc");
     assert_eq!(outputs[1].string_lengths.as_deref(), Some([3].as_slice()));
+}
+
+#[test]
+fn decodes_interleave_string_outputs() {
+    let string_lengths = [1, 1, 2, 2];
+    let outputs = decode_interleave_string_node(
+        StreamInput {
+            bytes: b"aXbbYZ",
+            element_width: 1,
+            string_lengths: Some(&string_lengths),
+        },
+        &2u32.to_le_bytes(),
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].bytes, b"abb");
+    assert_eq!(
+        outputs[0].string_lengths.as_deref(),
+        Some([1, 2].as_slice())
+    );
+    assert_eq!(outputs[1].bytes, b"XYZ");
+    assert_eq!(
+        outputs[1].string_lengths.as_deref(),
+        Some([1, 2].as_slice())
+    );
+}
+
+#[test]
+fn decodes_float_deconstruct_outputs() {
+    let float32 = decode_float_deconstruct_node(
+        &[
+            StreamInput {
+                bytes: &[0, 0, 0, 1, 0, 0x40],
+                element_width: 3,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x7f, 0x80],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[0],
+        21,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(float32.element_width, 4);
+    assert_eq!(float32.bytes, [0, 0, 0x80, 0x3f, 0, 0, 0x20, 0xc0]);
+
+    let bfloat16 = decode_float_deconstruct_node(
+        &[
+            StreamInput {
+                bytes: &[0, 0x41],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x7f, 0x80],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[1],
+        21,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(bfloat16.element_width, 2);
+    assert_eq!(bfloat16.bytes, [0x80, 0x3f, 0x20, 0xc0]);
+
+    let float16 = decode_float_deconstruct_node(
+        &[
+            StreamInput {
+                bytes: &[0, 0, 1, 2],
+                element_width: 2,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x0f, 0x10],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[2],
+        21,
+        Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(float16.element_width, 2);
+    assert_eq!(float16.bytes, [0, 0x3c, 0, 0xc1]);
+}
+
+#[test]
+fn decodes_v4_float_deconstruct_default_float32() {
+    let output = decode_float_deconstruct_node(
+        &[
+            StreamInput {
+                bytes: &[0, 0, 0],
+                element_width: 3,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x7f],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        4,
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 4);
+    assert_eq!(output.bytes, [0, 0, 0x80, 0x3f]);
+}
+
+#[test]
+fn decodes_merge_sorted_outputs() {
+    let merged = [1u32, 2, 3, 5, 9]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let output = decode_merge_sorted_node(
+        &[
+            StreamInput {
+                bytes: &[1, 2, 3, 3, 2],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &merged,
+                element_width: 4,
+                string_lengths: None,
+            },
+        ],
+        &[3, 4],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 4);
+    assert_eq!(
+        output.bytes,
+        [1u32, 3, 5, 2, 3, 5, 9]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2210,6 +2365,134 @@ fn decodes_v21_concat_string_graph_to_serial() {
 
     assert_eq!(written, 3);
     assert_eq!(output, b"aBB");
+}
+
+#[test]
+fn decodes_v21_interleave_string_graph_to_serial() {
+    let field_sizes = [1, 1, 2, 2];
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        3,
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::INTERLEAVE_STRING_ID,
+                variable_inputs: 0,
+                outputs: 2,
+                header: &2u32.to_le_bytes(),
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"aXbbYZ", &field_sizes],
+        &[0, 0, 1, 1],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 3);
+    assert_eq!(output, b"abb");
+}
+
+#[test]
+fn decodes_v21_float_deconstruct_graph_to_serial() {
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        8,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[3],
+            },
+            StandardGraphNode {
+                transform_id: standard::FLOAT_DECONSTRUCT_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[0],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+        ],
+        &[&[0x7f, 0x80], &[0, 0, 0, 1, 0, 0x40]],
+        &[1, 0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 8);
+    assert_eq!(output, [0, 0, 0x80, 0x3f, 0, 0, 0x20, 0xc0]);
+}
+
+#[test]
+fn decodes_v21_merge_sorted_graph_to_serial() {
+    let merged = [1u32, 2, 3, 5, 9]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        28,
+        &[
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[1],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[4],
+            },
+            StandardGraphNode {
+                transform_id: standard::MERGE_SORTED_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[3, 4],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_NUM_TO_SERIAL_LE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+        ],
+        &[&merged, &[1, 2, 3, 3, 2]],
+        &[2, 0, 0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 28);
+    assert_eq!(
+        output,
+        [1u32, 3, 5, 2, 3, 5, 9]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

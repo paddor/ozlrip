@@ -24,6 +24,7 @@ id	name	coverage
 30	transpose_split2	unit+fuzz
 31	transpose_split4	unit+fuzz
 32	transpose_split8	unit+fuzz
+33	float_deconstruct	unit+inline-frame
 34	bitunpack	unit+fuzz
 35	range_pack	unit+fuzz
 36	tokenize_fixed	unit+inline-frame
@@ -31,6 +32,7 @@ id	name	coverage
 40	splitn	unit+fuzz
 41	split_by_struct	unit+fuzz
 42	dispatch_n_by_tag	unit+fuzz
+43	merge_sorted	unit+inline-frame
 44	constant_serial	unit+fuzz
 45	constant_fixed	unit+fuzz
 46	prefix	unit+inline-frame
@@ -47,6 +49,7 @@ id	name	coverage
 58	concat_struct	unit+inline-frame
 59	concat_string	unit+inline-frame
 60	parse_int	unit+inline-frame
+61	interleave_string	unit+inline-frame
 62	lz4	unit+fuzz+interop
 63	bit_split	unit+inline-frame
 64	partition	unit+inline-frame

@@ -13,6 +13,7 @@ pub(crate) const TOKENIZE_FIXED_ID: u32 = 36;
 pub(crate) const TOKENIZE_NUMERIC_ID: u32 = 37;
 pub(crate) const SPLIT_BY_STRUCT_ID: u32 = 41;
 pub(crate) const DISPATCH_N_BY_TAG_ID: u32 = 42;
+pub(crate) const MERGE_SORTED_ID: u32 = 43;
 pub(crate) const CONSTANT_SERIAL_ID: u32 = 44;
 pub(crate) const CONSTANT_FIXED_ID: u32 = 45;
 pub(crate) const PREFIX_ID: u32 = 46;
@@ -34,6 +35,7 @@ pub(crate) const QUANTIZE_OFFSETS_ID: u32 = 25;
 pub(crate) const QUANTIZE_LENGTHS_ID: u32 = 26;
 pub(crate) const PARTITION_ID: u32 = 64;
 pub(crate) const FLATPACK_ID: u32 = 29;
+pub(crate) const FLOAT_DECONSTRUCT_ID: u32 = 33;
 pub(crate) const ZIGZAG_ID: u32 = 3;
 pub(crate) const TRANSPOSE_SPLIT_ID: u32 = 4;
 pub(crate) const CONCAT_NUM_ID: u32 = 57;
@@ -53,6 +55,7 @@ pub(crate) const FSE_NCOUNT_ID: u32 = 52;
 pub(crate) const DIVIDE_BY_ID: u32 = 53;
 pub(crate) const DEDUP_NUM_ID: u32 = 56;
 pub(crate) const CONCAT_STRING_ID: u32 = 59;
+pub(crate) const INTERLEAVE_STRING_ID: u32 = 61;
 pub(crate) const PIVCO_HUFFMAN_ID: u32 = 67;
 
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {

@@ -1276,11 +1276,13 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONCAT_STRUCT_ID
         | standard::CONCAT_STRING_ID
         | standard::DISPATCH_N_BY_TAG_ID
+        | standard::FLOAT_DECONSTRUCT_ID
         | standard::FLATPACK_ID
         | standard::SENTINEL_ID
         | standard::SEPARATE_STRING_COMPONENTS_ID
         | standard::FSE_V2_ID
         | standard::HUFFMAN_V2_ID
+        | standard::MERGE_SORTED_ID
         | standard::QUANTIZE_OFFSETS_ID
         | standard::QUANTIZE_LENGTHS_ID
         | standard::PARTITION_ID
@@ -1313,6 +1315,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::DEDUP_NUM_ID
         | standard::DELTA_INT_ID
         | standard::DIVIDE_BY_ID
+        | standard::INTERLEAVE_STRING_ID
         | standard::PARSE_INT_ID
         | standard::BITUNPACK_ID
         | standard::RANGE_PACK_ID
@@ -1425,6 +1428,10 @@ fn execute_standard_node(
         standard::CONCAT_STRING_ID => {
             decode_concat_string_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
         }
+        standard::INTERLEAVE_STRING_ID => {
+            decode_interleave_string_node(single_stream(inputs)?, header, ctx.limits)
+                .map(SmallVec::from_vec)
+        }
         standard::SPLITN_ID => one_serial(decode_splitn_node(
             inputs,
             variable_inputs,
@@ -1441,6 +1448,15 @@ fn execute_standard_node(
             ctx.limits,
         )),
         standard::FLATPACK_ID => one_serial(decode_flatpack_node(inputs, header, ctx.limits)),
+        standard::FLOAT_DECONSTRUCT_ID => one_typed(decode_float_deconstruct_node(
+            inputs,
+            header,
+            ctx.format_version,
+            ctx.limits,
+        )),
+        standard::MERGE_SORTED_ID => {
+            one_typed(decode_merge_sorted_node(inputs, header, ctx.limits))
+        }
         standard::SEPARATE_STRING_COMPONENTS_ID => one_typed(
             decode_separate_string_components_node(inputs, header, ctx.limits),
         ),
@@ -1894,6 +1910,115 @@ fn decode_concat_string_node(
     Ok(outputs)
 }
 
+fn decode_interleave_string_node(
+    input: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<OwnedStream>> {
+    let [b0, b1, b2, b3] = header else {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("interleave_string header is malformed")
+        );
+    };
+    let output_count = u32::from_le_bytes([*b0, *b1, *b2, *b3]);
+    let output_count = usize::try_from(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("interleave_string output count too large")
+    })?;
+    if output_count == 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("interleave_string output count must be nonzero"));
+    }
+    if output_count > limits.max_streams {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail("interleave_string output count too large"));
+    }
+    if input.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("interleave_string input must be byte strings"));
+    }
+    let string_lengths = input.string_lengths.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidType).with_detail("interleave_string input is missing lengths")
+    })?;
+    if string_lengths.len() % output_count != 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("interleave_string input count is not divisible by output count"));
+    }
+    if checked_sum_u32(string_lengths)? != input.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("interleave_string lengths do not sum to content size"));
+    }
+    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let strings_per_output = string_lengths.len() / output_count;
+    let mut byte_counts = Vec::new();
+    byte_counts.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("interleave size allocation failed")
+    })?;
+    byte_counts.resize(output_count, 0usize);
+    for (index, &len) in string_lengths.iter().enumerate() {
+        let len = usize::try_from(len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length is too large")
+        })?;
+        let output_index = index % output_count;
+        byte_counts[output_index] = byte_counts[output_index]
+            .checked_add(len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+
+    let mut outputs = Vec::new();
+    outputs.try_reserve_exact(output_count).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("interleave output allocation failed")
+    })?;
+    for &byte_count in &byte_counts {
+        if byte_count > limits.max_decoded_bytes || byte_count > limits.max_buffer_bytes {
+            return Err(
+                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+            );
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(byte_count).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("interleave allocation failed")
+        })?;
+        let mut lengths = Vec::new();
+        lengths.try_reserve_exact(strings_per_output).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("interleave length allocation failed")
+        })?;
+        outputs.push(OwnedStream {
+            bytes,
+            element_width: 1,
+            string_lengths: Some(lengths),
+            recyclable: false,
+        });
+    }
+
+    let mut src_offset = 0usize;
+    for (index, &len) in string_lengths.iter().enumerate() {
+        let len_usize = usize::try_from(len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length is too large")
+        })?;
+        let src_end = src_offset
+            .checked_add(len_usize)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let bytes = input.bytes.get(src_offset..src_end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("interleave_string input is truncated")
+        })?;
+        let output_index = index % output_count;
+        outputs[output_index].bytes.extend_from_slice(bytes);
+        outputs[output_index]
+            .string_lengths
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidGraph))?
+            .push(len);
+        src_offset = src_end;
+    }
+    debug_assert_eq!(src_offset, input.bytes.len());
+    Ok(outputs)
+}
+
 fn concat_size_count(sizes: &StreamInput<'_>) -> Result<usize> {
     match sizes.element_width {
         1 | 4 => numeric_element_count(sizes.bytes, 4),
@@ -1981,6 +2106,265 @@ fn decode_flatpack_node(
             .with_detail("flatpack input count does not match node shape"));
     };
     decode_flatpack_serial(alphabet.bytes, packed.bytes, limits)
+}
+
+#[derive(Clone, Copy)]
+enum FloatDeconstructType {
+    Float32,
+    BFloat16,
+    Float16,
+}
+
+impl FloatDeconstructType {
+    const fn sign_frac_width(self) -> usize {
+        match self {
+            Self::Float32 => 3,
+            Self::BFloat16 => 1,
+            Self::Float16 => 2,
+        }
+    }
+
+    const fn output_width(self) -> usize {
+        match self {
+            Self::Float32 => 4,
+            Self::BFloat16 | Self::Float16 => 2,
+        }
+    }
+}
+
+fn decode_float_deconstruct_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let [sign_frac, exponent] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("float_deconstruct input count does not match node shape"));
+    };
+    if sign_frac.string_lengths.is_some() || exponent.string_lengths.is_some() {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("float_deconstruct inputs must not be string streams"));
+    }
+
+    let element_type = parse_float_deconstruct_header(header, format_version)?;
+    if sign_frac.element_width != element_type.sign_frac_width() {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("float_deconstruct signfrac width does not match element type"));
+    }
+    if exponent.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("float_deconstruct exponent width must be 1"));
+    }
+
+    let elements = numeric_element_count(exponent.bytes, exponent.element_width)?;
+    if numeric_element_count(sign_frac.bytes, sign_frac.element_width)? != elements {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("float_deconstruct streams have different element counts"));
+    }
+    let output_width = element_type.output_width();
+    let output_len = elements
+        .checked_mul(output_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("float_deconstruct allocation failed")
+    })?;
+    match element_type {
+        FloatDeconstructType::Float32 => {
+            decode_float32_deconstruct(sign_frac.bytes, exponent.bytes, &mut output);
+        }
+        FloatDeconstructType::BFloat16 => {
+            decode_bfloat16_deconstruct(sign_frac.bytes, exponent.bytes, &mut output);
+        }
+        FloatDeconstructType::Float16 => {
+            decode_float16_deconstruct(sign_frac.bytes, exponent.bytes, &mut output)?;
+        }
+    }
+
+    Ok(OwnedStream::typed(output, output_width))
+}
+
+fn parse_float_deconstruct_header(
+    header: &[u8],
+    format_version: u32,
+) -> Result<FloatDeconstructType> {
+    if format_version < 5 {
+        if !header.is_empty() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("float_deconstruct v4 header must be empty"));
+        }
+        return Ok(FloatDeconstructType::Float32);
+    }
+
+    let [element_type] = header else {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("float_deconstruct header is malformed")
+        );
+    };
+    match *element_type {
+        0 => Ok(FloatDeconstructType::Float32),
+        1 => Ok(FloatDeconstructType::BFloat16),
+        2 => Ok(FloatDeconstructType::Float16),
+        _ => Err(Error::new(ErrorKind::Malformed)
+            .with_detail("float_deconstruct element type is invalid")),
+    }
+}
+
+fn decode_float32_deconstruct(sign_frac: &[u8], exponent: &[u8], output: &mut Vec<u8>) {
+    for (sf, &exp) in sign_frac.chunks_exact(3).zip(exponent) {
+        let sf = u32::from(sf[0]) | (u32::from(sf[1]) << 8) | (u32::from(sf[2]) << 16);
+        let bits = (u32::from(exp) << 23) | ((sf & 1) << 31) | (sf >> 1);
+        output.extend_from_slice(&bits.to_le_bytes());
+    }
+}
+
+fn decode_bfloat16_deconstruct(sign_frac: &[u8], exponent: &[u8], output: &mut Vec<u8>) {
+    for (&sf, &exp) in sign_frac.iter().zip(exponent) {
+        let bits = (u16::from(sf & 1) << 15) | (u16::from(exp) << 7) | u16::from(sf >> 1);
+        output.extend_from_slice(&bits.to_le_bytes());
+    }
+}
+
+fn decode_float16_deconstruct(
+    sign_frac: &[u8],
+    exponent: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    for (sf, &exp) in sign_frac.chunks_exact(2).zip(exponent) {
+        let sf = u16::from_le_bytes([sf[0], sf[1]]);
+        if sf & !0x07ff != 0 || exp & !0x1f != 0 {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("float16_deconstruct unused bits must be zero"));
+        }
+        let bits = ((sf & 1) << 15) | (u16::from(exp) << 10) | (sf >> 1);
+        output.extend_from_slice(&bits.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn decode_merge_sorted_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let [bitset, merged] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("merge_sorted input count does not match node shape"));
+    };
+    if bitset.string_lengths.is_some() || merged.string_lengths.is_some() {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("merge_sorted inputs must not be string streams"));
+    }
+    validate_numeric_stream_width(bitset.element_width, "merge_sorted bitset")?;
+    if merged.element_width != 4 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("merge_sorted merged stream width must be 4"));
+    }
+
+    let merged_elements = numeric_element_count(merged.bytes, merged.element_width)?;
+    if numeric_element_count(bitset.bytes, bitset.element_width)? != merged_elements {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("merge_sorted streams have different element counts"));
+    }
+
+    let sizes = read_merge_sorted_sizes(header)?;
+    let max_runs = bitset
+        .element_width
+        .checked_mul(8)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if sizes.len() > max_runs {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("merge_sorted has too many output runs for bitset width"));
+    }
+
+    let max_output_elements = max_runs
+        .checked_mul(merged_elements)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let output_elements = sizes.iter().try_fold(0usize, |sum, &size| {
+        sum.checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if output_elements > max_output_elements {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("merge_sorted output count exceeds bitset capacity"));
+    }
+    let output_len = output_elements
+        .checked_mul(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut starts = Vec::new();
+    starts.try_reserve_exact(sizes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("merge_sorted run allocation failed")
+    })?;
+    let mut cursor = 0usize;
+    for &size in &sizes {
+        starts.push(cursor);
+        cursor = cursor
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+
+    let mut output = vec![0u8; output_len];
+    let mut written = Vec::new();
+    written.try_reserve_exact(sizes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("merge_sorted count allocation failed")
+    })?;
+    written.resize(sizes.len(), 0usize);
+
+    for value_index in 0..merged_elements {
+        let bitset_word = read_numeric_element(bitset.bytes, bitset.element_width, value_index)?;
+        let value = read_u32_element(merged.bytes, value_index)?.to_le_bytes();
+        for run_index in 0..sizes.len() {
+            if written[run_index] == sizes[run_index] || bitset_word & (1u64 << run_index) == 0 {
+                continue;
+            }
+            let element_index = starts[run_index]
+                .checked_add(written[run_index])
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let byte_index = element_index
+                .checked_mul(4)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            output[byte_index..byte_index + 4].copy_from_slice(&value);
+            written[run_index] = written[run_index]
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+    }
+
+    if written != sizes {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("merge_sorted bitsets do not fill output runs"));
+    }
+    Ok(OwnedStream::typed(output, 4))
+}
+
+fn read_merge_sorted_sizes(header: &[u8]) -> Result<Vec<usize>> {
+    let mut sizes = Vec::new();
+    let mut offset = 0usize;
+    while offset < header.len() {
+        if sizes.len() == 64 {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("merge_sorted has too many output runs"));
+        }
+        let size = read_var_u64(header, &mut offset)?;
+        let size = usize::try_from(size).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("merge_sorted run size is too large")
+        })?;
+        sizes.push(size);
+    }
+    Ok(sizes)
 }
 
 fn decode_separate_string_components_node(

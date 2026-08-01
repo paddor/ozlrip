@@ -978,8 +978,10 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::FSE_NCOUNT_ID
         | standard::LZ4_ID => Some(fixed_shape(1, 1)),
         standard::FLATPACK_ID
+        | standard::FLOAT_DECONSTRUCT_ID
         | standard::FSE_V2_ID
         | standard::HUFFMAN_V2_ID
+        | standard::MERGE_SORTED_ID
         | standard::QUANTIZE_OFFSETS_ID
         | standard::QUANTIZE_LENGTHS_ID
         | standard::PARTITION_ID
@@ -1022,6 +1024,12 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
             max_outputs: None,
         }),
         standard::DEDUP_NUM_ID => Some(StandardNodeShape {
+            static_inputs: 1,
+            allows_variable_inputs: false,
+            min_outputs: 1,
+            max_outputs: None,
+        }),
+        standard::INTERLEAVE_STRING_ID => Some(StandardNodeShape {
             static_inputs: 1,
             allows_variable_inputs: false,
             min_outputs: 1,
