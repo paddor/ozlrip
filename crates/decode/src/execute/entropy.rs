@@ -72,8 +72,8 @@ pub(super) fn decode_fse_deprecated_node(
         [] => {}
         [2 | 4] => {}
         [_] => {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("fse_deprecated state count is unsupported"));
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("fse_deprecated state count is invalid"));
         }
         _ => {
             return Err(

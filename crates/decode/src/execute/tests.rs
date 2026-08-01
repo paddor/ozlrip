@@ -4488,6 +4488,25 @@ fn decodes_v21_fse_deprecated_bit_frame() {
 }
 
 #[test]
+fn rejects_fse_deprecated_invalid_state_count_without_mutating_destination() {
+    let payload = legacy_entropy_raw_payload(b"state", 1);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        &payload,
+        5,
+        &[3],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
 fn decodes_v21_huffman_deprecated_constant_frame() {
     let expected = vec![b'Z'; 19];
     let payload = legacy_entropy_constant_payload(b"Z", expected.len());
