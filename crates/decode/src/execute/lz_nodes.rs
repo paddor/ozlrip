@@ -557,10 +557,6 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
     }
 }
 
-const FASTLZ_DEPRECATED_EMPTY_PAYLOAD: [u8; 4] = [0x03, 0x03, 0x00, 0x00];
-const ROLZ_DEPRECATED_EMPTY_PAYLOAD: [u8; 16] =
-    [2, 12, 4, 3, 1, 7, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0x03];
-
 pub(super) fn decode_fastlz_deprecated_node(
     source: StreamInput<'_>,
     header: &[u8],
@@ -572,15 +568,12 @@ pub(super) fn decode_fastlz_deprecated_node(
     }
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "fastlz_deprecated")?;
-    if decoded_size != 0 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("fastlz_deprecated non-empty streams are unsupported"));
-    }
-    if payload != FASTLZ_DEPRECATED_EMPTY_PAYLOAD.as_slice() {
+    let literals = decode_fastlz_deprecated_literal_only_payload(payload)?;
+    if literals.len() != decoded_size {
         return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("fastlz_deprecated empty stream is malformed"));
+            .with_detail("fastlz_deprecated output size does not match prefix"));
     }
-    Ok(Vec::new())
+    copy_deprecated_lz_literals(literals, "fastlz_deprecated")
 }
 
 pub(super) fn decode_rolz_deprecated_node(
@@ -594,15 +587,82 @@ pub(super) fn decode_rolz_deprecated_node(
     }
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "rolz_deprecated")?;
-    if decoded_size != 0 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated non-empty streams are unsupported"));
-    }
-    if payload != ROLZ_DEPRECATED_EMPTY_PAYLOAD.as_slice() {
+    let literals = decode_rolz_deprecated_literal_only_payload(payload)?;
+    if literals.len() != decoded_size {
         return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("rolz_deprecated empty stream is malformed"));
+            .with_detail("rolz_deprecated output size does not match prefix"));
     }
-    Ok(Vec::new())
+    copy_deprecated_lz_literals(literals, "rolz_deprecated")
+}
+
+fn decode_fastlz_deprecated_literal_only_payload(payload: &[u8]) -> Result<&[u8]> {
+    let mut offset = 0usize;
+    let literals =
+        parse_legacy_raw_entropy_slice(payload, &mut offset, 1, "fastlz_deprecated literals")?;
+    let tokens =
+        parse_legacy_raw_entropy_slice(payload, &mut offset, 2, "fastlz_deprecated tokens")?;
+    if !tokens.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("fastlz_deprecated sequences are unsupported"));
+    }
+    read_zero_deprecated_lz_size(payload, &mut offset, "fastlz_deprecated offsets")?;
+    read_zero_deprecated_lz_size(payload, &mut offset, "fastlz_deprecated extras")?;
+    if offset != payload.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated payload has trailing bytes"));
+    }
+    Ok(literals)
+}
+
+fn decode_rolz_deprecated_literal_only_payload(payload: &[u8]) -> Result<&[u8]> {
+    let header = payload.get(..15).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail("rolz_deprecated header is truncated")
+    })?;
+    if header[..7] != [2, 12, 4, 3, 1, 7, 3] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated parameters are unsupported"));
+    }
+    let num_literals = u32::from_le_bytes([header[7], header[8], header[9], header[10]]) as usize;
+    let num_sequences =
+        u32::from_le_bytes([header[11], header[12], header[13], header[14]]) as usize;
+    if num_sequences != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated sequences are unsupported"));
+    }
+
+    let mut offset = 15usize;
+    let literals = if num_literals == 0 {
+        &[][..]
+    } else {
+        let order = *payload.get(offset).ok_or_else(|| {
+            Error::new(ErrorKind::Truncated)
+                .with_detail("rolz_deprecated literal order flag is truncated")
+        })?;
+        offset = offset
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if order != 0 {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("rolz_deprecated order-1 literals are unsupported"));
+        }
+        parse_legacy_raw_entropy_slice(payload, &mut offset, 1, "rolz_deprecated literals")?
+    };
+    if literals.len() != num_literals {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated literal count is invalid"));
+    }
+
+    let match_types =
+        parse_legacy_raw_entropy_slice(payload, &mut offset, 1, "rolz_deprecated match types")?;
+    if !match_types.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated match types are unsupported"));
+    }
+    if offset != payload.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated payload has trailing bytes"));
+    }
+    Ok(literals)
 }
 
 fn parse_deprecated_lz_stored_stream<'a>(
@@ -632,6 +692,93 @@ fn parse_deprecated_lz_stored_stream<'a>(
         );
     }
     Ok((decoded_size, &source.bytes[4..]))
+}
+
+fn parse_legacy_raw_entropy_slice<'a>(
+    source: &'a [u8],
+    offset: &mut usize,
+    element_width: usize,
+    transform_name: &str,
+) -> Result<&'a [u8]> {
+    let header = *source.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail(format!("{transform_name} entropy header is truncated"))
+    })?;
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    match header & 0x07 {
+        3 => {}
+        6 | 7 => {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} entropy mode is reserved")));
+        }
+        _ => {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail(format!("{transform_name} entropy mode is unsupported")));
+        }
+    }
+
+    let decoded_elements = read_legacy_entropy_size(header, source, offset, transform_name)?;
+    let output_len = decoded_elements
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let end = (*offset)
+        .checked_add(output_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let payload = source
+        .get(*offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    *offset = end;
+    Ok(payload)
+}
+
+fn read_legacy_entropy_size(
+    header: u8,
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<usize> {
+    let low = u64::from((header >> 3) & 0x0f);
+    let high = if header & 0x80 == 0 {
+        0
+    } else {
+        let high = read_var_u64(source, offset)?;
+        if high > (u64::MAX >> 4) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        high << 4
+    };
+    let decoded = low
+        .checked_add(high)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    usize::try_from(decoded).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} output size is too large"))
+    })
+}
+
+fn read_zero_deprecated_lz_size(
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<()> {
+    let size = read_var_u64(source, offset)?;
+    if size != 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} stream must be empty")));
+    }
+    Ok(())
+}
+
+fn copy_deprecated_lz_literals(literals: &[u8], transform_name: &str) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output.try_reserve_exact(literals.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    output.extend_from_slice(literals);
+    Ok(output)
 }
 
 pub(super) fn decode_field_lz_node(

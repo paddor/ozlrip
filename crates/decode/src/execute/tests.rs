@@ -306,12 +306,32 @@ fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     output
 }
 
+fn fastlz_deprecated_literal_only_stream(literals: &[u8]) -> Vec<u8> {
+    let mut payload = legacy_entropy_raw_payload(literals, 1);
+    payload.extend_from_slice(&legacy_entropy_raw_payload(&[], 2));
+    payload.push(0);
+    payload.push(0);
+    deprecated_lz_stored_stream(literals.len(), &payload)
+}
+
 fn empty_fastlz_deprecated_stream() -> Vec<u8> {
-    deprecated_lz_stored_stream(0, &[0x03, 0x03, 0x00, 0x00])
+    fastlz_deprecated_literal_only_stream(&[])
+}
+
+fn rolz_deprecated_literal_only_stream(literals: &[u8]) -> Vec<u8> {
+    let mut payload = vec![2, 12, 4, 3, 1, 7, 3];
+    payload.extend_from_slice(&u32::try_from(literals.len()).unwrap().to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    if !literals.is_empty() {
+        payload.push(0);
+        payload.extend_from_slice(&legacy_entropy_raw_payload(literals, 1));
+    }
+    payload.extend_from_slice(&legacy_entropy_raw_payload(&[], 1));
+    deprecated_lz_stored_stream(literals.len(), &payload)
 }
 
 fn empty_rolz_deprecated_stream() -> Vec<u8> {
-    deprecated_lz_stored_stream(0, &[2, 12, 4, 3, 1, 7, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0x03])
+    rolz_deprecated_literal_only_stream(&[])
 }
 
 #[cfg(feature = "zstd")]
@@ -4342,6 +4362,26 @@ fn decodes_v21_empty_fastlz_deprecated_frame() {
 }
 
 #[test]
+fn decodes_v21_fastlz_deprecated_raw_literals_frame() {
+    let expected = b"legacy fastlz literals";
+    let stored = fastlz_deprecated_literal_only_stream(expected);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_empty_rolz_deprecated_node() {
     let stored = empty_rolz_deprecated_stream();
     let output = decode_rolz_deprecated_node(
@@ -4378,8 +4418,32 @@ fn decodes_v21_empty_rolz_deprecated_frame() {
 }
 
 #[test]
-fn rejects_non_empty_fastlz_deprecated_without_mutating_destination() {
-    let stored = deprecated_lz_stored_stream(1, &[0x0b, b'x', 0x03, 0x00, 0x00]);
+fn decodes_v21_rolz_deprecated_raw_literals_frame() {
+    let expected = b"legacy rolz literals";
+    let stored = rolz_deprecated_literal_only_stream(expected);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn rejects_fastlz_deprecated_sequences_without_mutating_destination() {
+    let mut payload = legacy_entropy_raw_payload(b"x", 1);
+    payload.extend_from_slice(&legacy_entropy_raw_payload(&[0, 0], 2));
+    payload.push(0);
+    payload.push(0);
+    let stored = deprecated_lz_stored_stream(1, &payload);
     let input = standard_transform_serial_frame(
         21,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
