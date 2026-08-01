@@ -171,6 +171,8 @@ struct LegacyEntropyPayload {
     decoded_elements: usize,
 }
 
+const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
+
 fn decode_legacy_entropy_payload(
     source: &[u8],
     element_width: usize,
@@ -185,10 +187,56 @@ fn decode_legacy_entropy_payload(
         });
     }
 
-    let header = source[0];
-    let entropy_type = header & 0x07;
-    let mut offset = 1usize;
-    let decoded_elements = read_legacy_entropy_size(header, source, &mut offset, transform_name)?;
+    let mut offset = 0usize;
+    let payload = decode_legacy_entropy_payload_internal(
+        source,
+        &mut offset,
+        element_width,
+        limits,
+        transform_name,
+        LEGACY_ENTROPY_MAX_DEPTH,
+    )?;
+    if offset != source.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} input has trailing bytes")));
+    }
+    Ok(payload)
+}
+
+fn decode_legacy_entropy_payload_internal(
+    source: &[u8],
+    offset: &mut usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<LegacyEntropyPayload> {
+    let header = *source.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail(format!("{transform_name} entropy header is truncated"))
+    })?;
+    if header & 0x07 == 4 {
+        *offset = (*offset)
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let num_bits = usize::from(header >> 3);
+        let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} output size is too large"))
+        })?;
+        return decode_legacy_entropy_bit(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            num_bits,
+            limits,
+            transform_name,
+        );
+    }
+
+    let (entropy_type, decoded_elements) =
+        read_legacy_entropy_header(source, offset, transform_name)?;
     match entropy_type {
         2 => decode_legacy_entropy_constant(
             source,
@@ -206,7 +254,16 @@ fn decode_legacy_entropy_payload(
             limits,
             transform_name,
         ),
-        0 | 1 | 4 | 5 => Err(Error::new(ErrorKind::Unsupported)
+        5 => decode_legacy_entropy_multi(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            limits,
+            transform_name,
+            max_depth,
+        ),
+        0 | 1 => Err(Error::new(ErrorKind::Unsupported)
             .with_detail(format!("{transform_name} entropy mode is unsupported"))),
         _ => Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy mode is reserved"))),
@@ -219,6 +276,22 @@ fn validate_legacy_entropy_width(element_width: usize, transform_name: &str) -> 
             .with_detail(format!("{transform_name} element width is unsupported")));
     }
     Ok(())
+}
+
+fn read_legacy_entropy_header(
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<(u8, usize)> {
+    let header = *source.get(*offset).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated)
+            .with_detail(format!("{transform_name} entropy header is truncated"))
+    })?;
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let decoded_elements = read_legacy_entropy_size(header, source, offset, transform_name)?;
+    Ok((header & 0x07, decoded_elements))
 }
 
 fn read_legacy_entropy_size(
@@ -264,23 +337,20 @@ fn checked_legacy_entropy_output_len(
 
 fn decode_legacy_entropy_raw(
     source: &[u8],
-    offset: usize,
+    offset: &mut usize,
     decoded_elements: usize,
     element_width: usize,
     limits: Limits,
     transform_name: &str,
 ) -> Result<LegacyEntropyPayload> {
     let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
-    let end = offset
+    let end = (*offset)
         .checked_add(output_len)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let payload = source
-        .get(offset..end)
+        .get(*offset..end)
         .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
-    if end != source.len() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{transform_name} input has trailing bytes")));
-    }
+    *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded)
@@ -295,23 +365,20 @@ fn decode_legacy_entropy_raw(
 
 fn decode_legacy_entropy_constant(
     source: &[u8],
-    offset: usize,
+    offset: &mut usize,
     decoded_elements: usize,
     element_width: usize,
     limits: Limits,
     transform_name: &str,
 ) -> Result<LegacyEntropyPayload> {
     let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
-    let end = offset
+    let end = (*offset)
         .checked_add(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let value = source
-        .get(offset..end)
+        .get(*offset..end)
         .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
-    if end != source.len() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{transform_name} input has trailing bytes")));
-    }
+    *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded)
@@ -319,6 +386,157 @@ fn decode_legacy_entropy_constant(
     })?;
     for _ in 0..decoded_elements {
         bytes.extend_from_slice(value);
+    }
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements,
+    })
+}
+
+fn decode_legacy_entropy_multi(
+    source: &[u8],
+    offset: &mut usize,
+    blocks: usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<LegacyEntropyPayload> {
+    if max_depth == 0 {
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail(format!(
+            "{transform_name} multi entropy depth exceeds limit"
+        )));
+    }
+    if blocks > limits.max_buffer_bytes {
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail(format!(
+            "{transform_name} multi entropy block count exceeds buffer limit"
+        )));
+    }
+
+    let mut bytes = Vec::new();
+    let mut decoded_elements = 0usize;
+    for _ in 0..blocks {
+        let block = decode_legacy_entropy_payload_internal(
+            source,
+            offset,
+            element_width,
+            limits,
+            transform_name,
+            max_depth - 1,
+        )?;
+        decoded_elements = decoded_elements
+            .checked_add(block.decoded_elements)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let output_len =
+            checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
+        bytes.try_reserve_exact(block.bytes.len()).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} allocation failed"))
+        })?;
+        bytes.extend_from_slice(&block.bytes);
+        debug_assert_eq!(bytes.len(), output_len);
+    }
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements,
+    })
+}
+
+fn decode_legacy_entropy_bit(
+    source: &[u8],
+    offset: &mut usize,
+    decoded_elements: usize,
+    element_width: usize,
+    num_bits: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    let max_bits = element_width.checked_mul(8).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow)
+            .with_detail(format!("{transform_name} element width is too large"))
+    })?;
+    if num_bits > max_bits {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} bit width is invalid")));
+    }
+
+    let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
+    let encoded_bits = decoded_elements
+        .checked_mul(num_bits)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded_len = encoded_bits
+        .checked_add(7)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+        / 8;
+    let end = (*offset)
+        .checked_add(encoded_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded = source
+        .get(*offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    *offset = end;
+
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    if num_bits == 0 {
+        bytes.resize(output_len, 0);
+        return Ok(LegacyEntropyPayload {
+            bytes,
+            decoded_elements,
+        });
+    }
+
+    let mask = if num_bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << num_bits) - 1
+    };
+    let mut bit_pos = 0usize;
+    for _ in 0..decoded_elements {
+        let mut value = 0u64;
+        let mut bits_read = 0usize;
+        while bits_read < num_bits {
+            let byte = encoded.get(bit_pos / 8).ok_or_else(|| {
+                Error::new(ErrorKind::Truncated)
+                    .with_detail(format!("{transform_name} bit stream is truncated"))
+            })?;
+            let take = (8 - (bit_pos & 7)).min(num_bits - bits_read);
+            let chunk_mask = (1u16 << take) - 1;
+            let chunk = u16::from(*byte >> (bit_pos & 7)) & chunk_mask;
+            value |= u64::from(chunk) << bits_read;
+            bit_pos = bit_pos
+                .checked_add(take)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            bits_read += take;
+        }
+        value &= mask;
+        match element_width {
+            1 => bytes.push(u8::try_from(value).map_err(|_| {
+                Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{transform_name} bit value is too large"))
+            })?),
+            2 => bytes.extend_from_slice(
+                &u16::try_from(value)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail(format!("{transform_name} bit value is too large"))
+                    })?
+                    .to_le_bytes(),
+            ),
+            4 => bytes.extend_from_slice(
+                &u32::try_from(value)
+                    .map_err(|_| {
+                        Error::new(ErrorKind::Malformed)
+                            .with_detail(format!("{transform_name} bit value is too large"))
+                    })?
+                    .to_le_bytes(),
+            ),
+            8 => bytes.extend_from_slice(&value.to_le_bytes()),
+            _ => unreachable!("validated element width"),
+        }
     }
     Ok(LegacyEntropyPayload {
         bytes,

@@ -4468,6 +4468,26 @@ fn decodes_v21_fse_deprecated_raw_frame() {
 }
 
 #[test]
+fn decodes_v21_fse_deprecated_bit_frame() {
+    let expected = [0, 1, 2, 3, 4, 5];
+    let payload = legacy_entropy_bit_payload(&[0, 1, 2, 3, 4, 5], 3);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        &payload,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_v21_huffman_deprecated_constant_frame() {
     let expected = vec![b'Z'; 19];
     let payload = legacy_entropy_constant_payload(b"Z", expected.len());
@@ -4488,9 +4508,53 @@ fn decodes_v21_huffman_deprecated_constant_frame() {
 }
 
 #[test]
+fn decodes_v21_huffman_deprecated_multi_frame() {
+    let expected = b"abZZ\x01\x02";
+    let payload = legacy_entropy_multi_payload(&[
+        legacy_entropy_raw_payload(b"ab", 1),
+        legacy_entropy_constant_payload(b"Z", 2),
+        legacy_entropy_bit_payload(&[1, 2], 2),
+    ]);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        &payload,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_huffman_fixed_deprecated_raw_node() {
     let expected = [0x34, 0x12, 0x78, 0x56];
     let payload = legacy_entropy_raw_payload(&expected, 2);
+    let output = decode_huffman_fixed_deprecated_node(
+        StreamInput {
+            bytes: &payload,
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[0, 2],
+        21,
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(output.bytes, expected);
+}
+
+#[test]
+fn decodes_huffman_fixed_deprecated_bit_node() {
+    let expected = [1, 0, 2, 0, 3, 0];
+    let payload = legacy_entropy_bit_payload(&[1, 2, 3], 2);
     let output = decode_huffman_fixed_deprecated_node(
         StreamInput {
             bytes: &payload,
