@@ -18,6 +18,8 @@ id	name	coverage
 17	huffman_fixed_deprecated	unit+inline-frame
 18	sentinel	unit+inline-frame
 19	lz	unit+inline-frame
+20	rolz_deprecated	unit+inline-frame
+21	fastlz_deprecated	unit+inline-frame
 22	zstd	unit+fuzz+interop
 23	zstd_fixed_legacy	unit+inline-frame
 24	field_lz	unit+fuzz

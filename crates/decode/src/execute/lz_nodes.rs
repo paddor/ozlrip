@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
@@ -555,6 +555,83 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
         output.extend_from_within(out_pos..out_pos + len);
         copied += len;
     }
+}
+
+const FASTLZ_DEPRECATED_EMPTY_PAYLOAD: [u8; 4] = [0x03, 0x03, 0x00, 0x00];
+const ROLZ_DEPRECATED_EMPTY_PAYLOAD: [u8; 16] =
+    [2, 12, 4, 3, 1, 7, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0x03];
+
+pub(super) fn decode_fastlz_deprecated_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("fastlz_deprecated headers are unsupported"));
+    }
+    let (decoded_size, payload) =
+        parse_deprecated_lz_stored_stream(source, limits, "fastlz_deprecated")?;
+    if decoded_size != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("fastlz_deprecated non-empty streams are unsupported"));
+    }
+    if payload != FASTLZ_DEPRECATED_EMPTY_PAYLOAD.as_slice() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated empty stream is malformed"));
+    }
+    Ok(Vec::new())
+}
+
+pub(super) fn decode_rolz_deprecated_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated headers are unsupported"));
+    }
+    let (decoded_size, payload) =
+        parse_deprecated_lz_stored_stream(source, limits, "rolz_deprecated")?;
+    if decoded_size != 0 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated non-empty streams are unsupported"));
+    }
+    if payload != ROLZ_DEPRECATED_EMPTY_PAYLOAD.as_slice() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated empty stream is malformed"));
+    }
+    Ok(Vec::new())
+}
+
+fn parse_deprecated_lz_stored_stream<'a>(
+    source: StreamInput<'a>,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<(usize, &'a [u8])> {
+    if source.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail(format!("{transform_name} input must be serial")));
+    }
+    let size_prefix = source.bytes.get(..4).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail("deprecated lz stream is missing size prefix")
+    })?;
+    let decoded_size = usize::try_from(u32::from_le_bytes([
+        size_prefix[0],
+        size_prefix[1],
+        size_prefix[2],
+        size_prefix[3],
+    ]))
+    .map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("deprecated lz output size is too large")
+    })?;
+    if decoded_size > limits.max_decoded_bytes || decoded_size > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok((decoded_size, &source.bytes[4..]))
 }
 
 pub(super) fn decode_field_lz_node(

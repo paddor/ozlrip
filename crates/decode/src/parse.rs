@@ -971,6 +971,8 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::FSE_DEPRECATED_ID
         | standard::HUFFMAN_DEPRECATED_ID
         | standard::HUFFMAN_FIXED_DEPRECATED_ID
+        | standard::ROLZ_DEPRECATED_ID
+        | standard::FASTLZ_DEPRECATED_ID
         | standard::ZSTD_ID
         | standard::ZSTD_FIXED_ID
         | standard::BITPACK_SERIAL_ID

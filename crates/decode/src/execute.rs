@@ -38,7 +38,8 @@ use entropy::{
     decode_huffman_struct_v2_node, decode_huffman_v2_node,
 };
 use lz_nodes::{
-    decode_field_lz_node, decode_field_lz_node_to_output, decode_lz_node, decode_lz_node_to_output,
+    decode_fastlz_deprecated_node, decode_field_lz_node, decode_field_lz_node_to_output,
+    decode_lz_node, decode_lz_node_to_output, decode_rolz_deprecated_node,
 };
 use numeric_nodes::{
     decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
@@ -1305,6 +1306,8 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::FSE_DEPRECATED_ID
         | standard::HUFFMAN_DEPRECATED_ID
         | standard::HUFFMAN_FIXED_DEPRECATED_ID
+        | standard::ROLZ_DEPRECATED_ID
+        | standard::FASTLZ_DEPRECATED_ID
         | standard::LZ4_ID
         | standard::ZSTD_ID
         | standard::ZSTD_FIXED_ID
@@ -1519,6 +1522,16 @@ fn execute_standard_node(
             single_stream(inputs)?,
             header,
             ctx.format_version,
+            ctx.limits,
+        )),
+        standard::ROLZ_DEPRECATED_ID => one_serial(decode_rolz_deprecated_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::FASTLZ_DEPRECATED_ID => one_serial(decode_fastlz_deprecated_node(
+            single_stream(inputs)?,
+            header,
             ctx.limits,
         )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),

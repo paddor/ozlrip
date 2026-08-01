@@ -299,6 +299,21 @@ fn legacy_entropy_constant_payload(value: &[u8], decoded_elements: usize) -> Vec
     output
 }
 
+fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());
+    output.extend_from_slice(payload);
+    output
+}
+
+fn empty_fastlz_deprecated_stream() -> Vec<u8> {
+    deprecated_lz_stored_stream(0, &[0x03, 0x03, 0x00, 0x00])
+}
+
+fn empty_rolz_deprecated_stream() -> Vec<u8> {
+    deprecated_lz_stored_stream(0, &[2, 12, 4, 3, 1, 7, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0x03])
+}
+
 #[cfg(feature = "zstd")]
 fn zstd_stored_stream(decoded: &[u8]) -> Vec<u8> {
     let compressed = zrip::compress(decoded, 1).unwrap();
@@ -634,6 +649,8 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::INTERLEAVE_STRING_ID,
         standard::FLATPACK_ID,
         standard::LZ_ID,
+        standard::ROLZ_DEPRECATED_ID,
+        standard::FASTLZ_DEPRECATED_ID,
         standard::MERGE_SORTED_ID,
         standard::MUX_LENGTHS_ID,
         standard::PARTITION_ID,
@@ -4277,6 +4294,97 @@ fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &[0],
         2,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn decodes_empty_fastlz_deprecated_node() {
+    let stored = empty_fastlz_deprecated_stream();
+    let output = decode_fastlz_deprecated_node(
+        StreamInput {
+            bytes: &stored,
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert!(output.is_empty());
+}
+
+#[test]
+fn decodes_v21_empty_fastlz_deprecated_frame() {
+    let stored = empty_fastlz_deprecated_stream();
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        0,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 0);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn decodes_empty_rolz_deprecated_node() {
+    let stored = empty_rolz_deprecated_stream();
+    let output = decode_rolz_deprecated_node(
+        StreamInput {
+            bytes: &stored,
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert!(output.is_empty());
+}
+
+#[test]
+fn decodes_v21_empty_rolz_deprecated_frame() {
+    let stored = empty_rolz_deprecated_stream();
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        0,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 0);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn rejects_non_empty_fastlz_deprecated_without_mutating_destination() {
+    let stored = deprecated_lz_stored_stream(1, &[0x0b, b'x', 0x03, 0x00, 0x00]);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        1,
         &[],
     );
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
