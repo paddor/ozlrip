@@ -49,7 +49,7 @@ id	name	coverage
 49	fse_v2	unit+inline-frame+fuzz
 50	huffman_v2	unit+inline-frame+fuzz
 51	huffman_struct_v2	unit+inline-frame+fuzz
-52	fse_ncount	unit+inline-frame
+52	fse_ncount	unit+inline-frame+fuzz
 53	divide_by	unit+inline-frame
 54	dispatch_string	unit+fuzz
 55	concat_serial	unit+fuzz
