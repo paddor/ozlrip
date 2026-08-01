@@ -956,6 +956,7 @@ const fn fixed_shape(static_inputs: usize, outputs: usize) -> StandardNodeShape 
 const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
     match id {
         standard::DELTA_INT_ID
+        | standard::TRANSPOSE_ID
         | standard::DIVIDE_BY_ID
         | standard::ZIGZAG_ID
         | standard::CONVERT_STRUCT_TO_NUM_LE_ID

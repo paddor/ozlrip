@@ -3,6 +3,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 pub(crate) const LZ4_ID: u32 = 62;
 pub(crate) const ZSTD_ID: u32 = 22;
 pub(crate) const DELTA_INT_ID: u32 = 1;
+pub(crate) const TRANSPOSE_ID: u32 = 2;
 pub(crate) const CONCAT_SERIAL_ID: u32 = 55;
 pub(crate) const SPLITN_ID: u32 = 40;
 pub(crate) const BITPACK_SERIAL_ID: u32 = 27;

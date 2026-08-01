@@ -1317,6 +1317,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::CONVERT_SERIAL_TO_STRUCT_ID
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::ZIGZAG_ID
+        | standard::TRANSPOSE_ID
         | standard::DEDUP_NUM_ID
         | standard::DELTA_INT_ID
         | standard::DIVIDE_BY_ID
@@ -1486,6 +1487,12 @@ fn execute_standard_node(
         )),
         standard::PREFIX_ID => one_typed(decode_prefix_node(inputs, header, ctx.limits)),
         standard::SENTINEL_ID => one_typed(decode_sentinel_node(inputs, header, ctx.limits)),
+        standard::TRANSPOSE_ID => one_typed(decode_transpose_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+            ctx.scratch,
+        )),
         id if is_transpose_split(id) => one_typed(decode_transpose_split_node(
             inputs,
             variable_inputs,
@@ -2059,6 +2066,45 @@ fn transpose_split_width(id: Option<u32>) -> Option<usize> {
         Some(standard::TRANSPOSE_SPLIT8_ID) => Some(8),
         _ => None,
     }
+}
+
+fn decode_transpose_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+    scratch: &mut DecodeScratch,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("transpose transform headers are unsupported"));
+    }
+    let source_width = source.element_width;
+    if source_width == 0 || !source.bytes.len().is_multiple_of(source_width) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("transpose input size is not a multiple of width"));
+    }
+    let output_len = source.bytes.len();
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let source_elements = source.bytes.len() / source_width;
+    let output_width = if source_elements == 0 {
+        source_width
+    } else {
+        source_elements
+    };
+    let mut output = scratch.take_byte_buffer(output_len, "transpose allocation failed")?;
+    output.resize(output_len, 0);
+    for output_element in 0..source_width {
+        for output_byte in 0..source_elements {
+            output[output_element * output_width + output_byte] =
+                source.bytes[output_byte * source_width + output_element];
+        }
+    }
+    Ok(OwnedStream::pooled(output, output_width))
 }
 
 fn decode_transpose_split_node(

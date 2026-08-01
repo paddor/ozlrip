@@ -624,6 +624,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::TOKENIZE_FIXED_ID,
         standard::TOKENIZE_NUMERIC_ID,
         standard::TOKENIZE_STRING_ID,
+        standard::TRANSPOSE_ID,
         standard::TRANSPOSE_SPLIT_ID,
         standard::TRANSPOSE_SPLIT2_ID,
         standard::TRANSPOSE_SPLIT4_ID,
@@ -3334,6 +3335,56 @@ fn rejects_flatpack_output_limit_without_mutating_destination() {
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn decodes_transpose_node() {
+    let mut scratch = DecodeScratch::new();
+    let output = decode_transpose_node(
+        StreamInput {
+            bytes: b"13572468",
+            element_width: 4,
+            string_lengths: None,
+        },
+        &[],
+        Limits::default(),
+        &mut scratch,
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(output.bytes, b"12345678");
+}
+
+#[test]
+fn decodes_v21_transpose_graph() {
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        8,
+        &[
+            StandardGraphNode {
+                transform_id: standard::BITPACK_INT_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[0x9f],
+            },
+            StandardGraphNode {
+                transform_id: standard::TRANSPOSE_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"13572468"],
+        &[0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 8);
+    assert_eq!(output, b"12345678");
 }
 
 #[test]

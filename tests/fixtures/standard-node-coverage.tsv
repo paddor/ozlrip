@@ -1,5 +1,6 @@
 id	name	coverage
 1	delta_int	unit+fuzz
+2	transpose	unit+inline-frame
 3	zigzag	unit+fuzz
 4	transpose_split	unit+fuzz
 5	convert_serial_to_struct	unit+fuzz
