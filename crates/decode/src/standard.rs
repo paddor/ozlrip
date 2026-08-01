@@ -11,6 +11,7 @@ pub(crate) const BITUNPACK_ID: u32 = 34;
 pub(crate) const RANGE_PACK_ID: u32 = 35;
 pub(crate) const TOKENIZE_FIXED_ID: u32 = 36;
 pub(crate) const TOKENIZE_NUMERIC_ID: u32 = 37;
+pub(crate) const TOKENIZE_STRING_ID: u32 = 38;
 pub(crate) const SPLIT_BY_STRUCT_ID: u32 = 41;
 pub(crate) const DISPATCH_N_BY_TAG_ID: u32 = 42;
 pub(crate) const MERGE_SORTED_ID: u32 = 43;

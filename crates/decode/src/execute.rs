@@ -1288,6 +1288,7 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
+        | standard::TOKENIZE_STRING_ID
         | standard::PREFIX_ID
         | standard::TRANSPOSE_SPLIT2_ID
         | standard::PIVCO_HUFFMAN_ID
@@ -1620,6 +1621,9 @@ fn execute_standard_node(
         standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, ctx.limits)),
         standard::TOKENIZE_FIXED_ID | standard::TOKENIZE_NUMERIC_ID => {
             one_typed(decode_tokenize_fixed_node(inputs, header, ctx.limits))
+        }
+        standard::TOKENIZE_STRING_ID => {
+            one_typed(decode_tokenize_string_node(inputs, header, ctx.limits))
         }
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform graph execution is not implemented yet")),
@@ -3496,6 +3500,122 @@ fn decode_tokenize_fixed_node(
         bytes: output,
         element_width,
         string_lengths: None,
+        recyclable: false,
+    })
+}
+
+fn decode_tokenize_string_node(
+    inputs: &[StreamInput<'_>],
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("tokenize_string headers are unsupported"));
+    }
+    let [alphabet, indices] = inputs else {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("tokenize_string input count does not match node shape"));
+    };
+    if alphabet.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("tokenize_string alphabet must be byte strings"));
+    }
+    let alphabet_lengths = alphabet.string_lengths.ok_or_else(|| {
+        Error::new(ErrorKind::InvalidType)
+            .with_detail("tokenize_string alphabet is missing string lengths")
+    })?;
+    if checked_sum_u32(alphabet_lengths)? != alphabet.bytes.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("tokenize_string alphabet lengths do not sum to content size"));
+    }
+    validate_numeric_stream_width(indices.element_width, "tokenize_string indices")?;
+
+    let alphabet_size = alphabet_lengths.len();
+    let output_elements = numeric_element_count(indices.bytes, indices.element_width)?;
+    if alphabet_size == 0 {
+        if output_elements == 0 {
+            return Ok(OwnedStream {
+                bytes: Vec::new(),
+                element_width: 1,
+                string_lengths: Some(Vec::new()),
+                recyclable: false,
+            });
+        }
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_string alphabet is empty")
+        );
+    }
+    if output_elements < alphabet_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("tokenize_string output count is smaller than alphabet"));
+    }
+
+    let mut starts = Vec::new();
+    starts.try_reserve_exact(alphabet_size).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("tokenize_string alphabet allocation failed")
+    })?;
+    let mut offset = 0usize;
+    for &len in alphabet_lengths {
+        starts.push(offset);
+        let len = usize::try_from(len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length is too large")
+        })?;
+        offset = offset
+            .checked_add(len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+
+    let mut output_len = 0usize;
+    for index in 0..output_elements {
+        let token = read_usize_numeric_element(indices.bytes, indices.element_width, index)?;
+        let &token_len = alphabet_lengths.get(token).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_string index is out of range")
+        })?;
+        let token_len = usize::try_from(token_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length is too large")
+        })?;
+        output_len = output_len
+            .checked_add(token_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    }
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize_string allocation failed")
+    })?;
+    let mut lengths = Vec::new();
+    lengths.try_reserve_exact(output_elements).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize_string length allocation failed")
+    })?;
+
+    for index in 0..output_elements {
+        let token = read_usize_numeric_element(indices.bytes, indices.element_width, index)?;
+        let start = starts[token];
+        let len = alphabet_lengths[token];
+        let len_usize = usize::try_from(len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("string length is too large")
+        })?;
+        let end = start
+            .checked_add(len_usize)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let token_bytes = alphabet.bytes.get(start..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("tokenize_string alphabet is truncated")
+        })?;
+        bytes.extend_from_slice(token_bytes);
+        lengths.push(len);
+    }
+
+    Ok(OwnedStream {
+        bytes,
+        element_width: 1,
+        string_lengths: Some(lengths),
         recyclable: false,
     })
 }

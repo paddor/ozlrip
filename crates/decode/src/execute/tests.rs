@@ -622,6 +622,7 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::SPLIT_BY_STRUCT_ID,
         standard::TOKENIZE_FIXED_ID,
         standard::TOKENIZE_NUMERIC_ID,
+        standard::TOKENIZE_STRING_ID,
         standard::TRANSPOSE_SPLIT_ID,
         standard::TRANSPOSE_SPLIT2_ID,
         standard::TRANSPOSE_SPLIT4_ID,
@@ -3436,6 +3437,73 @@ fn decodes_v21_tokenize_numeric_graph() {
 
     assert_eq!(written, 3);
     assert_eq!(output, b"xyw");
+}
+
+#[test]
+fn decodes_tokenize_string_node() {
+    let alphabet_lengths = [1, 2, 0];
+    let output = decode_tokenize_string_node(
+        &[
+            StreamInput {
+                bytes: b"aBB",
+                element_width: 1,
+                string_lengths: Some(&alphabet_lengths),
+            },
+            StreamInput {
+                bytes: &[1, 0, 1, 2],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[],
+        Limits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(output.element_width, 1);
+    assert_eq!(output.bytes, b"BBaBB");
+    assert_eq!(
+        output.string_lengths.as_deref(),
+        Some([2, 1, 2, 0].as_slice())
+    );
+}
+
+#[test]
+fn decodes_v21_tokenize_string_graph() {
+    let alphabet_lengths = [1, 2, 0];
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        5,
+        &[
+            StandardGraphNode {
+                transform_id: standard::SEPARATE_STRING_COMPONENTS_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::TOKENIZE_STRING_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRING_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[&[1, 0, 1, 2], b"aBB", &alphabet_lengths],
+        &[1, 0, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 5);
+    assert_eq!(output, b"BBaBB");
 }
 
 #[test]

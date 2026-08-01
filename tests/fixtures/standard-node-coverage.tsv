@@ -29,6 +29,7 @@ id	name	coverage
 35	range_pack	unit+fuzz
 36	tokenize_fixed	unit+inline-frame
 37	tokenize_numeric	unit+inline-frame
+38	tokenize_string	unit+inline-frame
 40	splitn	unit+fuzz
 41	split_by_struct	unit+fuzz
 42	dispatch_n_by_tag	unit+fuzz

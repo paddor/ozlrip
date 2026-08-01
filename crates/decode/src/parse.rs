@@ -987,6 +987,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
+        | standard::TOKENIZE_STRING_ID
         | standard::PREFIX_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
