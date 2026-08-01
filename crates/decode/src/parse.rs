@@ -956,6 +956,7 @@ const fn fixed_shape(static_inputs: usize, outputs: usize) -> StandardNodeShape 
 const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
     match id {
         standard::DELTA_INT_ID
+        | standard::TRANSPOSE_ID
         | standard::DIVIDE_BY_ID
         | standard::ZIGZAG_ID
         | standard::CONVERT_STRUCT_TO_NUM_LE_ID
@@ -967,7 +968,13 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::CONVERT_STRUCT_TO_NUM_BE_ID
         | standard::CONVERT_SERIAL_TO_NUM_BE_ID
+        | standard::FSE_DEPRECATED_ID
+        | standard::HUFFMAN_DEPRECATED_ID
+        | standard::HUFFMAN_FIXED_DEPRECATED_ID
+        | standard::ROLZ_DEPRECATED_ID
+        | standard::FASTLZ_DEPRECATED_ID
         | standard::ZSTD_ID
+        | standard::ZSTD_FIXED_ID
         | standard::BITPACK_SERIAL_ID
         | standard::BITPACK_INT_ID
         | standard::BITUNPACK_ID
@@ -978,13 +985,17 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::FSE_NCOUNT_ID
         | standard::LZ4_ID => Some(fixed_shape(1, 1)),
         standard::FLATPACK_ID
+        | standard::FLOAT_DECONSTRUCT_ID
         | standard::FSE_V2_ID
         | standard::HUFFMAN_V2_ID
+        | standard::HUFFMAN_STRUCT_V2_ID
+        | standard::MERGE_SORTED_ID
         | standard::QUANTIZE_OFFSETS_ID
         | standard::QUANTIZE_LENGTHS_ID
         | standard::PARTITION_ID
         | standard::TOKENIZE_FIXED_ID
         | standard::TOKENIZE_NUMERIC_ID
+        | standard::TOKENIZE_STRING_ID
         | standard::PREFIX_ID
         | standard::SENTINEL_ID
         | standard::TRANSPOSE_SPLIT2_ID
@@ -1012,15 +1023,16 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
             min_outputs: 1,
             max_outputs: Some(1),
         }),
-        standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
-            Some(StandardNodeShape {
-                static_inputs: 2,
-                allows_variable_inputs: false,
-                min_outputs: 1,
-                max_outputs: None,
-            })
-        }
-        standard::DEDUP_NUM_ID => Some(StandardNodeShape {
+        standard::CONCAT_SERIAL_ID
+        | standard::CONCAT_NUM_ID
+        | standard::CONCAT_STRUCT_ID
+        | standard::CONCAT_STRING_ID => Some(StandardNodeShape {
+            static_inputs: 2,
+            allows_variable_inputs: false,
+            min_outputs: 1,
+            max_outputs: None,
+        }),
+        standard::DEDUP_NUM_ID | standard::INTERLEAVE_STRING_ID => Some(StandardNodeShape {
             static_inputs: 1,
             allows_variable_inputs: false,
             min_outputs: 1,

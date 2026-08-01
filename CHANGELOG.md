@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0]
+
 - Decode OpenZL `prefix` string reconstruction nodes.
 - Decode OpenZL `dedup_num` nodes that regenerate multiple numeric streams.
 - Decode OpenZL `divide_by` numeric nodes with checked reconstruction.
