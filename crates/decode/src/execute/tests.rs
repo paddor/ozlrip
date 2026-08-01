@@ -4723,13 +4723,13 @@ fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
 }
 
 #[test]
-fn rejects_rolz_deprecated_rolz_match_without_mutating_destination() {
+fn decodes_v21_rolz_deprecated_rolz_sequence_frame() {
     let stored = rolz_deprecated_stream(
+        8,
         5,
-        2,
-        &legacy_entropy_raw_payload(b"ab", 1),
+        &legacy_entropy_raw_payload(b"abcab", 1),
         &[1],
-        &[2],
+        &[5],
         &[0],
         &[0],
     );
@@ -4737,16 +4737,16 @@ fn rejects_rolz_deprecated_rolz_match_without_mutating_destination() {
         21,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
-        5,
+        8,
         &[],
     );
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
-    let mut output = vec![1, 2];
+    let mut output = Vec::new();
 
-    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
 
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(output, [1, 2]);
+    assert_eq!(written, 8);
+    assert_eq!(output, b"abcabcab");
 }
 
 #[test]

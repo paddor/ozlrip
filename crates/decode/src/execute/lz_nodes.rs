@@ -673,6 +673,19 @@ struct RolzDeprecatedPayload<'a> {
     match_codes: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct RolzDeprecatedTableEntry {
+    index: usize,
+    predicted_match_length: u8,
+}
+
+struct RolzDeprecatedTable {
+    heads: Vec<usize>,
+    entries: Vec<RolzDeprecatedTableEntry>,
+    row_log: usize,
+    row_mask: usize,
+}
+
 const ROLZ_DEPRECATED_PARAMS: RolzDeprecatedParams = RolzDeprecatedParams {
     context_depth: 2,
     context_log: 12,
@@ -702,6 +715,123 @@ const ROLZ_DEPRECATED_VALUE_BITS: [u8; 59] = [
     30, 31,
 ];
 
+impl RolzDeprecatedTable {
+    fn new(params: RolzDeprecatedParams, limits: Limits) -> Result<Self> {
+        let contexts = 1usize
+            .checked_shl(u32::try_from(params.context_log).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated context log is too large")
+            })?)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated context table is too large")
+            })?;
+        let row_size = 1usize
+            .checked_shl(u32::try_from(params.row_log).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated row log is too large")
+            })?)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated row table is too large")
+            })?;
+        let entries_len = contexts
+            .checked_mul(row_size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let entry_limit = limits
+            .max_buffer_bytes
+            .checked_div(core::mem::size_of::<RolzDeprecatedTableEntry>().max(1))
+            .unwrap_or(0);
+        if entries_len > entry_limit {
+            return Err(Error::new(ErrorKind::LimitExceeded)
+                .with_detail("rolz_deprecated table exceeds buffer limit"));
+        }
+
+        let mut heads = Vec::new();
+        heads.try_reserve_exact(contexts).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail("rolz_deprecated head table allocation failed")
+        })?;
+        heads.resize(contexts, 0);
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(entries_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail("rolz_deprecated table allocation failed")
+        })?;
+        entries.resize(entries_len, RolzDeprecatedTableEntry::default());
+        Ok(Self {
+            heads,
+            entries,
+            row_log: params.row_log,
+            row_mask: row_size - 1,
+        })
+    }
+
+    fn get(
+        &self,
+        context: usize,
+        index: usize,
+        encoded_match_length: usize,
+        params: RolzDeprecatedParams,
+    ) -> Result<(usize, usize)> {
+        if index > self.row_mask {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match code is invalid"));
+        }
+        let row_start = context
+            .checked_shl(u32::try_from(self.row_log).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated row log is too large")
+            })?)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let head = *self
+            .heads
+            .get(context)
+            .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
+        let pos = row_start
+            .checked_add((head + index) & self.row_mask)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let entry = *self.entries.get(pos).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated table index is invalid")
+        })?;
+        if entry.index == 0 {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match index is invalid"));
+        }
+        let match_length = rolz_deprecated_decode_match_length(
+            params.min_length,
+            usize::from(entry.predicted_match_length),
+            encoded_match_length,
+        )?;
+        Ok((entry.index - 1, match_length))
+    }
+
+    fn put(&mut self, context: usize, index: usize, match_length: usize) -> Result<()> {
+        let head = self
+            .heads
+            .get_mut(context)
+            .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
+        let pos_in_row = head.wrapping_sub(1) & self.row_mask;
+        *head = pos_in_row;
+        let row_start = context
+            .checked_shl(u32::try_from(self.row_log).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated row log is too large")
+            })?)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let pos = row_start
+            .checked_add(pos_in_row)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let entry = self.entries.get_mut(pos).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated table index is invalid")
+        })?;
+        entry.index = index;
+        entry.predicted_match_length = u8::try_from(match_length.min(usize::from(u8::MAX)))
+            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        Ok(())
+    }
+}
+
 pub(super) fn decode_fastlz_deprecated_node(
     source: StreamInput<'_>,
     header: &[u8],
@@ -729,7 +859,7 @@ pub(super) fn decode_rolz_deprecated_node(
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "rolz_deprecated")?;
     let payload = parse_rolz_deprecated_payload(payload, limits)?;
-    decode_rolz_deprecated_payload(payload, decoded_size)
+    decode_rolz_deprecated_payload(payload, decoded_size, limits)
 }
 
 fn parse_fastlz_deprecated_payload(payload: &[u8]) -> Result<FastLzDeprecatedPayload<'_>> {
@@ -1064,6 +1194,7 @@ fn parse_rolz_deprecated_params(header: &[u8]) -> Result<RolzDeprecatedParams> {
 fn decode_rolz_deprecated_payload(
     payload: RolzDeprecatedPayload<'_>,
     decoded_size: usize,
+    limits: Limits,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     output.try_reserve_exact(decoded_size).map_err(|_| {
@@ -1071,24 +1202,51 @@ fn decode_rolz_deprecated_payload(
     })?;
     let mut literals = LegacyLiteralCursor::new(payload.literals);
     let mut reps = ROLZ_DEPRECATED_INITIAL_REPS;
+    let mut table = if payload
+        .match_types
+        .contains(&ROLZ_DEPRECATED_MATCH_TYPE_ROLZ)
+    {
+        Some(RolzDeprecatedTable::new(payload.params, limits)?)
+    } else {
+        None
+    };
 
     for index in 0..payload.match_types.len() {
+        let literal_start = output.len();
         append_rolz_deprecated_literals(
             &mut literals,
             &mut output,
             payload.literal_lengths[index],
             decoded_size,
         )?;
+        if let Some(table) = table.as_mut() {
+            insert_rolz_deprecated_literals(
+                table,
+                &output,
+                literal_start,
+                payload.literal_lengths[index],
+                payload.params,
+            )?;
+        }
         let match_type = payload.match_types[index];
         let match_code = payload.match_codes[index];
         let match_len = payload.match_lengths[index];
-        let (match_offset, match_len) = resolve_rolz_deprecated_match(
-            match_type,
-            match_code,
-            match_len,
-            payload.params,
-            &reps,
-        )?;
+        let match_start = output.len();
+        let (match_offset, match_len) = if match_type == ROLZ_DEPRECATED_MATCH_TYPE_ROLZ {
+            let table = table
+                .as_ref()
+                .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
+            resolve_rolz_deprecated_rolz_match(
+                table,
+                &output,
+                match_start,
+                match_code,
+                match_len,
+                payload.params,
+            )?
+        } else {
+            resolve_rolz_deprecated_match(match_type, match_code, match_len, payload.params, &reps)?
+        };
         if match_offset == 0 {
             return Err(
                 Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated offset is zero")
@@ -1107,8 +1265,28 @@ fn decode_rolz_deprecated_payload(
                 .with_detail("rolz_deprecated match length exceeds output size"));
         }
         update_rolz_deprecated_reps(&mut reps, match_type, match_code, match_offset)?;
-        let out_pos = output.len();
-        append_lz_match(&mut output, out_pos, match_offset, match_len);
+        if match_type == ROLZ_DEPRECATED_MATCH_TYPE_ROLZ
+            && let Some(table) = table.as_mut()
+        {
+            let context = rolz_deprecated_context(&output, match_start, payload.params)?;
+            table.put(
+                context,
+                rolz_deprecated_output_index(match_start)?,
+                match_len,
+            )?;
+        }
+        append_lz_match(&mut output, match_start, match_offset, match_len);
+        if match_type != ROLZ_DEPRECATED_MATCH_TYPE_ROLZ
+            && let Some(table) = table.as_mut()
+        {
+            insert_rolz_deprecated_lz_match(
+                table,
+                &output,
+                match_start,
+                match_len,
+                payload.params,
+            )?;
+        }
     }
 
     let remaining_literals = literals.remaining_len()?;
@@ -1141,6 +1319,72 @@ fn append_rolz_deprecated_literals(
     literals.extend_next(len, output)
 }
 
+fn insert_rolz_deprecated_literals(
+    table: &mut RolzDeprecatedTable,
+    output: &[u8],
+    start: usize,
+    len: usize,
+    params: RolzDeprecatedParams,
+) -> Result<()> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let first = start.max(params.context_depth);
+    for pos in first..end {
+        let context = rolz_deprecated_context(output, pos, params)?;
+        table.put(context, rolz_deprecated_output_index(pos)?, 0)?;
+    }
+    Ok(())
+}
+
+fn insert_rolz_deprecated_lz_match(
+    table: &mut RolzDeprecatedTable,
+    output: &[u8],
+    match_start: usize,
+    match_len: usize,
+    params: RolzDeprecatedParams,
+) -> Result<()> {
+    if match_start < params.context_depth {
+        return Ok(());
+    }
+    let context = rolz_deprecated_context(output, match_start, params)?;
+    table.put(
+        context,
+        rolz_deprecated_output_index(match_start)?,
+        match_len,
+    )?;
+    let next_pos = match_start
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let context = rolz_deprecated_context(output, next_pos, params)?;
+    table.put(
+        context,
+        rolz_deprecated_output_index(next_pos)?,
+        match_len - 1,
+    )
+}
+
+fn resolve_rolz_deprecated_rolz_match(
+    table: &RolzDeprecatedTable,
+    output: &[u8],
+    match_start: usize,
+    match_code: usize,
+    encoded_match_len: usize,
+    params: RolzDeprecatedParams,
+) -> Result<(usize, usize)> {
+    let context = rolz_deprecated_context(output, match_start, params)?;
+    let (match_pos, match_len) = table.get(context, match_code, encoded_match_len, params)?;
+    if match_pos >= match_start {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated match index is invalid")
+        );
+    }
+    let match_offset = match_start
+        .checked_sub(match_pos)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    Ok((match_offset, match_len))
+}
+
 fn resolve_rolz_deprecated_match(
     match_type: u8,
     match_code: usize,
@@ -1159,8 +1403,8 @@ fn resolve_rolz_deprecated_match(
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             Ok((match_code, match_len))
         }
-        ROLZ_DEPRECATED_MATCH_TYPE_ROLZ => Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated rolz matches are unsupported")),
+        ROLZ_DEPRECATED_MATCH_TYPE_ROLZ => Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated rolz match used non-rolz resolver")),
         ROLZ_DEPRECATED_MATCH_TYPE_REP0 | ROLZ_DEPRECATED_MATCH_TYPE_REP => {
             if match_code & 3 == 3 {
                 return Err(Error::new(ErrorKind::Malformed)
@@ -1199,6 +1443,65 @@ fn rolz_deprecated_rep_offset(match_code: usize, reps: &[usize; 3]) -> Result<us
                     .with_detail("rolz_deprecated rep offset is invalid")
             })
     }
+}
+
+fn rolz_deprecated_decode_match_length(
+    min_length: usize,
+    expected: usize,
+    encoded: usize,
+) -> Result<usize> {
+    let encoded_plus_min = encoded
+        .checked_add(min_length)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if encoded_plus_min
+        >= expected
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
+    {
+        return Ok(encoded_plus_min);
+    }
+    if encoded >= 1 {
+        return encoded_plus_min
+            .checked_sub(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow));
+    }
+    expected
+        .checked_add(encoded)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn rolz_deprecated_output_index(position: usize) -> Result<usize> {
+    position
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+fn rolz_deprecated_context(
+    output: &[u8],
+    position: usize,
+    params: RolzDeprecatedParams,
+) -> Result<usize> {
+    if params.context_depth != 2 || params.context_log > 32 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("rolz_deprecated parameters are unsupported"));
+    }
+    let context_start = position.checked_sub(params.context_depth).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated context is unavailable")
+    })?;
+    let context = output.get(context_start..position).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated context is unavailable")
+    })?;
+    let value = u32::from(u16::from_le_bytes([context[0], context[1]]));
+    let hash = value
+        .wrapping_shl(16)
+        .wrapping_mul(506_832_829)
+        .wrapping_shr(
+            32 - u32::try_from(params.context_log).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded)
+                    .with_detail("rolz_deprecated context log is too large")
+            })?,
+        );
+    usize::try_from(hash).map_err(|_| Error::new(ErrorKind::IntegerOverflow))
 }
 
 fn update_rolz_deprecated_reps(
