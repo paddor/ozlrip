@@ -733,6 +733,7 @@ const ROLZ_DEPRECATED_MATCH_TYPE_LZ: u8 = 0;
 const ROLZ_DEPRECATED_MATCH_TYPE_ROLZ: u8 = 1;
 const ROLZ_DEPRECATED_MATCH_TYPE_REP0: u8 = 2;
 const ROLZ_DEPRECATED_MATCH_TYPE_REP: u8 = 3;
+const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
 const ROLZ_DEPRECATED_VALUE_BASE: [usize; 59] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 30, 31, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000,
@@ -2000,6 +2001,24 @@ fn parse_legacy_literal_entropy_payload<'a>(
     limits: Limits,
     transform_name: &str,
 ) -> Result<LegacyLiteralPayload<'a>> {
+    parse_legacy_literal_entropy_payload_internal(
+        source,
+        offset,
+        element_width,
+        limits,
+        transform_name,
+        LEGACY_ENTROPY_MAX_DEPTH,
+    )
+}
+
+fn parse_legacy_literal_entropy_payload_internal<'a>(
+    source: &'a [u8],
+    offset: &mut usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<LegacyLiteralPayload<'a>> {
     let header = *source.get(*offset).ok_or_else(|| {
         Error::new(ErrorKind::Truncated)
             .with_detail(format!("{transform_name} entropy header is truncated"))
@@ -2062,11 +2081,68 @@ fn parse_legacy_literal_entropy_payload<'a>(
             *offset = end;
             Ok(LegacyLiteralPayload::Raw(payload))
         }
+        5 => decode_legacy_multi_entropy_payload(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            limits,
+            transform_name,
+            max_depth,
+        )
+        .map(LegacyLiteralPayload::Decoded),
         6 | 7 => Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy mode is reserved"))),
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail(format!("{transform_name} entropy mode is unsupported"))),
     }
+}
+
+fn decode_legacy_multi_entropy_payload(
+    source: &[u8],
+    offset: &mut usize,
+    blocks: usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<Vec<u8>> {
+    if max_depth == 0 {
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail(format!(
+            "{transform_name} multi entropy depth exceeds limit"
+        )));
+    }
+    if blocks > limits.max_buffer_bytes {
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail(format!(
+            "{transform_name} multi entropy block count exceeds buffer limit"
+        )));
+    }
+    let mut output = Vec::new();
+    for _ in 0..blocks {
+        let block = parse_legacy_literal_entropy_payload_internal(
+            source,
+            offset,
+            element_width,
+            limits,
+            transform_name,
+            max_depth - 1,
+        )?;
+        let block_len = block.byte_len()?;
+        let output_len = output
+            .len()
+            .checked_add(block_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if output_len > limits.max_buffer_bytes {
+            return Err(Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} exceeds buffer limit")));
+        }
+        output.try_reserve_exact(block_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} allocation failed"))
+        })?;
+        append_legacy_literal_payload(block, &mut output);
+    }
+    Ok(output)
 }
 
 fn decode_legacy_bit_entropy_payload(
@@ -2286,16 +2362,7 @@ fn read_deprecated_lz_sized_slice<'a>(
     Ok(slice)
 }
 
-fn copy_deprecated_lz_literals(
-    literals: LegacyLiteralPayload<'_>,
-    transform_name: &str,
-) -> Result<Vec<u8>> {
-    let output_len = literals.byte_len()?;
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
-            .with_detail(format!("{transform_name} allocation failed"))
-    })?;
+fn append_legacy_literal_payload(literals: LegacyLiteralPayload<'_>, output: &mut Vec<u8>) {
     match literals {
         LegacyLiteralPayload::Raw(bytes) => output.extend_from_slice(bytes),
         LegacyLiteralPayload::Decoded(bytes) => output.extend_from_slice(&bytes),
@@ -2309,6 +2376,19 @@ fn copy_deprecated_lz_literals(
             }
         }
     }
+}
+
+fn copy_deprecated_lz_literals(
+    literals: LegacyLiteralPayload<'_>,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
+    let output_len = literals.byte_len()?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    append_legacy_literal_payload(literals, &mut output);
     Ok(output)
 }
 

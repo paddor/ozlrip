@@ -307,6 +307,19 @@ fn legacy_entropy_bit_payload(values: &[u64], bits: u8) -> Vec<u8> {
     output
 }
 
+fn legacy_entropy_multi_payload(blocks: &[Vec<u8>]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.push(5 | (u8::try_from(blocks.len() & 0x0f).unwrap() << 3));
+    if blocks.len() > 0x0f {
+        output[0] |= 0x80;
+        push_var_u64(&mut output, u64::try_from(blocks.len() >> 4).unwrap());
+    }
+    for block in blocks {
+        output.extend_from_slice(block);
+    }
+    output
+}
+
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());
@@ -4632,6 +4645,30 @@ fn decodes_v21_fastlz_deprecated_bit_literals_frame() {
 }
 
 #[test]
+fn decodes_v21_fastlz_deprecated_multi_literals_frame() {
+    let expected = b"ab\x00\x01\x02";
+    let literal_entropy = legacy_entropy_multi_payload(&[
+        legacy_entropy_raw_payload(b"ab", 1),
+        legacy_entropy_bit_payload(&[0, 1, 2], 2),
+    ]);
+    let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
     let literals = b"abcdefghijklmnop!";
     let token = 1u16.to_le_bytes();
@@ -4890,6 +4927,38 @@ fn decodes_v21_rolz_deprecated_bit_match_type_frame() {
         0,
         &legacy_entropy_raw_payload(literals, 1),
         &legacy_entropy_bit_payload(&[0], 1),
+        &[0],
+        &[33],
+        &[0],
+        &[33],
+    );
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        41,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, 41);
+    assert_eq!(output, b"abcdefghijklmnopqrstuvwxyzABCDEFGabcdefg!");
+}
+
+#[test]
+fn decodes_v21_rolz_deprecated_multi_match_type_frame() {
+    let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
+    let match_type_entropy =
+        legacy_entropy_multi_payload(&[legacy_entropy_constant_payload(&[0], 1)]);
+    let stored = rolz_deprecated_stream_with_entropy(
+        41,
+        literals.len(),
+        0,
+        &legacy_entropy_raw_payload(literals, 1),
+        &match_type_entropy,
         &[0],
         &[33],
         &[0],
