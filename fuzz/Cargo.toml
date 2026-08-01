@@ -161,6 +161,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_entropy_v2_node"
+path = "fuzz_targets/decode_entropy_v2_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_pivco_huffman_node"
 path = "fuzz_targets/decode_pivco_huffman_node.rs"
 test = false
