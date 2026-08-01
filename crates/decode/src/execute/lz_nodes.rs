@@ -2128,6 +2128,10 @@ fn decode_legacy_multi_entropy_payload(
             max_depth - 1,
         )?;
         let block_len = block.byte_len()?;
+        if block_len == 0 {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} multi entropy block is empty")));
+        }
         let output_len = output
             .len()
             .checked_add(block_len)
@@ -2158,7 +2162,7 @@ fn decode_legacy_bit_entropy_payload(
         Error::new(ErrorKind::IntegerOverflow)
             .with_detail(format!("{transform_name} element width is too large"))
     })?;
-    if !matches!(element_width, 1 | 2 | 4 | 8) || num_bits > max_bits {
+    if !matches!(element_width, 1 | 2 | 4 | 8) || num_bits >= max_bits {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} bit width is invalid")));
     }

@@ -4610,6 +4610,44 @@ fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
 }
 
 #[test]
+fn rejects_deprecated_entropy_full_width_bit_mode_without_mutating_destination() {
+    let payload = legacy_entropy_bit_payload(&[0], 8);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        &payload,
+        1,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn rejects_deprecated_entropy_empty_multi_block_without_mutating_destination() {
+    let payload = legacy_entropy_multi_payload(&[legacy_entropy_raw_payload(&[], 1)]);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        &payload,
+        0,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
 fn decodes_empty_fastlz_deprecated_node() {
     let stored = empty_fastlz_deprecated_stream();
     let output = decode_fastlz_deprecated_node(
@@ -5141,6 +5179,46 @@ fn rejects_fastlz_deprecated_short_offset_without_mutating_destination() {
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         33,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn rejects_fastlz_deprecated_full_width_bit_literals_without_mutating_destination() {
+    let literal_entropy = legacy_entropy_bit_payload(&[0], 8);
+    let stored = fastlz_deprecated_literal_entropy_stream(1, &literal_entropy);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        1,
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+#[test]
+fn rejects_fastlz_deprecated_empty_multi_block_without_mutating_destination() {
+    let literal_entropy = legacy_entropy_multi_payload(&[legacy_entropy_raw_payload(&[], 1)]);
+    let stored = fastlz_deprecated_literal_entropy_stream(0, &literal_entropy);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        0,
         &[],
     );
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
