@@ -10,7 +10,7 @@ use zrip_core::{
     huffman::{HuffmanDecodeEntry, decode},
 };
 
-use super::{OwnedStream, StreamInput, numeric_element_count, require_numeric_width};
+use super::{OwnedStream, StreamInput, numeric_element_count, read_var_u64, require_numeric_width};
 
 pub(super) fn decode_fse_ncount_node(
     source: StreamInput<'_>,
@@ -60,6 +60,278 @@ pub(super) fn decode_fse_ncount_node(
         output.extend_from_slice(&count.to_le_bytes());
     }
     Ok(OwnedStream::typed(output, 2))
+}
+
+pub(super) fn decode_fse_deprecated_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    require_legacy_serial_input(source, "fse_deprecated")?;
+    match header {
+        [] => {}
+        [2 | 4] => {}
+        [_] => {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("fse_deprecated state count is unsupported"));
+        }
+        _ => {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("fse_deprecated header is malformed")
+            );
+        }
+    }
+    decode_legacy_entropy_payload(source.bytes, 1, limits, "fse_deprecated")
+        .map(|payload| payload.bytes)
+}
+
+pub(super) fn decode_huffman_deprecated_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    require_legacy_serial_input(source, "huffman_deprecated")?;
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("huffman_deprecated headers are unsupported"));
+    }
+    decode_legacy_entropy_payload(source.bytes, 1, limits, "huffman_deprecated")
+        .map(|payload| payload.bytes)
+}
+
+pub(super) fn decode_huffman_fixed_deprecated_node(
+    source: StreamInput<'_>,
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    require_legacy_serial_input(source, "huffman_fixed_deprecated")?;
+    let parsed = parse_huffman_fixed_deprecated_header(header, format_version)?;
+    let entropy_width = if parsed.is_transposed {
+        1
+    } else {
+        parsed.element_width
+    };
+    let payload = decode_legacy_entropy_payload(
+        source.bytes,
+        entropy_width,
+        limits,
+        "huffman_fixed_deprecated",
+    )?;
+    if parsed.is_transposed
+        && !payload
+            .decoded_elements
+            .is_multiple_of(parsed.element_width)
+    {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("huffman_fixed_deprecated transposed size is invalid"));
+    }
+    Ok(OwnedStream::typed(payload.bytes, parsed.element_width))
+}
+
+struct HuffmanFixedDeprecatedHeader {
+    is_transposed: bool,
+    element_width: usize,
+}
+
+fn parse_huffman_fixed_deprecated_header(
+    header: &[u8],
+    format_version: u32,
+) -> Result<HuffmanFixedDeprecatedHeader> {
+    if header.len() < 2 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("huffman_fixed_deprecated header is malformed"));
+    }
+    let is_transposed = header[0] != 0;
+    let mut offset = 1usize;
+    let element_width = usize::try_from(read_var_u64(header, &mut offset)?).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("huffman_fixed_deprecated element width is too large")
+    })?;
+    if offset != header.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("huffman_fixed_deprecated header has trailing bytes"));
+    }
+    if element_width == 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("huffman_fixed_deprecated element width is zero"));
+    }
+    if format_version >= 11 && element_width > 2 {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("huffman_fixed_deprecated element width is unsupported"));
+    }
+    Ok(HuffmanFixedDeprecatedHeader {
+        is_transposed,
+        element_width,
+    })
+}
+
+struct LegacyEntropyPayload {
+    bytes: Vec<u8>,
+    decoded_elements: usize,
+}
+
+fn decode_legacy_entropy_payload(
+    source: &[u8],
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    validate_legacy_entropy_width(element_width, transform_name)?;
+    if source.is_empty() {
+        return Ok(LegacyEntropyPayload {
+            bytes: Vec::new(),
+            decoded_elements: 0,
+        });
+    }
+
+    let header = source[0];
+    let entropy_type = header & 0x07;
+    let mut offset = 1usize;
+    let decoded_elements = read_legacy_entropy_size(header, source, &mut offset, transform_name)?;
+    match entropy_type {
+        2 => decode_legacy_entropy_constant(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            limits,
+            transform_name,
+        ),
+        3 => decode_legacy_entropy_raw(
+            source,
+            offset,
+            decoded_elements,
+            element_width,
+            limits,
+            transform_name,
+        ),
+        0 | 1 | 4 | 5 => Err(Error::new(ErrorKind::Unsupported)
+            .with_detail(format!("{transform_name} entropy mode is unsupported"))),
+        _ => Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} entropy mode is reserved"))),
+    }
+}
+
+fn validate_legacy_entropy_width(element_width: usize, transform_name: &str) -> Result<()> {
+    if element_width == 0 || element_width > 8 || !element_width.is_power_of_two() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail(format!("{transform_name} element width is unsupported")));
+    }
+    Ok(())
+}
+
+fn read_legacy_entropy_size(
+    header: u8,
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<usize> {
+    let low = u64::from((header >> 3) & 0x0f);
+    let high = if header & 0x80 == 0 {
+        0
+    } else {
+        let high = read_var_u64(source, offset)?;
+        if high > (u64::MAX >> 4) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        high << 4
+    };
+    let decoded = low
+        .checked_add(high)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    usize::try_from(decoded).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} output size is too large"))
+    })
+}
+
+fn checked_legacy_entropy_output_len(
+    decoded_elements: usize,
+    element_width: usize,
+    limits: Limits,
+) -> Result<usize> {
+    let output_len = decoded_elements
+        .checked_mul(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok(output_len)
+}
+
+fn decode_legacy_entropy_raw(
+    source: &[u8],
+    offset: usize,
+    decoded_elements: usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
+    let end = offset
+        .checked_add(output_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let payload = source
+        .get(offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    if end != source.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} input has trailing bytes")));
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    bytes.extend_from_slice(payload);
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements,
+    })
+}
+
+fn decode_legacy_entropy_constant(
+    source: &[u8],
+    offset: usize,
+    decoded_elements: usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
+    let end = offset
+        .checked_add(element_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let value = source
+        .get(offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+    if end != source.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} input has trailing bytes")));
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(output_len).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} allocation failed"))
+    })?;
+    for _ in 0..decoded_elements {
+        bytes.extend_from_slice(value);
+    }
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements,
+    })
+}
+
+fn require_legacy_serial_input(source: StreamInput<'_>, transform_name: &str) -> Result<()> {
+    if source.element_width != 1 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail(format!("{transform_name} input must be serial")));
+    }
+    Ok(())
 }
 
 pub(super) fn decode_fse_v2_node(

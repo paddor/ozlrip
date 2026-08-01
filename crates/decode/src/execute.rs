@@ -33,8 +33,9 @@ use dispatch::{
     decode_dispatch_string_node_to_serial_output,
 };
 use entropy::{
-    decode_fse_ncount_node, decode_fse_v2_node, decode_huffman_struct_v2_node,
-    decode_huffman_v2_node,
+    decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
+    decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
+    decode_huffman_struct_v2_node, decode_huffman_v2_node,
 };
 use lz_nodes::{
     decode_field_lz_node, decode_field_lz_node_to_output, decode_lz_node, decode_lz_node_to_output,
@@ -1301,6 +1302,9 @@ fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result
         standard::FIELD_LZ_ID => 5,
         standard::TRANSPOSE_SPLIT8_ID => 8,
         standard::DISPATCH_STRING_ID
+        | standard::FSE_DEPRECATED_ID
+        | standard::HUFFMAN_DEPRECATED_ID
+        | standard::HUFFMAN_FIXED_DEPRECATED_ID
         | standard::LZ4_ID
         | standard::ZSTD_ID
         | standard::ZSTD_FIXED_ID
@@ -1500,6 +1504,22 @@ fn execute_standard_node(
             header,
             ctx.limits,
             ctx.scratch,
+        )),
+        standard::FSE_DEPRECATED_ID => one_serial(decode_fse_deprecated_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::HUFFMAN_DEPRECATED_ID => one_serial(decode_huffman_deprecated_node(
+            single_stream(inputs)?,
+            header,
+            ctx.limits,
+        )),
+        standard::HUFFMAN_FIXED_DEPRECATED_ID => one_typed(decode_huffman_fixed_deprecated_node(
+            single_stream(inputs)?,
+            header,
+            ctx.format_version,
+            ctx.limits,
         )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),
         standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_serial(decode_zstd_chunk(

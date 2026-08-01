@@ -13,6 +13,9 @@ id	name	coverage
 12	separate_string_components	unit+inline-frame
 13	convert_struct_to_num_be	unit+inline-frame
 14	convert_serial_to_num_be	unit+inline-frame
+15	fse_deprecated	unit+inline-frame
+16	huffman_deprecated	unit+inline-frame
+17	huffman_fixed_deprecated	unit+inline-frame
 18	sentinel	unit+inline-frame
 19	lz	unit+inline-frame
 22	zstd	unit+fuzz+interop

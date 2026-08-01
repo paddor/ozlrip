@@ -968,6 +968,9 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
         | standard::CONVERT_STRUCT_TO_SERIAL_ID
         | standard::CONVERT_STRUCT_TO_NUM_BE_ID
         | standard::CONVERT_SERIAL_TO_NUM_BE_ID
+        | standard::FSE_DEPRECATED_ID
+        | standard::HUFFMAN_DEPRECATED_ID
+        | standard::HUFFMAN_FIXED_DEPRECATED_ID
         | standard::ZSTD_ID
         | standard::ZSTD_FIXED_ID
         | standard::BITPACK_SERIAL_ID
