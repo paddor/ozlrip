@@ -320,6 +320,80 @@ fn legacy_entropy_multi_payload(blocks: &[Vec<u8>]) -> Vec<u8> {
     output
 }
 
+fn legacy_entropy_fse_payload(symbols: &[u8], nb_states: usize) -> Vec<u8> {
+    let distribution = [16i16, 16];
+    let accuracy_log = 5;
+    let mut encoded =
+        zrip_core::fse::table_builder::serialize_fse_table_description(&distribution, accuracy_log);
+    encoded.extend_from_slice(&fse_multistate_bitstream(
+        symbols,
+        nb_states,
+        &distribution,
+        accuracy_log,
+    ));
+    legacy_compressed_entropy_payload(1, symbols.len(), &encoded)
+}
+
+fn legacy_compressed_entropy_payload(
+    entropy_type: u8,
+    decoded_elements: usize,
+    encoded: &[u8],
+) -> Vec<u8> {
+    let needs_varints = decoded_elements > 0x1f || encoded.len() > 0x0f;
+    let mut header = u16::from(entropy_type)
+        | (u16::try_from(decoded_elements & 0x1f).unwrap() << 7)
+        | (u16::try_from(encoded.len() & 0x0f).unwrap() << 12);
+    if needs_varints {
+        header |= 1 << 6;
+    }
+
+    let mut output = Vec::new();
+    output.extend_from_slice(&header.to_le_bytes());
+    if needs_varints {
+        push_var_u64(&mut output, u64::try_from(decoded_elements >> 5).unwrap());
+        push_var_u64(&mut output, u64::try_from(encoded.len() >> 4).unwrap());
+    }
+    output.extend_from_slice(encoded);
+    output
+}
+
+fn fse_multistate_bitstream(
+    symbols: &[u8],
+    nb_states: usize,
+    distribution: &[i16],
+    accuracy_log: u8,
+) -> Vec<u8> {
+    assert!(matches!(nb_states, 2 | 4));
+    assert!(symbols.len() >= nb_states);
+
+    let table =
+        zrip_core::fse::encode::FseEncodeTable::from_distribution(distribution, accuracy_log);
+    let final_start = symbols.len() - nb_states;
+    let mut states = (0..nb_states).map(|_| None).collect::<Vec<_>>();
+    for index in final_start..symbols.len() {
+        states[index % nb_states] = Some(zrip_core::fse::encode::FseEncodeState::init(
+            &table,
+            symbols[index],
+        ));
+    }
+
+    let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+    for index in (0..final_start).rev() {
+        states[index % nb_states]
+            .as_mut()
+            .unwrap()
+            .encode_symbol(&mut writer, symbols[index]);
+    }
+    for lane in (0..nb_states).rev() {
+        states[lane]
+            .as_ref()
+            .unwrap()
+            .flush(&mut writer, accuracy_log);
+    }
+    writer.close_reverse_stream();
+    writer.into_bytes()
+}
+
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());
@@ -4477,6 +4551,29 @@ fn decodes_v21_fse_deprecated_bit_frame() {
         &payload,
         expected.len(),
         &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn decodes_v21_fse_deprecated_fse_frame() {
+    let expected = [
+        0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0,
+        1, 1, 0, 1, 0, 1, 1, 0, 1, 0,
+    ];
+    let payload = legacy_entropy_fse_payload(&expected, 4);
+    let input = standard_transform_serial_frame(
+        21,
+        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        &payload,
+        expected.len(),
+        &[4],
     );
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = Vec::new();

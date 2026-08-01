@@ -68,9 +68,10 @@ pub(super) fn decode_fse_deprecated_node(
     limits: Limits,
 ) -> Result<Vec<u8>> {
     require_legacy_serial_input(source, "fse_deprecated")?;
-    match header {
-        [] => {}
-        [2 | 4] => {}
+    let nb_states = match header {
+        [] => 2,
+        [2] => 2,
+        [4] => 4,
         [_] => {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("fse_deprecated state count is invalid"));
@@ -80,8 +81,8 @@ pub(super) fn decode_fse_deprecated_node(
                 Error::new(ErrorKind::Malformed).with_detail("fse_deprecated header is malformed")
             );
         }
-    }
-    decode_legacy_entropy_payload(source.bytes, 1, limits, "fse_deprecated")
+    };
+    decode_legacy_entropy_payload(source.bytes, 1, nb_states, limits, "fse_deprecated")
         .map(|payload| payload.bytes)
 }
 
@@ -95,7 +96,7 @@ pub(super) fn decode_huffman_deprecated_node(
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("huffman_deprecated headers are unsupported"));
     }
-    decode_legacy_entropy_payload(source.bytes, 1, limits, "huffman_deprecated")
+    decode_legacy_entropy_payload(source.bytes, 1, 2, limits, "huffman_deprecated")
         .map(|payload| payload.bytes)
 }
 
@@ -115,6 +116,7 @@ pub(super) fn decode_huffman_fixed_deprecated_node(
     let payload = decode_legacy_entropy_payload(
         source.bytes,
         entropy_width,
+        2,
         limits,
         "huffman_fixed_deprecated",
     )?;
@@ -176,6 +178,7 @@ const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
 fn decode_legacy_entropy_payload(
     source: &[u8],
     element_width: usize,
+    fse_nb_states: usize,
     limits: Limits,
     transform_name: &str,
 ) -> Result<LegacyEntropyPayload> {
@@ -192,6 +195,7 @@ fn decode_legacy_entropy_payload(
         source,
         &mut offset,
         element_width,
+        fse_nb_states,
         limits,
         transform_name,
         LEGACY_ENTROPY_MAX_DEPTH,
@@ -207,6 +211,7 @@ fn decode_legacy_entropy_payload_internal(
     source: &[u8],
     offset: &mut usize,
     element_width: usize,
+    fse_nb_states: usize,
     limits: Limits,
     transform_name: &str,
     max_depth: usize,
@@ -230,6 +235,16 @@ fn decode_legacy_entropy_payload_internal(
             decoded_elements,
             element_width,
             num_bits,
+            limits,
+            transform_name,
+        );
+    }
+    if header & 0x07 == 1 {
+        return decode_legacy_entropy_fse(
+            source,
+            offset,
+            element_width,
+            fse_nb_states,
             limits,
             transform_name,
         );
@@ -259,11 +274,12 @@ fn decode_legacy_entropy_payload_internal(
             offset,
             decoded_elements,
             element_width,
+            fse_nb_states,
             limits,
             transform_name,
             max_depth,
         ),
-        0 | 1 => Err(Error::new(ErrorKind::Unsupported)
+        0 => Err(Error::new(ErrorKind::Unsupported)
             .with_detail(format!("{transform_name} entropy mode is unsupported"))),
         _ => Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy mode is reserved"))),
@@ -398,6 +414,7 @@ fn decode_legacy_entropy_multi(
     offset: &mut usize,
     blocks: usize,
     element_width: usize,
+    fse_nb_states: usize,
     limits: Limits,
     transform_name: &str,
     max_depth: usize,
@@ -420,6 +437,7 @@ fn decode_legacy_entropy_multi(
             source,
             offset,
             element_width,
+            fse_nb_states,
             limits,
             transform_name,
             max_depth - 1,
@@ -443,6 +461,114 @@ fn decode_legacy_entropy_multi(
     Ok(LegacyEntropyPayload {
         bytes,
         decoded_elements,
+    })
+}
+
+struct LegacyCompressedEntropyHeader {
+    decoded_elements: usize,
+    encoded_len: usize,
+}
+
+fn decode_legacy_entropy_fse(
+    source: &[u8],
+    offset: &mut usize,
+    element_width: usize,
+    nb_states: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    if element_width != 1 {
+        return Err(Error::new(ErrorKind::Unsupported).with_detail(format!(
+            "{transform_name} fse entropy element width is unsupported"
+        )));
+    }
+    let header = read_legacy_compressed_entropy_header(source, offset, transform_name)?;
+    let output_len =
+        checked_legacy_entropy_output_len(header.decoded_elements, element_width, limits)?;
+    let end = (*offset)
+        .checked_add(header.encoded_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let encoded = source
+        .get(*offset..end)
+        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+
+    let mut reader = BitReader::new(encoded);
+    let (distribution, accuracy_log) =
+        parse_fse_table_description(&mut reader, u8::MAX).map_err(|err| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} fse table is invalid: {err}"))
+        })?;
+    let bits_offset = reader.bytes_consumed();
+    let bits = encoded.get(bits_offset..).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} fse bitstream is missing"))
+    })?;
+    let table = build_decode_table(&distribution, accuracy_log).map_err(|err| {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} fse table is invalid: {err}"))
+    })?;
+    let bytes = decode_fse_symbols(
+        bits,
+        header.decoded_elements,
+        nb_states,
+        &table,
+        accuracy_log,
+        transform_name,
+    )?;
+    debug_assert_eq!(bytes.len(), output_len);
+    *offset = end;
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements: header.decoded_elements,
+    })
+}
+
+fn read_legacy_compressed_entropy_header(
+    source: &[u8],
+    offset: &mut usize,
+    transform_name: &str,
+) -> Result<LegacyCompressedEntropyHeader> {
+    let end = (*offset)
+        .checked_add(2)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let header = source.get(*offset..end).ok_or_else(|| {
+        Error::new(ErrorKind::Truncated).with_detail(format!(
+            "{transform_name} compressed entropy header is truncated"
+        ))
+    })?;
+    let header = u16::from_le_bytes(header.try_into().map_err(|_| {
+        Error::new(ErrorKind::Malformed).with_detail(format!(
+            "{transform_name} compressed entropy header is malformed"
+        ))
+    })?);
+    *offset = end;
+
+    let has_varints = ((header >> 6) & 1) != 0;
+    let mut decoded_elements = u64::from((header >> 7) & 0x1f);
+    let mut encoded_len = u64::from((header >> 12) & 0x0f);
+    if has_varints {
+        let decoded_high = read_var_u64(source, offset)?;
+        if decoded_high > (u64::MAX >> 5) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        decoded_elements |= decoded_high << 5;
+
+        let encoded_high = read_var_u64(source, offset)?;
+        if encoded_high > (u64::MAX >> 4) {
+            return Err(Error::new(ErrorKind::IntegerOverflow));
+        }
+        encoded_len |= encoded_high << 4;
+    }
+
+    Ok(LegacyCompressedEntropyHeader {
+        decoded_elements: usize::try_from(decoded_elements).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} output size is too large"))
+        })?,
+        encoded_len: usize::try_from(encoded_len).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} encoded size is too large"))
+        })?,
     })
 }
 
@@ -598,6 +724,7 @@ pub(super) fn decode_fse_v2_node(
         parsed.nb_states,
         &table,
         accuracy_log,
+        "fse_v2",
     )
 }
 
@@ -738,10 +865,12 @@ fn decode_fse_symbols(
     nb_states: usize,
     table: &[FseDecodeEntry],
     accuracy_log: u8,
+    transform_name: &str,
 ) -> Result<Vec<u8>> {
     if output_len < nb_states {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("fse_v2 output count is smaller than state count"));
+        return Err(Error::new(ErrorKind::Malformed).with_detail(format!(
+            "{transform_name} output count is smaller than state count"
+        )));
     }
     let mut reader = ReverseBitReader::new(bits)
         .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
@@ -768,13 +897,13 @@ fn decode_fse_symbols(
             decode_fse_symbols_4(&mut reader, &mut states, output_len, &mut output)?;
         }
         _ => {
-            return Err(
-                Error::new(ErrorKind::Unsupported).with_detail("fse_v2 state count is unsupported")
-            );
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail(format!("{transform_name} state count is unsupported")));
         }
     }
     if reader.bits_remaining() != 0 {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("fse_v2 input has trailing bits"));
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} input has trailing bits")));
     }
     Ok(output)
 }
