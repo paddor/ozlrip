@@ -31,6 +31,39 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features --features alloc -- -D warnings
       - run: cargo test --workspace --all-targets --features paranoid
 
+  interop:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        openzl:
+          - name: dev
+            ref: dev
+            path: tmp/openzl-upstream
+            env: OZLRIP_ZLI
+            features: interop,dev-format
+          - name: v0.2.0
+            ref: v0.2.0
+            path: tmp/openzl-v0.2.0
+            env: OZLRIP_ZLI_V0_2_0
+            features: interop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out OpenZL
+        run: |
+          git clone \
+            --depth 1 \
+            --branch "${{ matrix.openzl.ref }}" \
+            https://github.com/facebook/openzl.git \
+            "${{ matrix.openzl.path }}"
+      - name: Build zli
+        run: make -C "${{ matrix.openzl.path }}" -j2 zli
+      - name: Run interop tests
+        run: |
+          export "${{ matrix.openzl.env }}=$PWD/${{ matrix.openzl.path }}/zli"
+          cargo test --features "${{ matrix.openzl.features }}"
+
   miri:
     runs-on: ubuntu-latest
     steps:
