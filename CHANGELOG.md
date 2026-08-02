@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.4.0]
+
+- Decode more OpenZL standard graph nodes, including `concat_string`,
+  `tokenize_string`, `huffman_struct_v2`, legacy transpose, and legacy zstd
+  fixed nodes.
+- Decode deprecated entropy and LZ compatibility paths for raw, constant, bit,
+  multi-block, FSE, FastLZ, and ROLZ payload shapes.
+- Harden malformed deprecated entropy handling, including short FSE state
+  outputs and invalid FSE state counts.
+- Add focused fuzz targets for entropy v2, FSE ncount, and deprecated
+  entropy/LZ nodes.
+- Run upstream OpenZL `zli` interop in CI against `dev` and the latest release
+  checkpoint.
+
 ## [0.3.0]
 
 - Decode OpenZL `prefix` string reconstruction nodes.
