@@ -2,7 +2,7 @@
 name = "ozlrip-decode"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "OpenZL decoder for ozlrip"
 license = "MIT"
 repository = "https://github.com/paddor/ozlrip"
@@ -24,10 +24,10 @@ interop = ["std"]
 
 [dependencies]
 ozlrip-core = { version = "0.4.0", path = "../core", default-features = false }
-fearless_simd = { version = "0.5.0", default-features = false, features = ["std"], optional = true }
-zrip-core = { version = "0.9.0", default-features = false, features = ["alloc"] }
-zrip = { version = "0.8.3", default-features = false, features = ["std", "frame"], optional = true }
-lz4rip = { version = "0.10.1", default-features = false, features = ["std", "frame"], optional = true }
+fearless_simd = { version = "0.6.0", default-features = false, features = ["std"], optional = true }
+zrip-core = { version = "0.9.1", default-features = false, features = ["alloc"] }
+zrip = { version = "0.8.5", default-features = false, features = ["std", "frame"], optional = true }
+lz4rip = { version = "0.11.3", default-features = false, features = ["std", "frame"], optional = true }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics"] }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 

@@ -281,6 +281,15 @@ fn error_case(name: &str) -> ErrorCase {
         "generated-truncated-stored-size-varint" => {
             inspect_case(truncated_stored_size_varint_frame(), Options::default())
         }
+        "generated-truncated-header-checksum" => {
+            inspect_case(truncated_header_checksum_frame(), Options::default())
+        }
+        "generated-truncated-decoded-checksum" => {
+            inspect_case(truncated_decoded_checksum_frame(), Options::default())
+        }
+        "generated-truncated-encoded-checksum" => {
+            inspect_case(truncated_encoded_checksum_frame(), Options::default())
+        }
         "zero-output-count" => inspect_case(
             {
                 let mut input = Vec::new();
@@ -396,6 +405,7 @@ fn error_case(name: &str) -> ErrorCase {
             },
         ),
         "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
+        "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
         "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
         _ => panic!("unknown error taxonomy case: {name}"),
     }
@@ -533,6 +543,61 @@ fn bad_header_checksum_frame() -> Vec<u8> {
     input
 }
 
+fn truncated_header_checksum_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(1 << 1);
+    input.push(1);
+    input.push(4);
+    input
+}
+
+fn truncated_decoded_checksum_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(1);
+    input.push(1);
+    input.push(4);
+    input.push(1);
+    input.push(1);
+    input.push(3);
+    input.extend_from_slice(&[7, 8, 9]);
+    input
+}
+
+fn truncated_encoded_checksum_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(1 << 1);
+    input.push(1);
+    input.push(4);
+    push_header_checksum(&mut input);
+    input.push(1);
+    input.push(1);
+    input.push(3);
+    input.extend_from_slice(&[7, 8, 9]);
+    input.extend_from_slice(&[0, 0]);
+    input
+}
+
+fn bad_encoded_checksum_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(1 << 1);
+    input.push(1);
+    input.push(4);
+    push_header_checksum(&mut input);
+    let chunk_start = input.len();
+    input.push(1);
+    input.push(1);
+    input.push(3);
+    input.extend_from_slice(&[7, 8, 9]);
+    let checksum = compressed_checksum(&input[chunk_start..]) ^ 1;
+    input.extend_from_slice(&checksum.to_le_bytes());
+    input.push(0);
+    input
+}
+
 fn bad_decoded_checksum_frame() -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&magic(21));
@@ -546,6 +611,25 @@ fn bad_decoded_checksum_frame() -> Vec<u8> {
     input.extend_from_slice(&0u32.to_le_bytes());
     input.push(0);
     input
+}
+
+fn push_header_checksum(input: &mut Vec<u8>) {
+    #[cfg(feature = "checksum")]
+    input.push((xxhash_rust::xxh3::xxh3_64(input) & 0xff) as u8);
+    #[cfg(not(feature = "checksum"))]
+    input.push(0);
+}
+
+fn compressed_checksum(bytes: &[u8]) -> u32 {
+    #[cfg(feature = "checksum")]
+    {
+        (xxhash_rust::xxh3::xxh3_64(bytes) & 0xffff_ffff) as u32
+    }
+    #[cfg(not(feature = "checksum"))]
+    {
+        let _ = bytes;
+        0
+    }
 }
 
 fn inspect_case(input: Vec<u8>, options: Options) -> ErrorCase {

@@ -7,7 +7,7 @@ resolver = "3"
 name = "ozlrip"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Memory-safe Rust decoder-first implementation of OpenZL"
 license = "MIT"
 repository = "https://github.com/paddor/ozlrip"
@@ -38,6 +38,9 @@ interop = ["std", "ozlrip-decode/interop"]
 [dependencies]
 ozlrip-core = { version = "0.4.0", path = "crates/core", default-features = false }
 ozlrip-decode = { version = "0.4.0", path = "crates/decode", default-features = false }
+
+[dev-dependencies]
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 
 [lints]
 workspace = true
