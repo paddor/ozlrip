@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.0]
+
+- Update `zrip`, `zrip-core`, `lz4rip`, and `fearless_simd` dependencies.
+- Raise the workspace MSRV to Rust 1.89 and update the CI MSRV job.
+- Add public error taxonomy coverage for truncated checksum fields and
+  compressed checksum mismatches.
+
 ## [0.4.0]
 
 - Decode more OpenZL standard graph nodes, including `concat_string`,
