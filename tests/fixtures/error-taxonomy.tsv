@@ -12,6 +12,9 @@ generated-truncated-stored-payload	truncated	decode	Truncated	none
 generated-truncated-transform-id	truncated	inspect	Truncated	none
 generated-truncated-transform-header-size	truncated	inspect	Truncated	none
 generated-truncated-stored-size-varint	truncated	inspect	Truncated	none
+generated-truncated-header-checksum	truncated	inspect	Truncated	none
+generated-truncated-decoded-checksum	truncated	inspect	Truncated	none
+generated-truncated-encoded-checksum	truncated	inspect	Truncated	none
 missing-eof-marker	truncated	decode	Truncated	none
 truncated-dictionary-bundle	truncated	load-dictionary	Truncated	none
 zero-output-count	malformed	inspect	Malformed	none
@@ -29,4 +32,5 @@ generated-duplicate-regen-distance	invalid_graph	inspect	InvalidGraph	none
 invalid-output-type	invalid_type	inspect	InvalidType	none
 stored-stream-size-overflow	overflow	inspect	IntegerOverflow	none
 bad-header-checksum	checksum	inspect	ChecksumMismatch	checksum
+bad-encoded-checksum	checksum	inspect	ChecksumMismatch	checksum
 bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
