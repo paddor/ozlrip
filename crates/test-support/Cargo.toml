@@ -1,0 +1,14 @@
+[package]
+name = "ozlrip-test-support"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+description = "OpenZL frame builders for ozlrip tests (not published)"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }

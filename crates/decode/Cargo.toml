@@ -31,4 +31,5 @@ smallvec = { version = "1.15", default-features = false, features = ["const_gene
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 
 [dev-dependencies]
+ozlrip-test-support = { path = "../test-support" }
 ozlrip = { path = "../..", default-features = false, features = ["alloc"] }
