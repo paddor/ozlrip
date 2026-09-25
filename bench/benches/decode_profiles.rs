@@ -5,7 +5,7 @@ use std::{
     mem::size_of,
     os::raw::{c_char, c_int, c_void},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,62 +22,130 @@ const OPENZL_C_IMPL: &str = "openzl-c-ffi-no-checksum";
 const OPENZL_C_IMPL: &str = "openzl-c-ffi";
 
 fn main() {
-    let target = Duration::from_millis(
+    if env::var_os("OZLRIP_BENCH_CHILD").is_some() {
+        child_main();
+    } else {
+        parent_main();
+    }
+}
+
+fn target_duration() -> Duration {
+    Duration::from_millis(
         env::var("OZLRIP_BENCH_TARGET_MS")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_TARGET_MS),
-    );
-    let impl_filter = env::var("OZLRIP_BENCH_IMPL").ok();
-    let case_filter = env::var("OZLRIP_BENCH_CASE").ok();
-    let cases = generated_cases(case_filter.as_deref());
-    let mut results = Vec::new();
-
-    for case in &cases {
-        if case_filter
-            .as_deref()
-            .is_some_and(|filter| filter != case.name)
-        {
-            continue;
-        }
-        let mut ozlrip_mbps = None;
-        if impl_filter
-            .as_deref()
-            .is_none_or(|filter| filter == OZLRIP_IMPL)
-        {
-            let ozlrip = bench_ozlrip(case, target);
-            ozlrip_mbps = Some(ozlrip.decoded_mbps);
-            print_result(&ozlrip, None);
-            results.push(ozlrip);
-        }
-
-        let reference_impl = case.reference.impl_name();
-        if impl_filter
-            .as_deref()
-            .is_none_or(|filter| filter == reference_impl)
-        {
-            let reference = bench_reference_decoder(case, target);
-            let relative = ozlrip_mbps.map(|base| (OZLRIP_IMPL, base / reference.decoded_mbps));
-            print_result(&reference, relative);
-            results.push(reference);
-        }
-    }
-
-    write_cache(&results);
+    )
 }
 
-fn generated_cases(case_filter: Option<&str>) -> Vec<BenchCase> {
-    let mut cases = Vec::new();
-    if let Some(zli) = zli_path() {
-        cases.extend(serial_generated_cases(&zli, case_filter));
-        cases.extend(zli_generated_cases(&zli, case_filter));
-    } else {
+/// Generates and verifies all frames, then measures each case and impl in
+/// its own child process so glibc heap state from one case cannot leak into
+/// the next measurement.
+fn parent_main() {
+    let impl_filter = env::var("OZLRIP_BENCH_IMPL").ok();
+    let case_filter = env::var("OZLRIP_BENCH_CASE").ok();
+    let Some(zli) = zli_path() else {
         eprintln!("skipping benchmark cases: set OZLRIP_ZLI or build tmp/openzl-upstream/zli");
+        return;
+    };
+    let zli_rev = zli_rev(&zli);
+    let cases = generated_cases(&zli, &zli_rev, case_filter.as_deref());
+    let exe = env::current_exe().expect("benchmark executable path");
+
+    for case in &cases {
+        let mut ozlrip_ns = None;
+        for impl_name in [OZLRIP_IMPL, case.reference.impl_name()] {
+            if impl_filter
+                .as_deref()
+                .is_some_and(|filter| filter != impl_name)
+            {
+                continue;
+            }
+            let median_ns = run_child(&exe, &case.name, impl_name, &zli_rev);
+            if impl_name == OZLRIP_IMPL {
+                ozlrip_ns = Some(median_ns);
+            } else if let Some(ozlrip_ns) = ozlrip_ns {
+                println!(
+                    "{:<20} {OZLRIP_IMPL}/{impl_name}={:.2}x",
+                    case.name,
+                    median_ns / ozlrip_ns
+                );
+            }
+        }
     }
+}
+
+fn run_child(exe: &Path, case: &str, impl_name: &str, zli_rev: &str) -> f64 {
+    let output = Command::new(exe)
+        .args(env::args_os().skip(1))
+        .env("OZLRIP_BENCH_CHILD", "1")
+        .env("OZLRIP_BENCH_CASE", case)
+        .env("OZLRIP_BENCH_IMPL", impl_name)
+        .env("OZLRIP_BENCH_ZLI_REV", zli_rev)
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("run benchmark child");
+    let mut median_ns = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(row) = line.strip_prefix("@@row\t") {
+            let (_, ns) = row.split_once('\t').expect("benchmark child row");
+            median_ns = Some(ns.parse::<f64>().expect("benchmark child median"));
+        } else {
+            println!("{line}");
+        }
+    }
+    if !output.status.success() {
+        eprintln!("benchmark child failed: case={case} impl={impl_name}");
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+    median_ns.expect("benchmark child did not report a result")
+}
+
+fn child_main() {
+    let name = env::var("OZLRIP_BENCH_CASE").expect("benchmark child needs OZLRIP_BENCH_CASE");
+    let impl_name = env::var("OZLRIP_BENCH_IMPL").expect("benchmark child needs OZLRIP_BENCH_IMPL");
+    let zli_rev = env::var("OZLRIP_BENCH_ZLI_REV").unwrap_or_else(|_| "unknown".to_owned());
+    let case = load_cached_case(&name);
+    let target = target_duration();
+    let result = if impl_name == OZLRIP_IMPL {
+        bench_ozlrip(&case, target, &zli_rev)
+    } else if impl_name == case.reference.impl_name() {
+        bench_reference_decoder(&case, target, &zli_rev)
+    } else {
+        panic!("unknown benchmark impl {impl_name}");
+    };
+    print_result(&result);
+    write_cache(&result);
+    println!("@@row\t{}\t{}", result.impl_name, result.median_decode_ns);
+}
+
+fn load_cached_case(name: &str) -> BenchCase {
+    let dir = bench_input_dir();
+    let frame = fs::read(dir.join(format!("{name}.zl"))).expect("read cached benchmark frame");
+    let meta = fs::read_to_string(dir.join(format!("{name}.zl.meta")))
+        .expect("read cached benchmark metadata");
+    let field = |key: &str| {
+        meta.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("benchmark metadata for {name} has no {key}"))
+            .to_owned()
+    };
+    BenchCase {
+        name: name.to_owned(),
+        profile: field("profile"),
+        input_size: field("input_len").parse().expect("benchmark input length"),
+        frame,
+        reference: ReferenceDecoder::Ffi,
+    }
+}
+
+fn generated_cases(zli: &Path, zli_rev: &str, case_filter: Option<&str>) -> Vec<BenchCase> {
+    let mut cases = serial_generated_cases(zli, zli_rev, case_filter);
+    cases.extend(zli_generated_cases(zli, zli_rev, case_filter));
     cases
 }
 
-fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
+fn serial_generated_cases(zli: &Path, zli_rev: &str, case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
     macro_rules! push_case {
         ($name:literal, $extra_args:expr, $input:expr) => {
@@ -89,7 +157,12 @@ fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCas
                     extra_args: $extra_args,
                     input: $input,
                 };
-                cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+                cases.push(generated_case_from_zli(
+                    zli,
+                    zli_rev,
+                    &spec,
+                    ReferenceDecoder::Ffi,
+                ));
             }
         };
     }
@@ -105,7 +178,7 @@ fn serial_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCas
     cases
 }
 
-fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> {
+fn zli_generated_cases(zli: &Path, zli_rev: &str, case_filter: Option<&str>) -> Vec<BenchCase> {
     let mut cases = Vec::new();
     macro_rules! push_case {
         ($name:literal, $profile:literal, $profile_arg:expr, $extra_args:expr, $input:expr) => {
@@ -117,7 +190,12 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
                     extra_args: $extra_args,
                     input: $input,
                 };
-                cases.push(generated_case_from_zli(zli, &spec, ReferenceDecoder::Ffi));
+                cases.push(generated_case_from_zli(
+                    zli,
+                    zli_rev,
+                    &spec,
+                    ReferenceDecoder::Ffi,
+                ));
             }
         };
     }
@@ -236,10 +314,11 @@ fn zli_generated_cases(zli: &Path, case_filter: Option<&str>) -> Vec<BenchCase> 
 
 fn generated_case_from_zli(
     zli: &Path,
+    zli_rev: &str,
     spec: &ZliBenchSpec,
     reference: ReferenceDecoder,
 ) -> BenchCase {
-    let frame = compress_with_zli(zli, spec);
+    let frame = compress_with_zli(zli, zli_rev, spec);
     assert_eq!(
         decode_ozlrip_with_bench_limits(&frame).expect("ozlrip decode generated frame"),
         spec.input
@@ -249,8 +328,8 @@ fn generated_case_from_zli(
         spec.input
     );
     BenchCase {
-        name: spec.name,
-        profile: spec.profile,
+        name: spec.name.to_owned(),
+        profile: spec.profile.to_owned(),
         input_size: spec.input.len(),
         frame,
         reference,
@@ -265,12 +344,12 @@ struct ZliBenchSpec {
     input: Vec<u8>,
 }
 
-fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
-    let dir = workspace_root().join("tmp").join("ozlrip-bench-inputs");
+fn compress_with_zli(zli: &Path, zli_rev: &str, spec: &ZliBenchSpec) -> Vec<u8> {
+    let dir = bench_input_dir();
     fs::create_dir_all(&dir).expect("create benchmark input dir");
     let frame_path = dir.join(format!("{}.zl", spec.name));
     let meta_path = dir.join(format!("{}.zl.meta", spec.name));
-    let signature = zli_cache_signature(spec);
+    let signature = zli_cache_signature(zli_rev, spec);
 
     if let Ok(frame) = fs::read(&frame_path)
         && fs::read_to_string(&meta_path).is_ok_and(|cached| cached == signature)
@@ -311,9 +390,9 @@ fn compress_with_zli(zli: &Path, spec: &ZliBenchSpec) -> Vec<u8> {
     frame
 }
 
-fn zli_cache_signature(spec: &ZliBenchSpec) -> String {
+fn zli_cache_signature(zli_rev: &str, spec: &ZliBenchSpec) -> String {
     format!(
-        "v2\nname={}\nprofile={}\nprofile_arg={}\nextra_args={}\ninput_len={}\ninput_hash={:016x}\n",
+        "v3\nzli_rev={zli_rev}\nname={}\nprofile={}\nprofile_arg={}\nextra_args={}\ninput_len={}\ninput_hash={:016x}\n",
         spec.name,
         spec.profile,
         spec.profile_arg.as_deref().unwrap_or(""),
@@ -340,6 +419,30 @@ fn zli_path() -> Option<PathBuf> {
     }
     let path = workspace_root().join("tmp/openzl-upstream/zli");
     path.exists().then_some(path)
+}
+
+fn bench_input_dir() -> PathBuf {
+    workspace_root().join("tmp").join("ozlrip-bench-inputs")
+}
+
+/// Returns the git revision of the OpenZL checkout that contains `zli`, so
+/// cached frames are regenerated when upstream changes.
+fn zli_rev(zli: &Path) -> String {
+    let zli = fs::canonicalize(zli).unwrap_or_else(|_| zli.to_path_buf());
+    let Some(repo) = zli.ancestors().find(|path| path.join(".git").exists()) else {
+        return "unknown".to_owned();
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+        _ => "unknown".to_owned(),
+    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -456,11 +559,15 @@ fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
     .expect("read upstream sample")
 }
 
-fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
-    let mut decoder = ozlrip::Decoder::with_options(ozlrip::Options {
+fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
+    let mut options = ozlrip::Options {
         limits: bench_limits(),
         ..ozlrip::Options::default()
-    });
+    };
+    if !plan_cache_enabled() {
+        options.plan_cache_max_frame_bytes = 0;
+    }
+    let mut decoder = ozlrip::Decoder::with_options(options);
     let mut dst = Vec::new();
     let stats = bench_loop(target, || {
         dst.clear();
@@ -469,7 +576,11 @@ fn bench_ozlrip(case: &BenchCase, target: Duration) -> BenchResult {
             .expect("ozlrip decode failed");
         black_box(&dst);
     });
-    BenchResult::new(OZLRIP_IMPL, case, stats)
+    BenchResult::new(OZLRIP_IMPL, case, stats, zli_rev)
+}
+
+fn plan_cache_enabled() -> bool {
+    env::var("OZLRIP_BENCH_PLAN_CACHE").map_or(true, |value| value != "0")
 }
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
@@ -492,13 +603,13 @@ fn bench_limits() -> ozlrip::Limits {
     }
 }
 
-fn bench_reference_decoder(case: &BenchCase, target: Duration) -> BenchResult {
+fn bench_reference_decoder(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
     match &case.reference {
-        ReferenceDecoder::Ffi => bench_openzl_c_ffi(case, target),
+        ReferenceDecoder::Ffi => bench_openzl_c_ffi(case, target, zli_rev),
     }
 }
 
-fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
+fn bench_openzl_c_ffi(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
     let mut decoder = OpenZlCDecoder::new(case.input_size);
     decoder.decode(&case.frame);
     assert_eq!(decoder.dst.len(), case.input_size);
@@ -506,7 +617,7 @@ fn bench_openzl_c_ffi(case: &BenchCase, target: Duration) -> BenchResult {
         decoder.decode(black_box(&case.frame));
         black_box(&decoder.dst);
     });
-    BenchResult::new(OPENZL_C_IMPL, case, stats)
+    BenchResult::new(OPENZL_C_IMPL, case, stats, zli_rev)
 }
 
 fn decode_openzl_c_with_bench_limits(frame: &[u8], output_size: usize) -> Vec<u8> {
@@ -613,8 +724,8 @@ struct BenchStats {
 
 #[derive(Clone)]
 struct BenchCase {
-    name: &'static str,
-    profile: &'static str,
+    name: String,
+    profile: String,
     input_size: usize,
     frame: Vec<u8>,
     reference: ReferenceDecoder,
@@ -653,8 +764,8 @@ unsafe extern "C" {
 
 struct BenchResult {
     impl_name: &'static str,
-    input_name: &'static str,
-    profile: &'static str,
+    input_name: String,
+    profile: String,
     input_size: usize,
     frame_size: usize,
     median_decode_ns: f64,
@@ -665,17 +776,24 @@ struct BenchResult {
     timestamp_unix: u64,
     git_rev: String,
     git_dirty: bool,
+    build: &'static str,
+    rustflags: &'static str,
+    openzl_moreflags: &'static str,
+    zli_rev: String,
+    plan_cache: bool,
+    codec_versions: String,
 }
 
 impl BenchResult {
-    fn new(impl_name: &'static str, case: &BenchCase, stats: BenchStats) -> Self {
+    fn new(impl_name: &'static str, case: &BenchCase, stats: BenchStats, zli_rev: &str) -> Self {
         let decoded_mbps = case.input_size as f64 / stats.median_ns * 1_000.0;
         let frame_mbps = case.frame.len() as f64 / stats.median_ns * 1_000.0;
         let frame_ratio = case.frame.len() as f64 / case.input_size as f64;
+        let rustflags = env!("OZLRIP_BENCH_RUSTFLAGS");
         Self {
             impl_name,
-            input_name: case.name,
-            profile: case.profile,
+            input_name: case.name.clone(),
+            profile: case.profile.clone(),
             input_size: case.input_size,
             frame_size: case.frame.len(),
             median_decode_ns: stats.median_ns,
@@ -686,6 +804,16 @@ impl BenchResult {
             timestamp_unix: timestamp_unix(),
             git_rev: git_rev(),
             git_dirty: git_dirty(),
+            build: if rustflags.contains("target-cpu=native") {
+                "native"
+            } else {
+                "portable"
+            },
+            rustflags,
+            openzl_moreflags: env!("OZLRIP_BENCH_OPENZL_MOREFLAGS"),
+            zli_rev: zli_rev.to_owned(),
+            plan_cache: plan_cache_enabled(),
+            codec_versions: codec_versions(),
         }
     }
 
@@ -696,7 +824,9 @@ impl BenchResult {
                 r#""input_size": {}, "frame_size": {}, "#,
                 r#""frame_ratio": {:.4}, "median_decode_ns": {:.1}, "best_decode_ns": {:.1}, "#,
                 r#""decoded_mbps": {:.1}, "frame_mbps": {:.1}, "#,
-                r#""timestamp_unix": {}, "git_rev": "{}", "git_dirty": {}}}"#
+                r#""timestamp_unix": {}, "git_rev": "{}", "git_dirty": {}, "#,
+                r#""build": "{}", "rustflags": "{}", "openzl_moreflags": "{}", "#,
+                r#""zli_rev": "{}", "plan_cache": {}, "codec_versions": "{}"}}"#
             ),
             self.impl_name,
             self.input_name,
@@ -711,56 +841,81 @@ impl BenchResult {
             self.timestamp_unix,
             self.git_rev,
             self.git_dirty,
+            self.build,
+            json_escape(self.rustflags),
+            json_escape(self.openzl_moreflags),
+            self.zli_rev,
+            self.plan_cache,
+            json_escape(&self.codec_versions),
         )
     }
 }
 
-fn print_result(result: &BenchResult, relative_to_reference: Option<(&str, f64)>) {
-    if let Some((base_impl, relative)) = relative_to_reference {
-        println!(
-            "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4} {}/{}={relative:.2}x",
-            result.input_name,
-            result.impl_name,
-            result.decoded_mbps,
-            result.frame_mbps,
-            result.median_decode_ns,
-            result.frame_size,
-            result.frame_ratio,
-            base_impl,
-            result.impl_name
-        );
-    } else {
-        println!(
-            "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4}",
-            result.input_name,
-            result.impl_name,
-            result.decoded_mbps,
-            result.frame_mbps,
-            result.median_decode_ns,
-            result.frame_size,
-            result.frame_ratio
-        );
-    }
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn write_cache(results: &[BenchResult]) {
-    for result in results {
-        let path = cache_dir().join(format!("{}.jsonl", result.impl_name.replace(' ', "_")));
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .expect("open benchmark cache");
-        writeln!(file, "{}", result.to_json()).expect("write benchmark cache");
-        eprintln!("appended 1 result to {}", path.display());
+/// Reads the resolved codec crate versions from the bench lockfile.
+fn codec_versions() -> String {
+    const CRATES: [&str; 5] = [
+        "zrip-decode",
+        "zrip-core",
+        "lz4rip-decode",
+        "fearless_simd",
+        "xxhash-rust",
+    ];
+    let lock =
+        fs::read_to_string(workspace_root().join("bench").join("Cargo.lock")).unwrap_or_default();
+    let mut versions = Vec::new();
+    let mut name = None;
+    for line in lock.lines() {
+        if let Some(value) = line.strip_prefix("name = ") {
+            name = Some(value.trim_matches('"').to_owned());
+        } else if let Some(value) = line.strip_prefix("version = ")
+            && let Some(name) = name.take()
+            && CRATES.contains(&name.as_str())
+        {
+            versions.push(format!("{name} {}", value.trim_matches('"')));
+        }
     }
+    versions.sort();
+    versions.join(", ")
+}
+
+fn print_result(result: &BenchResult) {
+    println!(
+        "{:<20} {:<25} decoded={:>9.1} MB/s frame={:>9.1} MB/s {:>10.1} ns/decode frame={} ratio={:.4} build={}",
+        result.input_name,
+        result.impl_name,
+        result.decoded_mbps,
+        result.frame_mbps,
+        result.median_decode_ns,
+        result.frame_size,
+        result.frame_ratio,
+        result.build,
+    );
+}
+
+fn write_cache(result: &BenchResult) {
+    let path = cache_dir().join(format!("{}.jsonl", result.impl_name.replace(' ', "_")));
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("open benchmark cache");
+    writeln!(file, "{}", result.to_json()).expect("write benchmark cache");
 }
 
 fn cache_dir() -> PathBuf {
-    let dir = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into()))
-        .join(".cache")
-        .join("ozlrip")
-        .join(env::consts::ARCH);
+    let dir = env::var_os("OZLRIP_BENCH_CACHE_DIR").map_or_else(
+        || {
+            PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into()))
+                .join(".cache")
+                .join("ozlrip")
+                .join(env::consts::ARCH)
+        },
+        PathBuf::from,
+    );
     fs::create_dir_all(&dir).expect("create benchmark cache dir");
     dir
 }

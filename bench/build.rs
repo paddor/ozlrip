@@ -20,8 +20,11 @@ fn main() {
     );
     build_openzl_lib(&openzl);
 
-    cc::Build::new()
-        .file("openzl_bench_shim.c")
+    let mut shim = cc::Build::new();
+    for flag in openzl_moreflags().split_whitespace() {
+        shim.flag(flag);
+    }
+    shim.file("openzl_bench_shim.c")
         .include(openzl.join("include"))
         .include(openzl.join("src"))
         .include(openzl.join("deps/zstd/lib"))
@@ -47,8 +50,23 @@ fn main() {
         println!("cargo:rustc-link-lib=m");
     }
 
+    let rustflags = env::var("CARGO_ENCODED_RUSTFLAGS")
+        .unwrap_or_default()
+        .replace('\x1f', " ");
+    println!("cargo:rustc-env=OZLRIP_BENCH_RUSTFLAGS={rustflags}");
+    println!(
+        "cargo:rustc-env=OZLRIP_BENCH_OPENZL_MOREFLAGS={}",
+        openzl_moreflags()
+    );
+
     println!("cargo:rerun-if-env-changed=OZLRIP_OPENZL_DIR");
+    println!("cargo:rerun-if-env-changed=OZLRIP_OPENZL_MOREFLAGS");
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     println!("cargo:rerun-if-changed=openzl_bench_shim.c");
+}
+
+fn openzl_moreflags() -> String {
+    env::var("OZLRIP_OPENZL_MOREFLAGS").unwrap_or_default()
 }
 
 fn build_openzl_lib(openzl: &Path) {
@@ -57,6 +75,7 @@ fn build_openzl_lib(openzl: &Path) {
     }
     let status = Command::new("make")
         .arg("BUILD_TYPE=OPT")
+        .arg(format!("MOREFLAGS={}", openzl_moreflags()))
         .arg("libopenzl.a")
         .current_dir(openzl)
         .status()
