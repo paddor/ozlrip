@@ -209,7 +209,7 @@ fn decode_index_width_1_safe<const ELEMENT_WIDTH: usize>(
     let result = (|| {
         for (&index, out) in indices
             .iter()
-            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
             write_tokenized_element_fixed::<ELEMENT_WIDTH>(
                 alphabet,
@@ -240,13 +240,15 @@ fn decode_index_width_2_safe<const ELEMENT_WIDTH: usize>(
 
     let result = (|| {
         for (index, out) in indices
-            .chunks_exact(2)
-            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
             write_tokenized_element_fixed::<ELEMENT_WIDTH>(
                 alphabet,
                 alphabet_size,
-                usize::from(u16::from_le_bytes([index[0], index[1]])),
+                usize::from(u16::from_le_bytes(*index)),
                 out,
             )?;
         }
@@ -272,13 +274,15 @@ fn decode_index_width_4_safe<const ELEMENT_WIDTH: usize>(
 
     let result = (|| {
         for (index, out) in indices
-            .chunks_exact(4)
-            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
             write_tokenized_element_fixed::<ELEMENT_WIDTH>(
                 alphabet,
                 alphabet_size,
-                u32::from_le_bytes([index[0], index[1], index[2], index[3]])
+                u32::from_le_bytes(*index)
                     .try_into()
                     .map_err(|_| numeric_too_large())?,
                 out,
@@ -306,17 +310,17 @@ fn decode_index_width_8_safe<const ELEMENT_WIDTH: usize>(
 
     let result = (|| {
         for (index, out) in indices
-            .chunks_exact(8)
-            .zip(output[start_len..].chunks_exact_mut(ELEMENT_WIDTH))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
             write_tokenized_element_fixed::<ELEMENT_WIDTH>(
                 alphabet,
                 alphabet_size,
-                u64::from_le_bytes([
-                    index[0], index[1], index[2], index[3], index[4], index[5], index[6], index[7],
-                ])
-                .try_into()
-                .map_err(|_| numeric_too_large())?,
+                u64::from_le_bytes(*index)
+                    .try_into()
+                    .map_err(|_| numeric_too_large())?,
                 out,
             )?;
         }
@@ -349,23 +353,23 @@ fn decode_tokenize_indices_safe(
             }
         }
         2 => {
-            for index in indices.chunks_exact(2) {
+            for index in indices.as_chunks::<2>().0 {
                 append_tokenized_element(
                     alphabet,
                     alphabet_size,
                     element_width,
-                    u16::from_le_bytes([index[0], index[1]]).into(),
+                    u16::from_le_bytes(*index).into(),
                     output,
                 )?;
             }
         }
         4 => {
-            for index in indices.chunks_exact(4) {
+            for index in indices.as_chunks::<4>().0 {
                 append_tokenized_element(
                     alphabet,
                     alphabet_size,
                     element_width,
-                    u32::from_le_bytes([index[0], index[1], index[2], index[3]])
+                    u32::from_le_bytes(*index)
                         .try_into()
                         .map_err(|_| numeric_too_large())?,
                     output,
@@ -373,17 +377,14 @@ fn decode_tokenize_indices_safe(
             }
         }
         8 => {
-            for index in indices.chunks_exact(8) {
+            for index in indices.as_chunks::<8>().0 {
                 append_tokenized_element(
                     alphabet,
                     alphabet_size,
                     element_width,
-                    u64::from_le_bytes([
-                        index[0], index[1], index[2], index[3], index[4], index[5], index[6],
-                        index[7],
-                    ])
-                    .try_into()
-                    .map_err(|_| numeric_too_large())?,
+                    u64::from_le_bytes(*index)
+                        .try_into()
+                        .map_err(|_| numeric_too_large())?,
                     output,
                 )?;
             }

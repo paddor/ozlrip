@@ -712,10 +712,8 @@ pub(super) fn decode_fse_v2_node(
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("fse distribution allocation failed")
         })?;
-    for count in norm.bytes.chunks_exact(2) {
-        distribution.push(i16::from_le_bytes(count.try_into().map_err(|_| {
-            Error::new(ErrorKind::Malformed).with_detail("invalid fse count")
-        })?));
+    for count in norm.bytes.as_chunks::<2>().0 {
+        distribution.push(i16::from_le_bytes(*count));
     }
     let accuracy_log = validate_fse_distribution(&distribution)?;
     let table = build_decode_table(&distribution, accuracy_log).map_err(|err| {

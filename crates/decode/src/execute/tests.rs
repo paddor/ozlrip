@@ -5419,8 +5419,10 @@ fn decodes_fse_ncount_node() {
 
     let decoded = output
         .bytes
-        .chunks_exact(2)
-        .map(|bytes| i16::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| i16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(output.element_width, 2);
     assert_eq!(decoded, distribution);

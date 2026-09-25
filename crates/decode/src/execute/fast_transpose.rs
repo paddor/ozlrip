@@ -89,7 +89,7 @@ fn write_2_safe(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
     debug_assert_eq!(lane1.len(), len);
     output.resize(len * 2, 0);
-    for (index, out) in output.chunks_exact_mut(2).enumerate() {
+    for (index, out) in output.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         out[0] = lane0[index];
         out[1] = lane1[index];
     }
@@ -101,7 +101,7 @@ fn write_4_safe(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: 
     debug_assert_eq!(lane2.len(), len);
     debug_assert_eq!(lane3.len(), len);
     output.resize(len * 4, 0);
-    for (index, out) in output.chunks_exact_mut(4).enumerate() {
+    for (index, out) in output.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         out[0] = lane0[index];
         out[1] = lane1[index];
         out[2] = lane2[index];
@@ -130,7 +130,7 @@ fn write_8_safe(
     debug_assert_eq!(lane6.len(), len);
     debug_assert_eq!(lane7.len(), len);
     output.resize(len * 8, 0);
-    for (index, out) in output.chunks_exact_mut(8).enumerate() {
+    for (index, out) in output.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         out[0] = lane0[index];
         out[1] = lane1[index];
         out[2] = lane2[index];

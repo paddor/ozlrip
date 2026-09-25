@@ -71,12 +71,14 @@ fn append_6_8_8_2_2_4_4_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     output.reserve(element_count * 28);
     for (((((src0, src1), src2), src3), src4), src5) in inputs[0]
         .bytes
-        .chunks_exact(8)
-        .zip(inputs[1].bytes.chunks_exact(8))
-        .zip(inputs[2].bytes.chunks_exact(2))
-        .zip(inputs[3].bytes.chunks_exact(2))
-        .zip(inputs[4].bytes.chunks_exact(4))
-        .zip(inputs[5].bytes.chunks_exact(4))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(inputs[1].bytes.as_chunks::<8>().0)
+        .zip(inputs[2].bytes.as_chunks::<2>().0)
+        .zip(inputs[3].bytes.as_chunks::<2>().0)
+        .zip(inputs[4].bytes.as_chunks::<4>().0)
+        .zip(inputs[5].bytes.as_chunks::<4>().0)
     {
         let mut row = [0; 28];
         copy_8(&mut row[0..8], src0);
@@ -94,12 +96,14 @@ fn append_6_4_4_2_2_8_8_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     output.reserve(element_count * 28);
     for (((((src0, src1), src2), src3), src4), src5) in inputs[0]
         .bytes
-        .chunks_exact(4)
-        .zip(inputs[1].bytes.chunks_exact(4))
-        .zip(inputs[2].bytes.chunks_exact(2))
-        .zip(inputs[3].bytes.chunks_exact(2))
-        .zip(inputs[4].bytes.chunks_exact(8))
-        .zip(inputs[5].bytes.chunks_exact(8))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(inputs[1].bytes.as_chunks::<4>().0)
+        .zip(inputs[2].bytes.as_chunks::<2>().0)
+        .zip(inputs[3].bytes.as_chunks::<2>().0)
+        .zip(inputs[4].bytes.as_chunks::<8>().0)
+        .zip(inputs[5].bytes.as_chunks::<8>().0)
     {
         let mut row = [0; 28];
         copy_4(&mut row[0..4], src0);

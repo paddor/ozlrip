@@ -45,16 +45,25 @@ pub(super) fn decode_delta_elements(
         }
         2 => {
             let mut previous = u16::from_le_bytes([header[0], header[1]]);
-            for (out, delta) in output[2..].chunks_exact_mut(2).zip(stored.chunks_exact(2)) {
-                previous = previous.wrapping_add(u16::from_le_bytes([delta[0], delta[1]]));
+            for (out, delta) in output[2..]
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .zip(stored.as_chunks::<2>().0)
+            {
+                previous = previous.wrapping_add(u16::from_le_bytes(*delta));
                 out.copy_from_slice(&previous.to_le_bytes());
             }
         }
         4 => {
             let mut previous = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            for (out, delta) in output[4..].chunks_exact_mut(4).zip(stored.chunks_exact(4)) {
-                previous = previous
-                    .wrapping_add(u32::from_le_bytes([delta[0], delta[1], delta[2], delta[3]]));
+            for (out, delta) in output[4..]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(stored.as_chunks::<4>().0)
+            {
+                previous = previous.wrapping_add(u32::from_le_bytes(*delta));
                 out.copy_from_slice(&previous.to_le_bytes());
             }
         }
@@ -63,10 +72,13 @@ pub(super) fn decode_delta_elements(
                 header[0], header[1], header[2], header[3], header[4], header[5], header[6],
                 header[7],
             ]);
-            for (out, delta) in output[8..].chunks_exact_mut(8).zip(stored.chunks_exact(8)) {
-                previous = previous.wrapping_add(u64::from_le_bytes([
-                    delta[0], delta[1], delta[2], delta[3], delta[4], delta[5], delta[6], delta[7],
-                ]));
+            for (out, delta) in output[8..]
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(stored.as_chunks::<8>().0)
+            {
+                previous = previous.wrapping_add(u64::from_le_bytes(*delta));
                 out.copy_from_slice(&previous.to_le_bytes());
             }
         }

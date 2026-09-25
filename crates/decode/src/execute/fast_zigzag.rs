@@ -19,25 +19,22 @@ fn decode_numeric_safe(input: &[u8], element_width: usize, output: &mut Vec<u8>)
             }
         }
         2 => {
-            for encoded in input.chunks_exact(2) {
-                let value = u16::from_le_bytes([encoded[0], encoded[1]]);
+            for encoded in input.as_chunks::<2>().0 {
+                let value = u16::from_le_bytes(*encoded);
                 let mask = 0u16.wrapping_sub(value & 1);
                 output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
             }
         }
         4 => {
-            for encoded in input.chunks_exact(4) {
-                let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+            for encoded in input.as_chunks::<4>().0 {
+                let value = u32::from_le_bytes(*encoded);
                 let mask = 0u32.wrapping_sub(value & 1);
                 output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
             }
         }
         8 => {
-            for encoded in input.chunks_exact(8) {
-                let value = u64::from_le_bytes([
-                    encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5],
-                    encoded[6], encoded[7],
-                ]);
+            for encoded in input.as_chunks::<8>().0 {
+                let value = u64::from_le_bytes(*encoded);
                 let mask = 0u64.wrapping_sub(value & 1);
                 output.extend_from_slice(&((value >> 1) ^ mask).to_le_bytes());
             }
@@ -67,8 +64,8 @@ fn decode_u16_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
         // SAFETY: the caller reserved `input.len()` bytes in `output` and the
         // width validation above ensures exact 2-byte chunks.
         let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(2).enumerate() {
-            let value = u16::from_le_bytes([encoded[0], encoded[1]]);
+        for (index, encoded) in input.as_chunks::<2>().0.iter().enumerate() {
+            let value = u16::from_le_bytes(*encoded);
             let mask = 0u16.wrapping_sub(value & 1);
             dst.add(index * 2)
                 .cast::<u16>()
@@ -90,8 +87,8 @@ fn decode_u32_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
         // SAFETY: the caller reserved `input.len()` bytes in `output` and the
         // width validation above ensures exact 4-byte chunks.
         let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(4).enumerate() {
-            let value = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+        for (index, encoded) in input.as_chunks::<4>().0.iter().enumerate() {
+            let value = u32::from_le_bytes(*encoded);
             let mask = 0u32.wrapping_sub(value & 1);
             dst.add(index * 4)
                 .cast::<u32>()
@@ -113,11 +110,8 @@ fn decode_u64_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
         // SAFETY: the caller reserved `input.len()` bytes in `output` and the
         // width validation above ensures exact 8-byte chunks.
         let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.chunks_exact(8).enumerate() {
-            let value = u64::from_le_bytes([
-                encoded[0], encoded[1], encoded[2], encoded[3], encoded[4], encoded[5], encoded[6],
-                encoded[7],
-            ]);
+        for (index, encoded) in input.as_chunks::<8>().0.iter().enumerate() {
+            let value = u64::from_le_bytes(*encoded);
             let mask = 0u64.wrapping_sub(value & 1);
             dst.add(index * 8)
                 .cast::<u64>()

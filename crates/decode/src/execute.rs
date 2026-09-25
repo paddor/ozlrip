@@ -2309,7 +2309,7 @@ fn parse_float_deconstruct_header(
 }
 
 fn decode_float32_deconstruct(sign_frac: &[u8], exponent: &[u8], output: &mut Vec<u8>) {
-    for (sf, &exp) in sign_frac.chunks_exact(3).zip(exponent) {
+    for (sf, &exp) in sign_frac.as_chunks::<3>().0.iter().zip(exponent) {
         let sf = u32::from(sf[0]) | (u32::from(sf[1]) << 8) | (u32::from(sf[2]) << 16);
         let bits = (u32::from(exp) << 23) | ((sf & 1) << 31) | (sf >> 1);
         output.extend_from_slice(&bits.to_le_bytes());
@@ -2328,8 +2328,8 @@ fn decode_float16_deconstruct(
     exponent: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for (sf, &exp) in sign_frac.chunks_exact(2).zip(exponent) {
-        let sf = u16::from_le_bytes([sf[0], sf[1]]);
+    for (sf, &exp) in sign_frac.as_chunks::<2>().0.iter().zip(exponent) {
+        let sf = u16::from_le_bytes(*sf);
         if sf & !0x07ff != 0 || exp & !0x1f != 0 {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("float16_deconstruct unused bits must be zero"));
@@ -2516,8 +2516,8 @@ fn decode_string_component_lengths(
             fast_lengths::decode_u8_lengths(field_sizes.bytes, &mut string_lengths, &mut total)?;
         }
         2 => {
-            for size in field_sizes.bytes.chunks_exact(2) {
-                let size = u16::from_le_bytes([size[0], size[1]]);
+            for size in field_sizes.bytes.as_chunks::<2>().0 {
+                let size = u16::from_le_bytes(*size);
                 total = total
                     .checked_add(usize::from(size))
                     .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -2525,8 +2525,8 @@ fn decode_string_component_lengths(
             }
         }
         4 => {
-            for size in field_sizes.bytes.chunks_exact(4) {
-                let size = u32::from_le_bytes([size[0], size[1], size[2], size[3]]);
+            for size in field_sizes.bytes.as_chunks::<4>().0 {
+                let size = u32::from_le_bytes(*size);
                 let size_usize = usize::try_from(size).map_err(|_| {
                     Error::new(ErrorKind::LimitExceeded)
                         .with_detail("string field size is too large")
@@ -3223,10 +3223,12 @@ fn decode_mux_lengths_u16(
     })?;
     match_lengths.resize(output_len, 0);
 
-    let mut long_lengths = long_lengths.chunks_exact(2);
+    let mut long_lengths = long_lengths.as_chunks::<2>().0.iter();
     for ((literal_out, match_out), &mux) in literal_lengths
-        .chunks_exact_mut(2)
-        .zip(match_lengths.chunks_exact_mut(2))
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(match_lengths.as_chunks_mut::<2>().0)
         .zip(muxed_lengths)
     {
         let mux = u64::from(mux);
@@ -3265,11 +3267,11 @@ fn decode_mux_lengths_u16(
 }
 
 #[inline]
-fn read_next_u16_long_length(long_lengths: &mut core::slice::ChunksExact<'_, u8>) -> Result<u64> {
+fn read_next_u16_long_length(long_lengths: &mut core::slice::Iter<'_, [u8; 2]>) -> Result<u64> {
     let bytes = long_lengths.next().ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("mux_lengths long-length stream is exhausted")
     })?;
-    Ok(u64::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+    Ok(u64::from(u16::from_le_bytes(*bytes)))
 }
 
 fn checked_next_long_pos(long_pos: usize, long_count: usize) -> Result<usize> {
