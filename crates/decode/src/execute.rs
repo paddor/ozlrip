@@ -26,7 +26,6 @@ mod numeric_nodes;
 mod output;
 mod parse_int;
 mod partition;
-mod plan_cache;
 mod runtime;
 mod zstd;
 
@@ -54,12 +53,8 @@ use numeric_nodes::{
 };
 #[cfg(feature = "checksum")]
 use output::verify_decoded_checksum;
-use output::{DecodedChunk, DecodedOutput, check_output_size};
+use output::{DecodedChunk, check_output_size};
 use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
-pub(crate) use plan_cache::{
-    ChunkExecutionPlans, DirectAppendChunkPlans, prepare_chunk_execution_plans,
-    prepare_direct_append_chunk_plans,
-};
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 #[cfg(feature = "zstd")]
 pub(crate) use zstd::decode_single_zstd_frame_with_context;
@@ -99,67 +94,6 @@ pub(crate) fn decode_plan_with_context(
     limits: Limits,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
-    decode_plan_with_execution_mode(
-        input,
-        plan,
-        PlanExecutionMode::ComputeDirectAppend,
-        dst,
-        limits,
-        runtime,
-    )
-}
-
-pub(crate) fn decode_plan_with_cached_direct_append_plans(
-    input: &[u8],
-    plan: &FramePlan,
-    direct_append_plans: &DirectAppendChunkPlans,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<usize> {
-    decode_plan_with_execution_mode(
-        input,
-        plan,
-        PlanExecutionMode::UseDirectAppend(direct_append_plans),
-        dst,
-        limits,
-        runtime,
-    )
-}
-
-pub(crate) fn decode_plan_with_cached_chunk_execution_plans(
-    input: &[u8],
-    plan: &FramePlan,
-    chunk_execution_plans: &ChunkExecutionPlans,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<usize> {
-    decode_plan_with_execution_mode(
-        input,
-        plan,
-        PlanExecutionMode::UseChunkPlans(chunk_execution_plans),
-        dst,
-        limits,
-        runtime,
-    )
-}
-
-#[derive(Clone, Copy)]
-enum PlanExecutionMode<'a> {
-    ComputeDirectAppend,
-    UseDirectAppend(&'a DirectAppendChunkPlans),
-    UseChunkPlans(&'a ChunkExecutionPlans),
-}
-
-fn decode_plan_with_execution_mode(
-    input: &[u8],
-    plan: &FramePlan,
-    mode: PlanExecutionMode<'_>,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<usize> {
     if let Some(written) = try_decode_single_zstd_into_dst(
         input,
         plan,
@@ -170,116 +104,43 @@ fn decode_plan_with_execution_mode(
     )? {
         return Ok(written);
     }
-    if let PlanExecutionMode::UseDirectAppend(chunk_plans) = mode {
-        return decode_plan_appending_to_dst_with_rollback(
-            input,
-            plan,
-            chunk_plans,
-            dst,
-            limits,
-            runtime,
-        );
-    }
-    if matches!(mode, PlanExecutionMode::ComputeDirectAppend)
-        && let Some(written) = try_decode_plan_appending_to_dst(input, plan, dst, limits, runtime)?
-    {
-        return Ok(written);
-    }
-    let chunk_execution_plans = match mode {
-        PlanExecutionMode::UseChunkPlans(plans) => Some(plans),
-        PlanExecutionMode::ComputeDirectAppend | PlanExecutionMode::UseDirectAppend(_) => None,
-    };
-    let decoded = collect_decoded_output(input, plan, limits, chunk_execution_plans, runtime)?;
-    let mut chunks = decoded.chunks;
-    if dst.is_empty() && chunks.len() == 1 {
-        match chunks.pop().expect("single decoded chunk exists") {
-            DecodedChunk::Owned(bytes) => {
-                let written = bytes.len();
-                *dst = bytes;
-                return Ok(written);
-            }
-            borrowed @ DecodedChunk::Borrowed(_) => chunks.push(borrowed),
-        }
-    }
-    dst.try_reserve_exact(decoded.total_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-    })?;
-    for chunk in chunks {
-        dst.extend_from_slice(chunk.as_slice());
-    }
-    Ok(decoded.total_len)
-}
-
-fn try_decode_plan_appending_to_dst(
-    input: &[u8],
-    plan: &FramePlan,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
-        return Ok(None);
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single serial stored-output frames are implemented"));
     }
-    let Some(chunk_plans) = prepare_direct_append_chunk_plans(plan)? else {
-        return Ok(None);
-    };
-    decode_plan_appending_to_dst_with_rollback(input, plan, &chunk_plans, dst, limits, runtime)
-        .map(Some)
-}
-
-fn decode_plan_appending_to_dst_with_rollback(
-    input: &[u8],
-    plan: &FramePlan,
-    chunk_plans: &DirectAppendChunkPlans,
-    dst: &mut Vec<u8>,
-    limits: Limits,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<usize> {
-    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
-        let expected = usize::try_from(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
-        })?;
-        dst.try_reserve_exact(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-        })?;
-    }
-
     let start_len = dst.len();
-    let result =
-        decode_plan_appending_to_dst(input, plan, &chunk_plans.chunk_plans, dst, limits, runtime);
-    match result {
-        Ok(written) => Ok(written),
-        Err(err) => {
-            dst.truncate(start_len);
-            Err(err)
-        }
+    let result = decode_serial_chunks(input, plan, dst, limits, runtime);
+    if result.is_err() {
+        dst.truncate(start_len);
     }
+    result
 }
 
-fn decode_plan_appending_to_dst(
+/// Decodes each chunk of a single-serial-output frame and appends it to
+/// `dst`. Each chunk's execution plan is built once; chunks whose graph ends
+/// in a direct-append tail write straight into `dst`.
+fn decode_serial_chunks(
     input: &[u8],
     plan: &FramePlan,
-    chunk_plans: &[Option<ChunkExecutionPlan>],
     dst: &mut Vec<u8>,
     limits: Limits,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     let start_len = dst.len();
+    let mut reservation = OutputReservation::new(plan)?;
+    let single_chunk = plan.chunks.len() == 1;
     let mut total_len = 0usize;
-    if chunk_plans.len() != plan.chunks.len() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("chunk execution plan count mismatch")
-        );
-    }
-    for (chunk, chunk_plan) in plan.chunks.iter().zip(chunk_plans.iter()) {
+    for chunk in &plan.chunks {
         let chunk_start = dst.len();
         if chunk.has_nodes() {
-            if let Some(chunk_plan) = chunk_plan.as_ref() {
+            let execution = build_chunk_execution_plan(chunk)?;
+            if direct_append_tail(&execution).is_some() {
+                reservation.reserve(dst)?;
                 decode_transform_chunk_appending(
                     input,
                     DirectAppendChunk {
                         chunk,
-                        execution: chunk_plan,
+                        execution: &execution,
                     },
                     plan.info.format_version,
                     limits,
@@ -288,23 +149,32 @@ fn decode_plan_appending_to_dst(
                     runtime,
                 )?;
             } else {
-                let decoded = decode_transform_chunk(
+                let decoded = decode_transform_chunk_with_plan(
                     input,
                     chunk,
+                    &execution,
                     plan.info.format_version,
                     limits,
                     plan.info.dictionary_bundle_id.as_deref(),
                     runtime,
                 )?;
-                let decoded = decoded.as_slice();
-                dst.try_reserve_exact(decoded.len()).map_err(|_| {
-                    Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-                })?;
-                dst.extend_from_slice(decoded);
+                append_decoded_chunk(
+                    dst,
+                    decoded,
+                    single_chunk,
+                    &mut reservation,
+                    runtime.scratch,
+                )?;
             }
         } else {
             let stored = stored_only_chunk(input, chunk)?;
-            dst.extend_from_slice(stored);
+            append_decoded_chunk(
+                dst,
+                DecodedChunk::Borrowed(stored),
+                single_chunk,
+                &mut reservation,
+                runtime.scratch,
+            )?;
         }
         let decoded = &dst[chunk_start..];
         total_len = total_len
@@ -319,73 +189,80 @@ fn decode_plan_appending_to_dst(
     Ok(dst.len() - start_len)
 }
 
-fn collect_decoded_output<'a>(
-    input: &'a [u8],
-    plan: &FramePlan,
-    limits: Limits,
-    chunk_execution_plans: Option<&ChunkExecutionPlans>,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<DecodedOutput<'a>> {
-    if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only single serial stored-output frames are implemented"));
+/// Reserves the frame's declared output size in `dst` once, before the
+/// first append.
+struct OutputReservation {
+    declared: Option<usize>,
+    done: bool,
+}
+
+impl OutputReservation {
+    fn new(plan: &FramePlan) -> Result<Self> {
+        let declared = plan
+            .info
+            .output_sizes
+            .first()
+            .and_then(|size| *size)
+            .map(|size| {
+                usize::try_from(size).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded)
+                        .with_detail("decoded output size is too large")
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            declared,
+            done: false,
+        })
     }
 
-    let mut chunks = Vec::new();
-    chunks.try_reserve_exact(plan.chunks.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("decoded output list allocation failed")
-    })?;
-    let mut total_len = 0usize;
-    let cached_chunk_plans = if let Some(plans) = chunk_execution_plans {
-        if plans.chunk_plans.len() != plan.chunks.len() {
-            return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("chunk execution plan count mismatch"));
-        }
-        Some(plans.chunk_plans.as_slice())
-    } else {
-        None
-    };
-    for (chunk_index, chunk) in plan.chunks.iter().enumerate() {
-        let decoded = if chunk.has_nodes() {
-            if let Some(chunk_plans) = cached_chunk_plans {
-                let chunk_plan = chunk_plans[chunk_index].as_ref().ok_or_else(|| {
-                    Error::new(ErrorKind::InvalidGraph)
-                        .with_detail("chunk execution plan is missing")
+    fn reserve(&mut self, dst: &mut Vec<u8>) -> Result<()> {
+        if !self.done {
+            if let Some(declared) = self.declared {
+                dst.try_reserve_exact(declared).map_err(|_| {
+                    Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
                 })?;
-                decode_transform_chunk_with_plan(
-                    input,
-                    chunk,
-                    chunk_plan,
-                    plan.info.format_version,
-                    limits,
-                    plan.info.dictionary_bundle_id.as_deref(),
-                    runtime,
-                )?
-            } else {
-                decode_transform_chunk(
-                    input,
-                    chunk,
-                    plan.info.format_version,
-                    limits,
-                    plan.info.dictionary_bundle_id.as_deref(),
-                    runtime,
-                )?
             }
-        } else {
-            DecodedChunk::Borrowed(stored_only_chunk(input, chunk)?)
-        };
-        let decoded_len = decoded.as_slice().len();
-        total_len = total_len
-            .checked_add(decoded_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        #[cfg(not(feature = "checksum"))]
-        let _ = chunk.decoded_checksum;
-        #[cfg(feature = "checksum")]
-        verify_decoded_checksum(decoded.as_slice(), chunk.decoded_checksum)?;
-        chunks.push(decoded);
+            self.done = true;
+        }
+        Ok(())
     }
-    check_output_size(total_len, input.len(), plan, limits)?;
-    Ok(DecodedOutput { chunks, total_len })
+}
+
+/// Appends one decoded chunk. A single-chunk frame whose output is an owned
+/// buffer moves it into an empty `dst` that is too small to hold it, instead
+/// of copying; the displaced allocation goes back to the scratch pool.
+fn append_decoded_chunk(
+    dst: &mut Vec<u8>,
+    decoded: DecodedChunk<'_>,
+    single_chunk: bool,
+    reservation: &mut OutputReservation,
+    scratch: &mut DecodeScratch,
+) -> Result<()> {
+    if let DecodedChunk::Owned(bytes) = decoded {
+        if single_chunk && dst.is_empty() && dst.capacity() < bytes.len() {
+            let displaced = core::mem::replace(dst, bytes);
+            if displaced.capacity() > 0 {
+                scratch.recycle_byte_buffer(displaced);
+            }
+            return Ok(());
+        }
+        return append_slice(dst, &bytes, reservation);
+    }
+    append_slice(dst, decoded.as_slice(), reservation)
+}
+
+fn append_slice(
+    dst: &mut Vec<u8>,
+    bytes: &[u8],
+    reservation: &mut OutputReservation,
+) -> Result<()> {
+    reservation.reserve(dst)?;
+    dst.try_reserve(bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+    })?;
+    dst.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Result<&'a [u8]> {
@@ -398,26 +275,6 @@ fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Re
             .with_detail("stored-output chunk contains multiple stored streams"));
     }
     range.as_slice(input)
-}
-
-fn decode_transform_chunk<'a>(
-    input: &'a [u8],
-    chunk: &crate::parse::ChunkPlan,
-    format_version: u32,
-    limits: Limits,
-    dictionary_bundle_id: Option<&[u8]>,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<DecodedChunk<'a>> {
-    let plan = build_chunk_execution_plan(chunk)?;
-    decode_transform_chunk_with_plan(
-        input,
-        chunk,
-        &plan,
-        format_version,
-        limits,
-        dictionary_bundle_id,
-        runtime,
-    )
 }
 
 fn decode_transform_chunk_with_plan<'a>(
@@ -1212,6 +1069,12 @@ fn build_chunk_execution_plan(chunk: &crate::parse::ChunkPlan) -> Result<ChunkEx
         let standard_id = node.standard_id().ok_or_else(|| {
             Error::new(ErrorKind::Unsupported).with_detail("custom graph execution is unsupported")
         })?;
+        // Checked here so every execution path, including direct-append
+        // tails and shortcuts, rejects unsupported dictionary use.
+        if node.dict_index().is_some() && standard_id != standard::ZSTD_ID {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("only zstd dictionary-backed transforms are implemented"));
+        }
         let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
         })?;
@@ -1432,11 +1295,6 @@ fn execute_standard_node(
     header: &[u8],
     ctx: &mut StandardNodeContext<'_>,
 ) -> Result<SmallVec<[OwnedStream; 2]>> {
-    if dict_index.is_some() && standard_id != standard::ZSTD_ID {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only zstd dictionary-backed transforms are implemented"));
-    }
-
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
             decode_concat_node(inputs, header, ctx.limits).map(SmallVec::from_vec)

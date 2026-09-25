@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Breaking: remove the decoder plan cache, `Options::plan_cache_max_frame_bytes`
+  and `DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES`. The cache only helped when the
+  exact same frame bytes were decoded again, cost a frame copy and plan clone
+  on every miss, and let a reused `Decoder` accept typed-output frames on the
+  second call that it rejected on the first.
+- Unsupported dictionary use is rejected when a chunk's execution plan is
+  built, so direct-append paths can no longer skip the check.
+- `decode_into` no longer replaces an empty caller `Vec` that already has
+  enough capacity, so reserved capacity is kept.
 - Decode OpenZL format v27, the version upstream writes by default, in every
   build. Breaking: remove the `dev-format` feature.
 - Match upstream's per-transform format version ranges: `transpose_split` is

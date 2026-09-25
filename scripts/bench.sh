@@ -15,7 +15,6 @@ usage: scripts/bench.sh [options]
   --impl NAME        run one impl, e.g. ozlrip or openzl-c-ffi (OZLRIP_BENCH_IMPL)
   --target-ms N      measurement time per round (OZLRIP_BENCH_TARGET_MS)
   --features LIST    extra bench crate features, e.g. no-checksum or paranoid
-  --no-plan-cache    disable the ozlrip plan cache (OZLRIP_BENCH_PLAN_CACHE=0)
 EOF
 }
 
@@ -29,7 +28,6 @@ while [[ $# -gt 0 ]]; do
     --impl) export OZLRIP_BENCH_IMPL="$2"; shift ;;
     --target-ms) export OZLRIP_BENCH_TARGET_MS="$2"; shift ;;
     --features) features+=(--features "$2"); shift ;;
-    --no-plan-cache) export OZLRIP_BENCH_PLAN_CACHE=0 ;;
     -h | --help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac

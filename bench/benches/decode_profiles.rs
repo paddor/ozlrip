@@ -559,11 +559,7 @@ fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
 }
 
 fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
-    let mut options = ozlrip::Options::from(bench_limits());
-    if !plan_cache_enabled() {
-        options.plan_cache_max_frame_bytes = 0;
-    }
-    let mut decoder = ozlrip::Decoder::with_options(options);
+    let mut decoder = ozlrip::Decoder::with_options(ozlrip::Options::from(bench_limits()));
     let mut dst = Vec::new();
     let stats = bench_loop(target, || {
         dst.clear();
@@ -575,9 +571,6 @@ fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResul
     BenchResult::new(OZLRIP_IMPL, case, stats, zli_rev)
 }
 
-fn plan_cache_enabled() -> bool {
-    env::var("OZLRIP_BENCH_PLAN_CACHE").map_or(true, |value| value != "0")
-}
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
     let mut output = Vec::new();
@@ -713,7 +706,6 @@ struct BenchResult {
     rustflags: &'static str,
     openzl_moreflags: &'static str,
     zli_rev: String,
-    plan_cache: bool,
     codec_versions: String,
 }
 
@@ -745,7 +737,6 @@ impl BenchResult {
             rustflags,
             openzl_moreflags: openzl_shim::OPENZL_MOREFLAGS,
             zli_rev: zli_rev.to_owned(),
-            plan_cache: plan_cache_enabled(),
             codec_versions: codec_versions(),
         }
     }
@@ -759,7 +750,7 @@ impl BenchResult {
                 r#""decoded_mbps": {:.1}, "frame_mbps": {:.1}, "#,
                 r#""timestamp_unix": {}, "git_rev": "{}", "git_dirty": {}, "#,
                 r#""build": "{}", "rustflags": "{}", "openzl_moreflags": "{}", "#,
-                r#""zli_rev": "{}", "plan_cache": {}, "codec_versions": "{}"}}"#
+                r#""zli_rev": "{}", "codec_versions": "{}"}}"#
             ),
             self.impl_name,
             self.input_name,
@@ -778,7 +769,6 @@ impl BenchResult {
             json_escape(self.rustflags),
             json_escape(self.openzl_moreflags),
             self.zli_rev,
-            self.plan_cache,
             json_escape(&self.codec_versions),
         )
     }

@@ -1096,15 +1096,17 @@ fn decodes_v21_stored_serial_chunks() {
 
 #[cfg(feature = "zstd")]
 #[test]
-fn prepares_mixed_direct_append_chunk_plans() {
+fn chooses_direct_append_per_chunk() {
     let input = mixed_direct_append_frame();
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
 
-    let plans = prepare_direct_append_chunk_plans(&plan).unwrap().unwrap();
+    let direct = plan
+        .chunks
+        .iter()
+        .map(|chunk| direct_append_tail(&build_chunk_execution_plan(chunk).unwrap()).is_some())
+        .collect::<Vec<_>>();
 
-    assert_eq!(plans.chunk_plans.len(), 2);
-    assert!(plans.chunk_plans[0].is_some());
-    assert!(plans.chunk_plans[1].is_none());
+    assert_eq!(direct, [true, false]);
 }
 
 #[cfg(feature = "zstd")]

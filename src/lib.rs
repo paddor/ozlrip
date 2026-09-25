@@ -20,6 +20,6 @@ extern crate alloc;
 
 pub use ozlrip_core::{Error, ErrorKind, Limits, Result};
 pub use ozlrip_decode::{
-    DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES, Decoder, FrameInfo, FrameValueType, Options, decode,
-    decode_into, decode_into_with_options, decode_with_options, inspect, inspect_with_options,
+    Decoder, FrameInfo, FrameValueType, Options, decode, decode_into, decode_into_with_options,
+    decode_with_options, inspect, inspect_with_options,
 };

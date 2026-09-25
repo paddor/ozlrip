@@ -4,11 +4,6 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::parse::FramePlan;
 
-pub(super) struct DecodedOutput<'a> {
-    pub(super) chunks: Vec<DecodedChunk<'a>>,
-    pub(super) total_len: usize,
-}
-
 pub(super) enum DecodedChunk<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
