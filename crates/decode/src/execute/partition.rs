@@ -632,6 +632,13 @@ impl<'a> ForwardBitReader<'a> {
             .checked_add(bits)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         let needed_bytes = needed_bits.div_ceil(8);
+        if needed_bytes > 4 {
+            // 25 to 32 bits at a nonzero bit offset span five bytes, which
+            // do not fit a 32-bit window.
+            let value = self.read_u64(bits)?;
+            let value = u32::try_from(value).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+            return Ok(value & mask);
+        }
         let mut value = fast_bitreader::read_window_u32(self.bytes, byte_pos, needed_bytes)
             .ok_or_else(|| {
                 Error::new(ErrorKind::Malformed).with_detail("forward bitstream is truncated")
@@ -655,5 +662,34 @@ impl<'a> ForwardBitReader<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForwardBitReader;
+
+    /// Windows of 25 to 32 bits at a nonzero bit offset span five bytes.
+    #[test]
+    fn read_u32_window_matches_read_u64_across_five_bytes() {
+        let bytes = [0xff, 0xff, 0xff, 0xff, 0x01, 0, 0, 0, 0, 0];
+        for skip in 1..8 {
+            for bits in 25..=32 {
+                let mut wide = ForwardBitReader::new(&bytes);
+                wide.read_u64(skip).unwrap();
+                let expected = wide.read_u64(bits).unwrap();
+
+                let mut narrow = ForwardBitReader::new(&bytes);
+                narrow.read_u64(skip).unwrap();
+                let mask = if bits == 32 {
+                    u32::MAX
+                } else {
+                    (1u32 << bits) - 1
+                };
+                let got = narrow.read_u32_window(bits, mask).unwrap();
+                assert_eq!(u64::from(got), expected, "skip={skip} bits={bits}");
+                assert_eq!(narrow.bit_pos, wide.bit_pos);
+            }
+        }
     }
 }

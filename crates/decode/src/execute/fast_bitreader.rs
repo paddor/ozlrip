@@ -14,8 +14,11 @@ pub(super) fn read_window(bytes: &[u8], byte_pos: usize, needed_bytes: usize) ->
     read_window_safe(bytes, byte_pos, needed_bytes)
 }
 
+/// Reads up to four little-endian bytes. Callers read wider windows with
+/// [`read_window`].
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u32> {
+    debug_assert!(needed_bytes <= 4);
     let remaining = bytes.len().checked_sub(byte_pos)?;
     if needed_bytes <= 4 && remaining >= 4 {
         let ptr = bytes.as_ptr().wrapping_add(byte_pos).cast::<u32>();
@@ -33,8 +36,11 @@ pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize
     Some(value)
 }
 
+/// Reads up to four little-endian bytes. Callers read wider windows with
+/// [`read_window`].
 #[cfg(feature = "paranoid")]
 pub(super) fn read_window_u32(bytes: &[u8], byte_pos: usize, needed_bytes: usize) -> Option<u32> {
+    debug_assert!(needed_bytes <= 4);
     if needed_bytes <= 4
         && let Some(bytes) = bytes.get(byte_pos..byte_pos.checked_add(4)?)
     {

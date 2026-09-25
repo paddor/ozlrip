@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix quantize and partition decoding of 25- to 32-bit extra bits that start
+  mid-byte. Release builds returned wrong values; debug builds panicked.
 - Breaking: remove the decoder plan cache, `Options::plan_cache_max_frame_bytes`
   and `DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES`. The cache only helped when the
   exact same frame bytes were decoded again, cost a frame copy and plan clone
