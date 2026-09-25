@@ -14,7 +14,7 @@ usage: scripts/bench.sh [options]
   --case NAME        run one case (OZLRIP_BENCH_CASE)
   --impl NAME        run one impl, e.g. ozlrip or openzl-c-ffi (OZLRIP_BENCH_IMPL)
   --target-ms N      measurement time per round (OZLRIP_BENCH_TARGET_MS)
-  --features LIST    extra bench crate features, e.g. dev-format,no-checksum
+  --features LIST    extra bench crate features, e.g. no-checksum or paranoid
   --no-plan-cache    disable the ozlrip plan cache (OZLRIP_BENCH_PLAN_CACHE=0)
 EOF
 }

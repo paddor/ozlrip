@@ -32,7 +32,6 @@ zstd = ["ozlrip-decode/zstd"]
 lz4 = ["ozlrip-decode/lz4"]
 checksum = ["ozlrip-core/checksum", "ozlrip-decode/checksum"]
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
-dev-format = ["ozlrip-core/dev-format", "ozlrip-decode/dev-format"]
 
 [dependencies]
 ozlrip-core = { version = "0.5.0", path = "crates/core", default-features = false }

@@ -37,7 +37,7 @@ the default decoder options are not the right fit. Load dictionary bundles with
   quantize
 - [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
 - [x] `paranoid` safe-code baseline
-- [x] OpenZL `dev-format` v27 metadata and PivCo-Huffman graph validation
+- [x] OpenZL format v27, including PivCo-Huffman
 - [x] PivCo-Huffman payload decode, safe scalar path, and std-gated SIMD merge
 - [x] Fat-bundle dictionary materialization for zstd
 - [x] Broad release-tag interop checkpoint matrix

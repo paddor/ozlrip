@@ -19,7 +19,6 @@ zstd = ["std", "dep:zrip", "zrip/simd"]
 lz4 = ["std", "dep:lz4rip"]
 checksum = ["ozlrip-core/checksum", "dep:xxhash-rust"]
 paranoid = ["ozlrip-core/paranoid"]
-dev-format = ["ozlrip-core/dev-format"]
 
 [dependencies]
 ozlrip-core = { version = "0.5.0", path = "../core", default-features = false }

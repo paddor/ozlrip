@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Decode OpenZL format v27, the version upstream writes by default, in every
+  build. Breaking: remove the `dev-format` feature.
+- Match upstream's per-transform format version ranges: `transpose_split` is
+  accepted from v11 and `convert_serial_string`/`separate_string_components`
+  from v10. Deprecated transforms are rejected after their last version
+  (`zstd_fixed` after v10, FastLZ and ROLZ after v12, deprecated FSE and
+  Huffman after v14).
 - Breaking: `Limits`, `Options`, `FrameInfo`, `ErrorKind`, and
   `FrameValueType` are `#[non_exhaustive]`. Build `Limits` from
   `Limits::strict()`, `Limits::paranoid()`, or `Limits::default()` and set

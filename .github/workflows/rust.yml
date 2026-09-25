@@ -69,7 +69,7 @@ jobs:
             ref: b75871dfacbfde89935e30af407c430687d656da
             path: tmp/openzl-upstream
             env: OZLRIP_ZLI
-            features: dev-format
+            features: ""
             tests: upstream_zli_golden upstream_profile_discovery
           - name: v0.2.0
             ref: v0.2.0
@@ -115,7 +115,7 @@ jobs:
         run: |
           cargo clippy --manifest-path tools/openzl-shim/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path interop/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path bench/Cargo.toml --all-targets --features dev-format -- -D warnings
+          cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
 
   miri:
     runs-on: ubuntu-latest

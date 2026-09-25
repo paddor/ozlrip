@@ -11,7 +11,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ozlrip = { path = "..", features = ["dev-format"] }
+ozlrip = { path = ".." }
+ozlrip-test-support = { path = "../crates/test-support" }
 
 [[bin]]
 name = "parse_frame"

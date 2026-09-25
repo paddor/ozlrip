@@ -1,8 +1,8 @@
 //! OpenZL frame and dictionary bundle builders for ozlrip tests.
 //!
-//! [`FrameBuilder`] writes format v21 and later (chunked frames). Frames in
-//! older formats come from upstream OpenZL through `tools/openzl-shim`.
-//! Not published.
+//! [`FrameBuilder`] writes chunked frames (format v21 and later) and
+//! single-chunk frames in formats v8 to v20. Frames that need upstream's
+//! encoder come from `tools/openzl-shim`. Not published.
 
 /// OpenZL frame magic for format version 0; add the version.
 pub const MAGIC_BASE: u32 = 0xd7b1_a5c0;
@@ -50,6 +50,15 @@ pub fn bits_needed(max_value: usize) -> usize {
         0
     } else {
         usize::BITS as usize - (max_value - 1).leading_zeros() as usize
+    }
+}
+
+/// Transform and stream counts are single bytes before v9 and varints after.
+fn push_count(out: &mut Vec<u8>, version: u32, count: u64) {
+    if version < 9 {
+        out.push(u8::try_from(count).expect("count fits a byte before v9"));
+    } else {
+        push_var_u64(out, count);
     }
 }
 
@@ -161,9 +170,18 @@ impl Chunk {
         self
     }
 
-    fn encode(&self, version: u32, out: &mut Vec<u8>) {
-        push_var_u64(out, (self.nodes.len() + 1) as u64);
-        push_var_u64(out, self.stored.len() as u64);
+    fn encode(&self, version: u32, legacy_flags: u8, out: &mut Vec<u8>) {
+        let transforms = self.nodes.len() as u64;
+        if version >= 21 {
+            push_var_u64(out, transforms + 1);
+            push_var_u64(out, self.stored.len() as u64);
+        } else {
+            push_count(out, version, transforms);
+            push_count(out, version, self.stored.len() as u64);
+            if version >= 4 {
+                out.push(legacy_flags);
+            }
+        }
         if !self.nodes.is_empty() {
             self.encode_nodes(version, out);
         }
@@ -202,13 +220,20 @@ impl Chunk {
         for node in nodes.iter().filter(|node| node.variable_inputs != 0) {
             push_var_u64(out, u64::from(node.variable_inputs - 1));
         }
-        let multi_output = nodes
-            .iter()
-            .map(|node| u32::from(node.outputs != 1))
-            .collect::<Vec<_>>();
-        push_bitpacked_u32(out, &multi_output, 1);
-        for node in nodes.iter().filter(|node| node.outputs != 1) {
-            push_var_u64(out, (node.outputs - 2) as u64);
+        if version >= 16 {
+            let multi_output = nodes
+                .iter()
+                .map(|node| u32::from(node.outputs != 1))
+                .collect::<Vec<_>>();
+            push_bitpacked_u32(out, &multi_output, 1);
+            for node in nodes.iter().filter(|node| node.outputs != 1) {
+                push_var_u64(out, (node.outputs - 2) as u64);
+            }
+        } else {
+            assert!(
+                nodes.iter().all(|node| node.outputs == 1),
+                "nodes regenerate one stream before format v16"
+            );
         }
         let regenerated = nodes.iter().map(|node| node.outputs).sum::<usize>();
         let distances = self.distances.clone().unwrap_or_else(|| {
@@ -233,7 +258,12 @@ struct Output {
     elements: Option<u64>,
 }
 
-/// Builds an OpenZL frame in format v21 or later.
+/// Builds an OpenZL frame.
+///
+/// Format v21 and later: any number of chunks, typed outputs, comments,
+/// checksums. Formats v8 to v20: exactly one chunk and no checksums; v13 and
+/// earlier have one serial output, v14 one typed output, v15 to v20 up to
+/// three outputs.
 ///
 /// ```
 /// use ozlrip_test_support::{Chunk, FrameBuilder};
@@ -257,7 +287,7 @@ pub struct FrameBuilder {
 
 impl FrameBuilder {
     pub fn new(version: u32) -> Self {
-        assert!(version >= 21, "FrameBuilder writes format v21 and later");
+        assert!(version >= 8, "FrameBuilder writes format v8 and later");
         Self {
             version,
             content_checksum: false,
@@ -337,6 +367,9 @@ impl FrameBuilder {
     }
 
     pub fn build(&self) -> Vec<u8> {
+        if self.version < 21 {
+            return self.build_legacy();
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&magic(self.version));
         let flags = u8::from(self.content_checksum)
@@ -362,7 +395,7 @@ impl FrameBuilder {
         }
         for chunk in &self.chunks {
             let start = out.len();
-            chunk.encode(self.version, &mut out);
+            chunk.encode(self.version, 0, &mut out);
             if self.content_checksum {
                 let decoded = chunk
                     .decoded
@@ -376,6 +409,48 @@ impl FrameBuilder {
             }
         }
         out.push(0);
+        out
+    }
+
+    fn build_legacy(&self) -> Vec<u8> {
+        assert_eq!(self.chunks.len(), 1, "formats before v21 have one chunk");
+        assert!(
+            !self.content_checksum && !self.compressed_checksum,
+            "pre-v21 checksums are not supported by FrameBuilder yet"
+        );
+        let mut out = magic(self.version).to_vec();
+        let types = self
+            .outputs
+            .iter()
+            .map(|output| output.ty as u8)
+            .collect::<Vec<_>>();
+        match self.version {
+            ..=13 => assert_eq!(
+                types,
+                [OutputType::Serial as u8],
+                "formats before v14 have one serial output"
+            ),
+            14 => {
+                assert_eq!(types.len(), 1, "format v14 has one output");
+                out.push(types[0]);
+            }
+            _ => {
+                assert!(
+                    (1..=3).contains(&types.len()),
+                    "FrameBuilder supports 1 to 3 outputs before v21"
+                );
+                let mut token = u8::try_from(types.len() - 1).expect("small") << 6;
+                for (index, ty) in types.iter().enumerate() {
+                    token |= ty << (2 * index);
+                }
+                out.push(token);
+            }
+        }
+        for output in &self.outputs {
+            let size = u32::try_from(output.size).expect("size fits u32 before v21");
+            out.extend_from_slice(&size.to_le_bytes());
+        }
+        self.chunks[0].encode(self.version, 0, &mut out);
         out
     }
 
@@ -466,6 +541,20 @@ mod tests {
             .build();
         let mut expected = magic(23).to_vec();
         expected.extend_from_slice(&[0, 1, 4, 2, 1, 0, 62, 1, 0, 0, 0, 0, 2, 3, b'x', b'y', 0]);
+        assert_eq!(frame, expected);
+    }
+
+    #[test]
+    fn legacy_single_node_frame_matches_hand_encoded_bytes() {
+        let frame = FrameBuilder::new(12)
+            .serial_output(5)
+            .chunk(Chunk::new().node(Node::new(21)).stored_stream(*b"ab"))
+            .build();
+        let mut expected = magic(12).to_vec();
+        expected.extend_from_slice(&5u32.to_le_bytes());
+        // Counts, legacy flags, type, id, header flag, variable flag,
+        // distance, stored size, stored bytes; no regen count before v16.
+        expected.extend_from_slice(&[1, 1, 0, 0, 21, 0, 0, 0, 2, b'a', b'b']);
         assert_eq!(frame, expected);
     }
 

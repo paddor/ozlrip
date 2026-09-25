@@ -17,6 +17,5 @@ std = ["alloc"]
 alloc = []
 checksum = []
 paranoid = []
-dev-format = []
 
 [dependencies]

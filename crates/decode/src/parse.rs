@@ -17,9 +17,6 @@ type OutputSizeValues = SmallVec<[Option<u64>; 2]>;
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const MIN_FORMAT_VERSION: u32 = 8;
-#[cfg(not(feature = "dev-format"))]
-const MAX_FORMAT_VERSION: u32 = 26;
-#[cfg(feature = "dev-format")]
 const MAX_FORMAT_VERSION: u32 = 27;
 const CHUNK_VERSION_MIN: u32 = 21;
 const COMMENT_VERSION_MIN: u32 = 22;
@@ -2187,16 +2184,14 @@ mod tests {
         assert_eq!(err.offset(), Some(0));
     }
 
-    #[cfg(not(feature = "dev-format"))]
     #[test]
-    fn rejects_v27_without_dev_format() {
-        let err = inspect_frame(&magic(27), Limits::default()).unwrap_err();
+    fn rejects_format_versions_after_v27() {
+        let err = inspect_frame(&magic(28), Limits::default()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(err.offset(), Some(0));
     }
 
-    #[cfg(feature = "dev-format")]
     #[test]
     fn parses_v27_pivco_huffman_transform() {
         let input = pivco_huffman_frame(27);
