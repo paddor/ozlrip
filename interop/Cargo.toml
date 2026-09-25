@@ -10,4 +10,3 @@ description = "Interop tests of ozlrip against frames written by upstream OpenZL
 [dev-dependencies]
 openzl-shim = { path = "../tools/openzl-shim" }
 ozlrip = { path = "..", features = ["dev-format"] }
-ozlrip-core = { path = "../crates/core" }

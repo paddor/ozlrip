@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- Breaking: `Limits`, `Options`, `FrameInfo`, `ErrorKind`, and
+  `FrameValueType` are `#[non_exhaustive]`. Build `Limits` from
+  `Limits::strict()`, `Limits::paranoid()`, or `Limits::default()` and set
+  fields; build `Options` from `Options::default()` or the new
+  `Options::from(limits)`.
+- Breaking: `Limits::default()` is always `Limits::strict()`. The `paranoid`
+  feature no longer changes it; call `Limits::paranoid()` explicitly.
+- Breaking: rename `FrameInfo::inputs` to `FrameInfo::outputs`.
+- Breaking: remove `Decoder::load_fat_bundle`; use
+  `Decoder::load_dictionary_bundle`.
+- Breaking: `FrameInfo` and `FrameValueType` move from `ozlrip-core` to
+  `ozlrip-decode`. `FrameValueType` is now re-exported from `ozlrip`.
+- `Error::with_detail` takes `impl Into<Cow<'static, str>>`, so static
+  details no longer allocate.
+- `Error` implements `core::error::Error` without the `std` feature, and its
+  `Display` output uses readable kind names instead of `Debug` names.
+- `Decoder` implements `Debug` and is checked to be `Send + Sync`.
 - Remove the `interop` feature. The upstream interop tests are now ignored
   tests that require `OZLRIP_ZLI` or an `OZLRIP_ZLI_<release>` variable and
   fail when it is missing. Run them with `cargo test --test interop -- --ignored`.

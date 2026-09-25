@@ -962,11 +962,9 @@ mod tests {
     #[test]
     fn enforces_output_limit() {
         let weights = [1];
-        let limits = Limits {
-            max_decoded_bytes: 2,
-            max_buffer_bytes: 2,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_decoded_bytes = 2;
+        limits.max_buffer_bytes = 2;
 
         let err =
             decode_node(&[stream(&weights), stream(&[])], &header(3, None), limits).unwrap_err();

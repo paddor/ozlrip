@@ -1,6 +1,8 @@
 use alloc::{format, vec, vec::Vec};
 
-use ozlrip_core::{Error, ErrorKind, FrameInfo, FrameValueType, Limits, Result};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use crate::info::{FrameInfo, FrameValueType};
 use smallvec::{SmallVec, smallvec};
 
 use crate::standard;
@@ -94,7 +96,7 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         header_bytes,
         decoded_bytes: output_sizes.decoded_bytes,
         chunks: chunk_scan.summary.chunks,
-        inputs: output_header.outputs,
+        outputs: output_header.outputs,
         output_types: output_header.output_types,
         output_sizes: output_sizes.sizes,
         output_elements: output_sizes.elements,
@@ -1798,7 +1800,7 @@ pub(crate) struct FramePlanInfo {
     pub(crate) header_bytes: usize,
     pub(crate) decoded_bytes: Option<usize>,
     pub(crate) chunks: usize,
-    pub(crate) inputs: usize,
+    pub(crate) outputs: usize,
     pub(crate) output_types: OutputTypes,
     pub(crate) output_sizes: OutputSizeValues,
     pub(crate) output_elements: OutputSizeValues,
@@ -1829,7 +1831,7 @@ impl FramePlanInfo {
             header_bytes: self.header_bytes,
             decoded_bytes: self.decoded_bytes,
             chunks: self.chunks,
-            inputs: self.inputs,
+            outputs: self.outputs,
             output_types: self.output_types.into_vec(),
             output_sizes: self.output_sizes.into_vec(),
             output_elements: self.output_elements.into_vec(),
@@ -2236,7 +2238,7 @@ mod tests {
         assert_eq!(info.format_version, 21);
         assert_eq!(info.header_bytes, input.len());
         assert_eq!(info.decoded_bytes, Some(3));
-        assert_eq!(info.inputs, 1);
+        assert_eq!(info.outputs, 1);
         assert_eq!(info.output_types, [FrameValueType::Serial]);
         assert_eq!(info.output_sizes, [Some(3)]);
         assert_eq!(info.output_elements, [Some(3)]);
@@ -2307,7 +2309,7 @@ mod tests {
         for outputs in [1, 2, 14, 15] {
             let input = v21_header_with_outputs(outputs);
             let info = inspect_frame(&input, Limits::default()).unwrap();
-            assert_eq!(info.inputs, outputs);
+            assert_eq!(info.outputs, outputs);
             assert_eq!(info.output_types.len(), outputs);
             assert_eq!(info.output_sizes.len(), outputs);
         }
@@ -2349,10 +2351,8 @@ mod tests {
         input.push(0);
         input.push(1);
         input.push(4);
-        let limits = Limits {
-            max_buffer_bytes: 2,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_buffer_bytes = 2;
 
         let err = inspect_frame(&input, limits).unwrap_err();
 
@@ -2368,11 +2368,9 @@ mod tests {
         input.push(2);
         push_var_u64(&mut input, encoded_size);
         push_var_u64(&mut input, encoded_size);
-        let limits = Limits {
-            max_decoded_bytes: usize::MAX,
-            max_buffer_bytes: usize::MAX,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_decoded_bytes = usize::MAX;
+        limits.max_buffer_bytes = usize::MAX;
 
         let err = inspect_frame(&input, limits).unwrap_err();
 
@@ -2677,10 +2675,8 @@ mod tests {
         let info = inspect_frame(&input, Limits::default()).unwrap();
         assert_eq!(info.transforms, 2);
 
-        let limits = Limits {
-            max_graph_depth: 1,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_graph_depth = 1;
         let err = inspect_frame(&input, limits).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
@@ -2706,10 +2702,8 @@ mod tests {
         input.push(99);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
-        let limits = Limits {
-            max_transform_header_bytes: 0,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_transform_header_bytes = 0;
 
         let err = inspect_frame(&input, limits).unwrap_err();
 
@@ -2747,10 +2741,8 @@ mod tests {
         input.push(3);
         input.extend_from_slice(&[1, 2, 3]);
         input.push(0);
-        let limits = Limits {
-            max_buffer_bytes: 2,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_buffer_bytes = 2;
 
         let err = inspect_frame(&input, limits).unwrap_err();
 
@@ -2769,12 +2761,10 @@ mod tests {
         input.push(2);
         push_var_u64(&mut input, encoded_size);
         push_var_u64(&mut input, encoded_size);
-        let limits = Limits {
-            max_stored_stream_bytes: usize::MAX,
-            max_buffer_bytes: usize::MAX,
-            max_decoded_bytes: usize::MAX,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_stored_stream_bytes = usize::MAX;
+        limits.max_buffer_bytes = usize::MAX;
+        limits.max_decoded_bytes = usize::MAX;
 
         let err = inspect_frame(&input, limits).unwrap_err();
 
@@ -2980,10 +2970,8 @@ mod tests {
 
     #[test]
     fn enforces_frame_limit_before_parsing() {
-        let limits = Limits {
-            max_frame_bytes: 1,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_frame_bytes = 1;
         let err = inspect_frame(&[0; 2], limits).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     }

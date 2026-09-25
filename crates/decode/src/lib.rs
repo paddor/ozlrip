@@ -4,12 +4,15 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use ozlrip_core::{FrameInfo, Limits, Result};
+use ozlrip_core::{Limits, Result};
 
 mod dict;
 mod execute;
+mod info;
 mod parse;
 mod standard;
+
+pub use info::{FrameInfo, FrameValueType};
 
 use dict::DictionaryStore;
 
@@ -17,9 +20,10 @@ pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Decoder configuration.
 ///
-/// New options should be added here instead of creating new public function
-/// variants.
+/// Start from [`Options::default`] (or `Options::from(limits)`) and change
+/// fields as needed. New options may be added in minor releases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Options {
     /// Defensive parser, graph, allocation, and expansion limits.
     pub limits: Limits,
@@ -34,6 +38,16 @@ impl Default for Options {
         Self {
             limits: Limits::default(),
             plan_cache_max_frame_bytes: DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES,
+        }
+    }
+}
+
+impl From<Limits> for Options {
+    /// Default options with the given limits.
+    fn from(limits: Limits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
         }
     }
 }
@@ -91,13 +105,6 @@ impl Decoder {
     /// Currently only zstd dictionary materialization is implemented.
     pub fn load_dictionary_bundle(&mut self, bytes: &[u8]) -> Result<()> {
         self.dict_store.load_fat_bundle(bytes)
-    }
-
-    /// Loads a fat OpenZL dictionary bundle for later dictionary-backed decode.
-    ///
-    /// Prefer [`Decoder::load_dictionary_bundle`] for new code.
-    pub fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
-        self.load_dictionary_bundle(bytes)
     }
 
     /// Clears all loaded dictionary bundles.
@@ -222,6 +229,19 @@ impl Default for Decoder {
         Self::new()
     }
 }
+
+impl core::fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Decoder")
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Decoder>();
+};
 
 /// Decodes one OpenZL frame into a new `Vec` using [`Options::default`].
 pub fn decode(input: &[u8]) -> Result<Vec<u8>> {
@@ -426,7 +446,7 @@ mod tests {
         let raw_dict = test_zstd_dict_bytes();
         let mut decoder = Decoder::new();
         decoder
-            .load_fat_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
+            .load_dictionary_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
             .unwrap();
         let mut output = vec![1, 2];
 
@@ -441,7 +461,7 @@ mod tests {
     fn clear_dictionary_bundles_drops_loaded_bundle() {
         let (frame, bundle, _expected) = zstd_dict_test_frame();
         let mut decoder = Decoder::new();
-        decoder.load_fat_bundle(&bundle).unwrap();
+        decoder.load_dictionary_bundle(&bundle).unwrap();
         decoder.clear_dictionary_bundles();
         let mut output = vec![1, 2];
 

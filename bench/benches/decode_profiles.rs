@@ -559,10 +559,7 @@ fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
 }
 
 fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
-    let mut options = ozlrip::Options {
-        limits: bench_limits(),
-        ..ozlrip::Options::default()
-    };
+    let mut options = ozlrip::Options::from(bench_limits());
     if !plan_cache_enabled() {
         options.plan_cache_max_frame_bytes = 0;
     }
@@ -584,21 +581,15 @@ fn plan_cache_enabled() -> bool {
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
     let mut output = Vec::new();
-    ozlrip::decode_into_with_options(
-        frame,
-        &mut output,
-        ozlrip::Options {
-            limits: bench_limits(),
-            ..ozlrip::Options::default()
-        },
-    )?;
+    ozlrip::decode_into_with_options(frame, &mut output, ozlrip::Options::from(bench_limits()))?;
     Ok(output)
 }
 
 fn bench_limits() -> ozlrip::Limits {
-    ozlrip::Limits {
-        max_expansion_ratio: 1_000_000,
-        ..ozlrip::Limits::strict()
+    {
+        let mut limits = ozlrip::Limits::strict();
+        limits.max_expansion_ratio = 1_000_000;
+        limits
     }
 }
 

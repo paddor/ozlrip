@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 #[cfg(feature = "zstd")]
-use ozlrip_core::FrameValueType;
+use crate::info::FrameValueType;
 
 use crate::parse::FramePlan;
 #[cfg(feature = "zstd")]

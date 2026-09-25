@@ -7,27 +7,19 @@ const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
     let frame = field_lz_graph_frame(data);
-    let limits = Limits {
-        max_frame_bytes: 8192,
-        max_decoded_bytes: 4096,
-        max_chunks: 1,
-        max_nodes: 5,
-        max_streams: 10,
-        max_transform_header_bytes: 8,
-        max_stored_stream_bytes: 8192,
-        max_buffer_bytes: 4096,
-        max_graph_depth: 2,
-        max_expansion_ratio: 4096,
-    };
+    let mut limits = Limits::strict();
+    limits.max_frame_bytes = 8192;
+    limits.max_decoded_bytes = 4096;
+    limits.max_chunks = 1;
+    limits.max_nodes = 5;
+    limits.max_streams = 10;
+    limits.max_transform_header_bytes = 8;
+    limits.max_stored_stream_bytes = 8192;
+    limits.max_buffer_bytes = 4096;
+    limits.max_graph_depth = 2;
+    limits.max_expansion_ratio = 4096;
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(
-        &frame,
-        &mut output,
-        ozlrip::Options {
-            limits,
-            ..ozlrip::Options::default()
-        },
-    );
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
 
 fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {

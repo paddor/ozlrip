@@ -1,7 +1,9 @@
 use alloc::{format, vec, vec::Vec};
 
 use crate::{dict::DictionaryStore, parse::FramePlan, standard};
-use ozlrip_core::{Error, ErrorKind, FrameValueType, Limits, Result};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use crate::info::FrameValueType;
 use smallvec::{SmallVec, smallvec};
 
 mod dispatch;

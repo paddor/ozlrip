@@ -1392,11 +1392,9 @@ fn rejects_concat_serial_output_limit_without_mutating_destination() {
     let input = concat_serial_frame(b"openzl concat");
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -1671,11 +1669,9 @@ fn rejects_splitn_output_limit_without_mutating_destination() {
     let input = splitn_serial_frame(&[b"open", b"zl", b" splitn"]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -2926,11 +2922,9 @@ fn rejects_bitpack_output_limit_without_mutating_destination() {
     let input = bitpack_serial_frame(&expected, 3);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -2979,11 +2973,9 @@ fn rejects_bitunpack_output_limit_without_mutating_destination() {
     let input = bitunpack_serial_frame(&[2, 7, 3, 4, 5, 1, 7, 6], 3, None);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 2,
-        max_buffer_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 2;
+    limits.max_buffer_bytes = 2;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3032,11 +3024,9 @@ fn rejects_range_pack_output_limit_without_mutating_destination() {
     let input = range_pack_serial_frame(&[0, 1, 5], Some(10));
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 2,
-        max_buffer_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 2;
+    limits.max_buffer_bytes = 2;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3109,11 +3099,9 @@ fn rejects_constant_fixed_output_limit() {
         element_width: 2,
         string_lengths: None,
     };
-    let limits = Limits {
-        max_decoded_bytes: 5,
-        max_buffer_bytes: 5,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 5;
+    limits.max_buffer_bytes = 5;
 
     let err = decode_constant_fixed_chunk(input, &header, limits).unwrap_err();
 
@@ -3137,11 +3125,9 @@ fn rejects_constant_serial_output_limit_without_mutating_destination() {
     let input = constant_serial_frame(b'x', 6);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3207,11 +3193,9 @@ fn rejects_zigzag_output_limit_without_mutating_destination() {
     let input = zigzag_serial_frame(b"bytes");
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3272,11 +3256,9 @@ fn rejects_delta_output_limit_without_mutating_destination() {
     let input = delta_serial_frame(Some(2), &[1, 1, 2, 250]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3640,11 +3622,9 @@ fn rejects_convert_serial_to_struct_output_limit_without_mutating_destination() 
     let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3657,11 +3637,9 @@ fn rejects_convert_struct_to_serial_output_limit_without_mutating_destination() 
     let input = standard_transform_serial_frame(21, 6, b"bytes", 5, &[1]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3698,11 +3676,9 @@ fn rejects_flatpack_output_limit_without_mutating_destination() {
     let input = flatpack_serial_frame(b"abc", &[0, 1, 2, 1, 0]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4263,11 +4239,9 @@ fn enforces_zstd_output_limit_without_mutating_destination() {
     let input = zstd_serial_frame(&stored, expected.len());
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4320,11 +4294,9 @@ fn enforces_lz4_header_output_limit_without_mutating_destination() {
     let input = lz4_serial_frame(&[0], 4096);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 1024,
-        max_buffer_bytes: 1024,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 1024;
+    limits.max_buffer_bytes = 1024;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4380,10 +4352,8 @@ fn enforces_expansion_ratio_without_mutating_destination() {
     input.push(0);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_expansion_ratio: 0,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_expansion_ratio = 0;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 

@@ -329,53 +329,43 @@ fn error_case(name: &str) -> ErrorCase {
         "bad-dictionary-bundle-magic" => dictionary_case([0xff, 0xff, 0xff, 0xff].to_vec()),
         "frame-byte-limit" => inspect_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_frame_bytes: 3,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_frame_bytes = 3;
+                limits
+            }),
         ),
         "decoded-byte-limit" => decode_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_decoded_bytes: 2,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_decoded_bytes = 2;
+                limits
+            }),
         ),
         "stored-stream-byte-limit" => decode_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_stored_stream_bytes: 2,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_stored_stream_bytes = 2;
+                limits
+            }),
         ),
         "output-count-limit" => inspect_case(
             stored_serial_frame(&[]),
-            Options {
-                limits: Limits {
-                    max_streams: 0,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_streams = 0;
+                limits
+            }),
         ),
         "transform-header-byte-limit" => inspect_case(
             standard_transform_serial_frame(21, 22, &[1, 2, 3], 3, &[99]),
-            Options {
-                limits: Limits {
-                    max_transform_header_bytes: 0,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_transform_header_bytes = 0;
+                limits
+            }),
         ),
         "invalid-graph-node-input" => {
             inspect_case(invalid_graph_node_input_frame(), Options::default())
@@ -394,15 +384,13 @@ fn error_case(name: &str) -> ErrorCase {
         ),
         "stored-stream-size-overflow" => inspect_case(
             stored_stream_size_overflow_frame(),
-            Options {
-                limits: Limits {
-                    max_stored_stream_bytes: usize::MAX,
-                    max_buffer_bytes: usize::MAX,
-                    max_decoded_bytes: usize::MAX,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_stored_stream_bytes = usize::MAX;
+                limits.max_buffer_bytes = usize::MAX;
+                limits.max_decoded_bytes = usize::MAX;
+                limits
+            }),
         ),
         "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
         "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),

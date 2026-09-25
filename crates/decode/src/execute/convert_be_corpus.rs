@@ -133,14 +133,11 @@ fn convert_struct_to_num_be_rejects_unsupported_width() {
 
 #[test]
 fn convert_struct_to_num_be_obeys_output_limits() {
-    let err = decode_struct_to_num_be_chunk(
-        stream(&[1, 2, 3, 4], 2),
-        &[],
-        Limits {
-            max_decoded_bytes: 3,
-            ..Limits::default()
-        },
-    )
+    let err = decode_struct_to_num_be_chunk(stream(&[1, 2, 3, 4], 2), &[], {
+        let mut limits = Limits::default();
+        limits.max_decoded_bytes = 3;
+        limits
+    })
     .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);

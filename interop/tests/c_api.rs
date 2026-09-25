@@ -4,7 +4,7 @@
 //! the library through `openzl-shim`.
 
 use openzl_shim::{CompressOptions, Graph, Input, compress};
-use ozlrip_core::{ErrorKind, FrameValueType};
+use ozlrip::{ErrorKind, FrameValueType};
 
 fn text_input() -> Vec<u8> {
     b"ozlrip interop through the OpenZL C API, repeated for entropy. "

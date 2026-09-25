@@ -208,10 +208,7 @@ fn run_roundtrip_case(zli: &Path, work: &WorkDir, case: &InteropCase, manifest: 
     ozlrip::decode_into_with_options(
         &frame,
         &mut ozlrip_decoded,
-        ozlrip::Options {
-            limits: case.limits(),
-            ..ozlrip::Options::default()
-        },
+        ozlrip::Options::from(case.limits()),
     )
     .unwrap_or_else(|err| {
         panic!("{name} ozlrip decode failed: {err:?}");
@@ -958,11 +955,12 @@ struct InteropCase {
 impl InteropCase {
     fn limits(&self) -> ozlrip::Limits {
         if self.relaxed_limits {
-            ozlrip::Limits {
-                max_decoded_bytes: 8 * 1024 * 1024,
-                max_buffer_bytes: 8 * 1024 * 1024,
-                max_expansion_ratio: 1_000_000,
-                ..ozlrip::Limits::default()
+            {
+                let mut limits = ozlrip::Limits::default();
+                limits.max_decoded_bytes = 8 * 1024 * 1024;
+                limits.max_buffer_bytes = 8 * 1024 * 1024;
+                limits.max_expansion_ratio = 1_000_000;
+                limits
             }
         } else {
             ozlrip::Limits::default()

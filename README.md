@@ -12,13 +12,13 @@ let written = ozlrip::decode_into(frame, &mut dst)?;
 
 let info = ozlrip::inspect(frame)?;
 
-let options = ozlrip::Options {
-    limits: ozlrip::Limits::strict(),
-    plan_cache_max_frame_bytes: 0,
-    ..ozlrip::Options::default()
-};
-let decoded = ozlrip::decode_with_options(frame, options)?;
+let mut limits = ozlrip::Limits::paranoid();
+limits.max_decoded_bytes = 1 << 20;
+let decoded = ozlrip::decode_with_options(frame, ozlrip::Options::from(limits))?;
 ```
+
+`Limits`, `Options`, `FrameInfo`, `ErrorKind`, and `FrameValueType` are
+`#[non_exhaustive]`: start from a constructor or `Default` and set fields.
 
 For reusable allocation state, create `ozlrip::Decoder` and call
 `Decoder::decode` or `Decoder::decode_into`. Use `Decoder::with_options` when

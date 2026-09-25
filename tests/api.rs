@@ -258,10 +258,8 @@ fn reusable_decoder_decode_returns_owned_output() {
 #[test]
 fn reusable_decoder_options_can_disable_plan_cache() {
     let frame = stored_serial_frame(&[7, 8, 9]);
-    let options = Options {
-        plan_cache_max_frame_bytes: 0,
-        ..Options::default()
-    };
+    let mut options = Options::default();
+    options.plan_cache_max_frame_bytes = 0;
     let mut decoder = ozlrip::Decoder::with_options(options);
     let mut dst = Vec::new();
 
@@ -318,20 +316,11 @@ fn inspect_reports_header_comment_bytes() {
 #[test]
 fn inspect_enforces_stored_stream_limit() {
     let frame = stored_serial_frame(&[7, 8, 9]);
-    let limits = Limits {
-        max_stored_stream_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_stored_stream_bytes = 2;
 
-    let err = ozlrip::decode_into_with_options(
-        &frame,
-        &mut Vec::new(),
-        Options {
-            limits,
-            ..Options::default()
-        },
-    )
-    .unwrap_err();
+    let err = ozlrip::decode_into_with_options(&frame, &mut Vec::new(), Options::from(limits))
+        .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }
