@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Remove the `interop` feature. The upstream interop tests are now ignored
+  tests that require `OZLRIP_ZLI` or an `OZLRIP_ZLI_<release>` variable and
+  fail when it is missing. Run them with `cargo test --test interop -- --ignored`.
+- Release smoke tests only run cases whose profile the release's `zli`
+  supports, and now cover OpenZL v0.0.23 and v0.1.0 in CI.
+
 ## [0.5.0]
 
 - Update `zrip`, `zrip-core`, `lz4rip`, and `fearless_simd` dependencies.
