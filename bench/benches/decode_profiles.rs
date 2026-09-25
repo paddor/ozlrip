@@ -3,7 +3,6 @@ use std::{
     hint::black_box,
     io::Write,
     mem::size_of,
-    os::raw::{c_char, c_int, c_void},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -627,70 +626,31 @@ fn decode_openzl_c_with_bench_limits(frame: &[u8], output_size: usize) -> Vec<u8
 }
 
 struct OpenZlCDecoder {
-    dctx: *mut OpenZlDCtx,
+    decompressor: openzl_shim::Decompressor,
     dst: Vec<u8>,
 }
 
 impl OpenZlCDecoder {
     fn new(output_size: usize) -> Self {
-        let dctx = unsafe { ozlrip_bench_openzl_dctx_create() };
-        assert!(!dctx.is_null(), "ZL_DCtx_create returned null");
-        configure_openzl_dctx(dctx);
+        let mut decompressor = openzl_shim::Decompressor::new();
+        if cfg!(feature = "no-checksum") {
+            decompressor
+                .disable_checksums()
+                .expect("ZL_DCtx checksum parameter setup failed");
+        }
         Self {
-            dctx,
+            decompressor,
             dst: vec![0; output_size],
         }
     }
 
     fn decode(&mut self, frame: &[u8]) {
-        let mut written = 0usize;
-        let code = unsafe {
-            ozlrip_bench_openzl_decompress_serial(
-                self.dctx,
-                self.dst.as_mut_ptr().cast::<c_void>(),
-                self.dst.len(),
-                frame.as_ptr().cast::<c_void>(),
-                frame.len(),
-                &mut written,
-            )
-        };
-        assert_openzl_success(code, "openzl-c-ffi decode failed");
+        let written = self
+            .decompressor
+            .decompress_serial(frame, &mut self.dst)
+            .expect("openzl-c-ffi decode failed");
         assert_eq!(written, self.dst.len());
     }
-}
-
-impl Drop for OpenZlCDecoder {
-    fn drop(&mut self) {
-        unsafe { ozlrip_bench_openzl_dctx_free(self.dctx) };
-    }
-}
-
-fn configure_openzl_dctx(dctx: *mut OpenZlDCtx) {
-    #[cfg(feature = "no-checksum")]
-    {
-        let code = unsafe { ozlrip_bench_openzl_dctx_disable_checksums(dctx) };
-        assert_openzl_success(code, "ZL_DCtx checksum parameter setup failed");
-    }
-    #[cfg(not(feature = "no-checksum"))]
-    let _ = dctx;
-}
-
-fn assert_openzl_success(code: c_int, message: &str) {
-    if code != 0 {
-        panic!(
-            "{message}: {}",
-            openzl_cstr(unsafe { ozlrip_bench_openzl_last_error() })
-        );
-    }
-}
-
-fn openzl_cstr(ptr: *const c_char) -> String {
-    if ptr.is_null() {
-        return "<null>".to_owned();
-    }
-    unsafe { std::ffi::CStr::from_ptr(ptr) }
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn bench_loop<F: FnMut()>(target: Duration, mut f: F) -> BenchStats {
@@ -744,24 +704,6 @@ impl ReferenceDecoder {
     }
 }
 
-enum OpenZlDCtx {}
-
-unsafe extern "C" {
-    fn ozlrip_bench_openzl_dctx_create() -> *mut OpenZlDCtx;
-    fn ozlrip_bench_openzl_dctx_free(dctx: *mut OpenZlDCtx);
-    fn ozlrip_bench_openzl_last_error() -> *const c_char;
-    #[cfg(feature = "no-checksum")]
-    fn ozlrip_bench_openzl_dctx_disable_checksums(dctx: *mut OpenZlDCtx) -> c_int;
-    fn ozlrip_bench_openzl_decompress_serial(
-        dctx: *mut OpenZlDCtx,
-        dst: *mut c_void,
-        dst_capacity: usize,
-        src: *const c_void,
-        src_size: usize,
-        written: *mut usize,
-    ) -> c_int;
-}
-
 struct BenchResult {
     impl_name: &'static str,
     input_name: String,
@@ -810,7 +752,7 @@ impl BenchResult {
                 "portable"
             },
             rustflags,
-            openzl_moreflags: env!("OZLRIP_BENCH_OPENZL_MOREFLAGS"),
+            openzl_moreflags: openzl_shim::OPENZL_MOREFLAGS,
             zli_rev: zli_rev.to_owned(),
             plan_cache: plan_cache_enabled(),
             codec_versions: codec_versions(),

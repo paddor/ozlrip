@@ -31,9 +31,9 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {
-    let decoded_elements = data
-        .get(..2)
-        .map_or(0, |bytes| u16::from_le_bytes([bytes[0], bytes[1]]) as usize & 0x0fff);
+    let decoded_elements = data.get(..2).map_or(0, |bytes| {
+        u16::from_le_bytes([bytes[0], bytes[1]]) as usize & 0x0fff
+    });
     let payload = data.get(2..).unwrap_or_default();
     let (tokens, rest) = take_aligned(payload, data.get(2).copied(), 2);
     let (offsets, rest) = take_aligned(rest, data.get(3).copied(), 4);
@@ -51,7 +51,10 @@ fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {
         .chain(field_lz_header.iter().copied())
         .collect::<Vec<_>>();
     let stored_streams = [tokens, offsets, extra_literals, extra_matches, literals];
-    let stored_size = stored_streams.iter().map(|stream| stream.len()).sum::<usize>();
+    let stored_size = stored_streams
+        .iter()
+        .map(|stream| stream.len())
+        .sum::<usize>();
 
     let mut input = Vec::new();
     input.extend_from_slice(&(MAGIC_BASE + 24).to_le_bytes());

@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "crates/core", "crates/decode"]
-exclude = ["bench", "fuzz"]
+exclude = ["bench", "fuzz", "interop", "tools/openzl-shim"]
 resolver = "3"
 
 [package]

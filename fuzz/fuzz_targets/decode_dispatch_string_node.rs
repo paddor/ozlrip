@@ -31,9 +31,9 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn dispatch_string_graph_frame(data: &[u8]) -> Vec<u8> {
-    let split = data
-        .first()
-        .map_or(0, |&byte| usize::from(byte) % (data.len().saturating_add(1)));
+    let split = data.first().map_or(0, |&byte| {
+        usize::from(byte) % (data.len().saturating_add(1))
+    });
     let content = data.get(1..).unwrap_or_default();
     let split = split.min(content.len());
     let first = &content[..split];
