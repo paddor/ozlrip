@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- lz4 nodes reject a declared size above 255 times the block size before
+  allocating. No LZ4 block can expand further.
 - The `split_by_struct` to `splitn` fast path checks that all `splitn` inputs
   have the same element width, as the general `splitn` decoder does. It
   accepted frames the general path rejects.

@@ -3614,6 +3614,12 @@ fn decode_tokenize_string_node(
     })
 }
 
+/// Most bytes one LZ4 block byte can decode to. A match sequence spends a
+/// token and a 2-byte offset on at most 19 bytes, and each length extension
+/// byte adds at most 255.
+#[cfg(feature = "lz4")]
+const LZ4_MAX_EXPANSION: usize = 255;
+
 #[cfg(feature = "lz4")]
 fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
@@ -3621,6 +3627,10 @@ fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
+    }
+    if decoded_size > stored.len().saturating_mul(LZ4_MAX_EXPANSION) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("lz4 decoded size exceeds the block's maximum expansion"));
     }
     let mut output = alloc::vec![0; decoded_size];
     let written = lz4rip_decode::decompress_into(stored, &mut output).map_err(|err| {

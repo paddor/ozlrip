@@ -4374,6 +4374,28 @@ fn rejects_malformed_lz4_chunk_without_mutating_destination() {
     assert_eq!(output, [1, 2]);
 }
 
+/// An LZ4 block expands at most 255 times, so a larger declared size is
+/// rejected before the output is allocated. A near-maximal real block still
+/// decodes.
+#[cfg(feature = "lz4")]
+#[test]
+fn rejects_lz4_declared_size_beyond_maximum_expansion() {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, 3 * 255 + 1);
+    let err = decode_lz4_chunk(&[0, 0, 0], &header, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert!(err.detail().unwrap().contains("expansion"), "{err}");
+
+    let zeros = vec![0u8; 1 << 20];
+    let compressed = lz4rip::block::compress(&zeros);
+    assert!(compressed.len() * 250 < zeros.len());
+    let mut header = Vec::new();
+    push_var_u64(&mut header, u64::try_from(zeros.len()).unwrap());
+    let decoded = decode_lz4_chunk(&compressed, &header, Limits::default()).unwrap();
+    assert_eq!(decoded.len(), zeros.len());
+    assert!(decoded.iter().all(|&byte| byte == 0));
+}
+
 #[cfg(feature = "lz4")]
 #[test]
 fn enforces_lz4_header_output_limit_without_mutating_destination() {
