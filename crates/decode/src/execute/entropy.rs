@@ -1151,6 +1151,12 @@ fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDec
     if table_log > 12 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("huffman_v2 table is too large"));
     }
+    // The format allows 12, but upstream encoders cap Huffman v2 at 11 and
+    // zrip decodes at most 11.
+    if table_log > zrip_core::huffman::MAX_TABLE_LOG {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("huffman_v2 table log 12 is unsupported"));
+    }
     let table_size = 1usize
         .checked_shl(u32::from(table_log))
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;

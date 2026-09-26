@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `huffman_v2` tables with table log 12 return `Unsupported` instead of
+  `Malformed`. The format allows log 12, but no upstream encoder since the
+  first release writes more than 11, and `zrip` decodes at most 11.
 - Deprecated ROLZ nodes reject a rep0 match code that carries an offset
   delta, as upstream does since `cfcdf49`. Upstream's out-of-bounds
   reproducer for that fix is now a regression test.

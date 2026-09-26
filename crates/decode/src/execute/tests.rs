@@ -5752,6 +5752,31 @@ fn decodes_v21_huffman_v2_frame() {
     assert_eq!(output, expected);
 }
 
+/// The format allows table log 12, but upstream encoders never exceed 11 and
+/// zrip decodes at most 11, so log 12 is a typed `Unsupported`.
+#[test]
+fn reports_huffman_v2_table_log_12_as_unsupported() {
+    let err = decode_huffman_v2_node(
+        &[
+            StreamInput {
+                bytes: &[12, 12],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x80],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[0, 2],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported, "{err}");
+}
+
 /// zrip's x4 decoder indexes a fixed-size table, so a table log below its
 /// maximum still needs a full-size table.
 #[test]
