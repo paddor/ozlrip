@@ -3,7 +3,7 @@
 //! `zli` cannot pick format versions or typed inputs, so these tests call
 //! the library through `openzl-shim`.
 
-use openzl_shim::{CompressOptions, Graph, Input, compress};
+use openzl_shim::{CompressOptions, Decompressor, Graph, Input, compress};
 use ozlrip::{ErrorKind, FrameValueType};
 
 fn text_input() -> Vec<u8> {
@@ -72,4 +72,39 @@ fn numeric_frame_reports_numeric_output() {
     // Typed outputs are not decodable through the serial API yet.
     let err = ozlrip::decode(&frame).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+/// Every prefix of an upstream frame, in every format version, is accepted
+/// by ozlrip exactly when upstream accepts it. Before v21 this covers the
+/// trailing checksums.
+#[test]
+fn frame_prefixes_are_accepted_like_upstream() {
+    for version in openzl_shim::min_format_version()..=openzl_shim::max_format_version() {
+        for input in [&b""[..], b"abc"] {
+            let frame = compress(
+                &[Input::Serial(input)],
+                CompressOptions {
+                    graph: Graph::Store,
+                    format_version: version,
+                    ..CompressOptions::default()
+                },
+            )
+            .unwrap();
+            for len in 0..=frame.len() {
+                let prefix = &frame[..len];
+                let mut dst = [0u8; 16];
+                let upstream = Decompressor::new()
+                    .decompress_serial(prefix, &mut dst)
+                    .is_ok();
+                let ours = ozlrip::decode(prefix).is_ok();
+                assert_eq!(
+                    ours,
+                    upstream,
+                    "v{version} input {} bytes, prefix {len} of {}",
+                    input.len(),
+                    frame.len()
+                );
+            }
+        }
+    }
 }

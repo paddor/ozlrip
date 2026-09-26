@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Verify checksums in frames before format v21. Their flags sit in the chunk
+  header, and the compressed checksum covers the whole frame. They were
+  skipped, so corrupted or truncated legacy frames could decode.
+  `FrameInfo::has_decoded_checksum` and `has_encoded_checksum` now report
+  them.
+- Reject trailing bytes after a frame in every format version, as upstream
+  does. Before, only v21 and later rejected them.
 - `huffman_v2` tables with table log 12 return `Unsupported` instead of
   `Malformed`. The format allows log 12, but no upstream encoder since the
   first release writes more than 11, and `zrip` decodes at most 11.

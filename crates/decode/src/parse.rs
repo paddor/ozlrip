@@ -82,9 +82,9 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         dictionary_bundle_id.is_some(),
         limits,
     )?;
-    if format_version >= CHUNK_VERSION_MIN && !reader.is_empty() {
+    if !reader.is_empty() {
         return Err(Error::at(ErrorKind::Malformed, reader.offset())
-            .with_detail("trailing bytes after OpenZL frame EOF marker"));
+            .with_detail("trailing bytes after OpenZL frame"));
     }
 
     let info = FramePlanInfo {
@@ -100,8 +100,8 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         transforms: chunk_scan.summary.transforms,
         stored_streams: chunk_scan.summary.stored_streams,
         regenerated_streams: chunk_scan.summary.regenerated_streams,
-        has_decoded_checksum: flags.has_decoded_checksum(),
-        has_encoded_checksum: flags.has_encoded_checksum(),
+        has_decoded_checksum: chunk_scan.flags.has_decoded_checksum(),
+        has_encoded_checksum: chunk_scan.flags.has_encoded_checksum(),
         has_comment: flags.has_comment(),
         comment,
         dictionary_bundle_id,
@@ -562,10 +562,13 @@ fn read_comment(reader: &mut Reader<'_>) -> Result<Vec<u8>> {
     Ok(reader.read_slice(len)?.to_vec())
 }
 
+/// Reads every chunk. Before v21 the checksum flags come from the single
+/// chunk's header instead of `flags`; the returned scan holds the flags that
+/// applied.
 fn read_chunks(
     reader: &mut Reader<'_>,
     format_version: u32,
-    flags: FrameFlags,
+    mut flags: FrameFlags,
     has_bundle_id: bool,
     limits: Limits,
 ) -> Result<ChunkScan> {
@@ -575,14 +578,23 @@ fn read_chunks(
         if format_version >= CHUNK_VERSION_MIN {
             if reader.peek_byte()? == 0 {
                 let _ = reader.read_byte()?;
-                return Ok(ChunkScan { summary, chunks });
+                return Ok(ChunkScan {
+                    summary,
+                    chunks,
+                    flags,
+                });
             }
         } else if summary.chunks > 0 {
-            return Ok(ChunkScan { summary, chunks });
+            return Ok(ChunkScan {
+                summary,
+                chunks,
+                flags,
+            });
         }
 
         let chunk_start = reader.offset();
-        let mut chunk = read_chunk_header(reader, format_version, has_bundle_id, limits)?;
+        let mut chunk =
+            read_chunk_header(reader, format_version, &mut flags, has_bundle_id, limits)?;
         summary.chunks = checked_add(summary.chunks, 1)?;
         check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
         summary.transforms = checked_add(summary.transforms, chunk.transforms())?;
@@ -625,12 +637,18 @@ fn read_chunks(
         if flags.has_encoded_checksum() {
             let checksum_offset = reader.offset();
             chunk.encoded_checksum = Some(reader.read_u32_le()?);
+            // Before v21 the compressed checksum covers the whole frame.
+            let checksum_start = if format_version >= CHUNK_VERSION_MIN {
+                chunk_start
+            } else {
+                0
+            };
             #[cfg(not(feature = "checksum"))]
-            let _ = (chunk_start, checksum_offset);
+            let _ = (checksum_start, checksum_offset);
             #[cfg(feature = "checksum")]
             verify_compressed_checksum(
                 reader.bytes,
-                chunk_start,
+                checksum_start,
                 checksum_offset,
                 chunk.encoded_checksum,
             )?;
@@ -1046,6 +1064,7 @@ const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
 fn read_chunk_header(
     reader: &mut Reader<'_>,
     format_version: u32,
+    flags: &mut FrameFlags,
     has_bundle_id: bool,
     limits: Limits,
 ) -> Result<ChunkPlan> {
@@ -1067,7 +1086,7 @@ fn read_chunk_header(
     check_limit(stored_streams, limits.max_streams, ErrorKind::LimitExceeded)?;
 
     if (4..CHUNK_VERSION_MIN).contains(&format_version) {
-        let _ = reader.read_byte()?;
+        *flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
     }
 
     if transforms == 1 {
@@ -1868,6 +1887,7 @@ struct ChunkSummary {
 struct ChunkScan {
     summary: ChunkSummary,
     chunks: ChunkPlans,
+    flags: FrameFlags,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

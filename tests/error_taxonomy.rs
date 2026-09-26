@@ -395,6 +395,26 @@ fn error_case(name: &str) -> ErrorCase {
         "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
         "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
         "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
+        "legacy-bad-encoded-checksum" => {
+            let mut input = legacy_checksum_frame(false, true);
+            *input.last_mut().unwrap() ^= 1;
+            inspect_case(input, Options::default())
+        }
+        "legacy-bad-decoded-checksum" => {
+            let mut input = legacy_checksum_frame(true, false);
+            *input.last_mut().unwrap() ^= 1;
+            decode_case(input, Options::default())
+        }
+        "legacy-truncated-checksum" => {
+            let mut input = legacy_checksum_frame(true, true);
+            input.pop();
+            inspect_case(input, Options::default())
+        }
+        "legacy-trailing-bytes" => {
+            let mut input = legacy_checksum_frame(false, false);
+            input.push(0);
+            inspect_case(input, Options::default())
+        }
         _ => panic!("unknown error taxonomy case: {name}"),
     }
 }
@@ -618,6 +638,16 @@ fn compressed_checksum(bytes: &[u8]) -> u32 {
         let _ = bytes;
         0
     }
+}
+
+/// A v20 frame, whose checksum flags live in the chunk header.
+fn legacy_checksum_frame(content: bool, compressed: bool) -> Vec<u8> {
+    ozlrip_test_support::FrameBuilder::new(20)
+        .content_checksum(content)
+        .compressed_checksum(compressed)
+        .serial_output(3)
+        .chunk(ozlrip_test_support::Chunk::stored(*b"abc"))
+        .build()
 }
 
 fn inspect_case(input: Vec<u8>, options: Options) -> ErrorCase {

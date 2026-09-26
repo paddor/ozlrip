@@ -414,10 +414,6 @@ impl FrameBuilder {
 
     fn build_legacy(&self) -> Vec<u8> {
         assert_eq!(self.chunks.len(), 1, "formats before v21 have one chunk");
-        assert!(
-            !self.content_checksum && !self.compressed_checksum,
-            "pre-v21 checksums are not supported by FrameBuilder yet"
-        );
         let mut out = magic(self.version).to_vec();
         let types = self
             .outputs
@@ -450,7 +446,22 @@ impl FrameBuilder {
             let size = u32::try_from(output.size).expect("size fits u32 before v21");
             out.extend_from_slice(&size.to_le_bytes());
         }
-        self.chunks[0].encode(self.version, 0, &mut out);
+        // Before v21 the checksum flags live in the chunk header.
+        let legacy_flags =
+            u8::from(self.content_checksum) | (u8::from(self.compressed_checksum) << 1);
+        let chunk = &self.chunks[0];
+        chunk.encode(self.version, legacy_flags, &mut out);
+        if self.content_checksum {
+            let decoded = chunk
+                .decoded
+                .as_deref()
+                .expect("content checksum needs Chunk::decoded");
+            out.extend_from_slice(&xxh3_low32(decoded).to_le_bytes());
+        }
+        if self.compressed_checksum {
+            // Before v21 the compressed checksum covers the whole frame.
+            out.extend_from_slice(&xxh3_low32(&out).to_le_bytes());
+        }
         out
     }
 
