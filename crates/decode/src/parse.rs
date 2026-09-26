@@ -571,10 +571,6 @@ fn read_chunks(
 ) -> Result<ChunkScan> {
     let mut summary = ChunkSummary::default();
     let mut chunks = ChunkPlans::new();
-    if reader.is_empty() {
-        return Ok(ChunkScan { summary, chunks });
-    }
-
     loop {
         if format_version >= CHUNK_VERSION_MIN {
             if reader.peek_byte()? == 0 {
@@ -2085,6 +2081,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ozlrip_test_support::{Chunk, FrameBuilder, OutputType};
 
     fn magic(version: u32) -> [u8; 4] {
         (MAGIC_BASE + version).to_le_bytes()
@@ -2136,6 +2133,7 @@ mod tests {
             input.resize(input.len() + outputs.div_ceil(4), 0);
         }
         push_v21_output_sizes(&mut input, outputs);
+        input.push(0);
         input
     }
 
@@ -2227,11 +2225,12 @@ mod tests {
         input.push(0);
         input.push(1);
         input.push(4);
+        input.push(0);
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
         assert_eq!(info.format_version, 21);
-        assert_eq!(info.header_bytes, input.len());
+        assert_eq!(info.header_bytes, input.len() - 1);
         assert_eq!(info.decoded_bytes, Some(3));
         assert_eq!(info.outputs, 1);
         assert_eq!(info.output_types, [FrameValueType::Serial]);
@@ -2270,15 +2269,15 @@ mod tests {
 
     #[test]
     fn parses_v14_single_typed_output_header() {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(14));
-        input.push(2);
-        input.extend_from_slice(&4u32.to_le_bytes());
+        let input = FrameBuilder::new(14)
+            .output(OutputType::Numeric, 4)
+            .chunk(Chunk::stored([1, 2, 3, 4]))
+            .build();
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
         assert_eq!(info.format_version, 14);
-        assert_eq!(info.header_bytes, input.len());
+        assert_eq!(info.header_bytes, 9);
         assert_eq!(info.output_types, [FrameValueType::Numeric]);
         assert_eq!(info.output_sizes, [Some(4)]);
         assert_eq!(info.output_elements, [None]);
@@ -2286,10 +2285,10 @@ mod tests {
 
     #[test]
     fn parses_v20_single_serial_32_bit_output_size() {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(20));
-        input.push(0);
-        input.extend_from_slice(&3u32.to_le_bytes());
+        let input = FrameBuilder::new(20)
+            .serial_output(3)
+            .chunk(Chunk::stored(*b"abc"))
+            .build();
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
@@ -2327,6 +2326,7 @@ mod tests {
         input.push(0b1000_0010);
         input.push(4);
         input.push(5);
+        input.push(0);
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
@@ -2385,6 +2385,22 @@ mod tests {
 
         assert_eq!(info.header_bytes, 7);
         assert_eq!(info.chunks, 0);
+    }
+
+    /// Upstream reads the chunk marker unconditionally from v21 on, so a
+    /// frame that ends after its header is truncated, not empty.
+    #[test]
+    fn rejects_v21_frame_without_eof_marker() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&magic(21));
+        input.push(0);
+        input.push(1);
+        input.push(1);
+
+        let err = inspect_frame(&input, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Truncated);
+        assert_eq!(err.offset(), Some(7));
     }
 
     #[test]
@@ -2775,6 +2791,7 @@ mod tests {
         input.extend_from_slice(&[1, 2]);
         input.push(1);
         input.push(4);
+        input.push(0);
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
@@ -2790,12 +2807,13 @@ mod tests {
         input.push(4);
         input.push(3);
         input.extend_from_slice(b"abc");
+        input.push(0);
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
         assert!(info.has_comment);
         assert_eq!(info.comment.as_deref(), Some(b"abc".as_slice()));
-        assert_eq!(info.header_bytes, input.len());
+        assert_eq!(info.header_bytes, input.len() - 1);
     }
 
     #[test]
@@ -2914,6 +2932,7 @@ mod tests {
             input.push(4);
             input.push(3);
             input.extend_from_slice(b"abc");
+            input.push(0);
             input
         };
         let bundle = {
@@ -2924,6 +2943,7 @@ mod tests {
             input.extend_from_slice(&[1, 2]);
             input.push(1);
             input.push(4);
+            input.push(0);
             input
         };
         #[allow(unused_mut)]
@@ -2981,11 +3001,12 @@ mod tests {
         input.push(4);
         let checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
         input.push(checksum);
+        input.push(0);
 
         let info = inspect_frame(&input, Limits::default()).unwrap();
 
         assert!(info.has_encoded_checksum);
-        assert_eq!(info.header_bytes, input.len());
+        assert_eq!(info.header_bytes, input.len() - 1);
     }
 
     #[cfg(feature = "checksum")]

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- A frame that ends right after its header is truncated. It was accepted as
+  a frame with no chunks, including v21+ frames without the end-of-frame
+  marker. Upstream always reads a chunk before v21 and the marker from v21.
 - lz4 nodes reject a declared size above 255 times the block size before
   allocating. No LZ4 block can expand further.
 - The `split_by_struct` to `splitn` fast path checks that all `splitn` inputs

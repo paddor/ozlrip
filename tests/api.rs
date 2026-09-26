@@ -112,6 +112,7 @@ fn comment_frame(comment: &[u8]) -> Vec<u8> {
     input.push(4);
     input.push(u8::try_from(comment.len()).unwrap());
     input.extend_from_slice(comment);
+    input.push(0);
     input
 }
 
