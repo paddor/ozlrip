@@ -380,6 +380,63 @@ fn fse_multistate_bitstream(
     writer.into_bytes()
 }
 
+/// Long streams take the batched FSE loop and short ones only the checked
+/// tail; both must match the encoder, and a truncated stream must fail.
+#[test]
+fn decodes_interleaved_fse_streams_of_every_length() {
+    let cases: [(u8, &[i16]); 2] = [
+        (5, &[16, 8, 4, 2, 1, 1]),
+        (12, &[2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1]),
+    ];
+    for (accuracy_log, distribution) in cases {
+        let table =
+            zrip_core::fse::table_builder::build_decode_table(distribution, accuracy_log).unwrap();
+        // Symbols drawn with the distribution's skew, from a fixed LCG.
+        let mut seed = 0x2545_f491_u32;
+        let symbols: Vec<u8> = (0..3000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let mut pick = i32::try_from(seed >> 20).unwrap() % (1 << accuracy_log);
+                let mut symbol = 0;
+                while pick >= i32::from(distribution[symbol]) {
+                    pick -= i32::from(distribution[symbol]);
+                    symbol += 1;
+                }
+                u8::try_from(symbol).unwrap()
+            })
+            .collect();
+        for nb_states in [2, 4] {
+            for len in (nb_states..40).chain([100, 1000, 2999, 3000]) {
+                let symbols = &symbols[..len];
+                let bits = fse_multistate_bitstream(symbols, nb_states, distribution, accuracy_log);
+
+                let decoded =
+                    entropy::decode_fse_symbols(&bits, len, nb_states, &table, accuracy_log, "t")
+                        .unwrap();
+                assert_eq!(
+                    decoded, symbols,
+                    "log {accuracy_log} states {nb_states} len {len}"
+                );
+
+                if bits.len() > 1 {
+                    assert!(
+                        entropy::decode_fse_symbols(
+                            &bits[1..],
+                            len,
+                            nb_states,
+                            &table,
+                            accuracy_log,
+                            "t"
+                        )
+                        .is_err(),
+                        "truncated log {accuracy_log} states {nb_states} len {len}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&u32::try_from(decoded_size).unwrap().to_le_bytes());

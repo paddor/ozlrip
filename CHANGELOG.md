@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Faster interleaved FSE decoding (`fse_v2` and the deprecated FSE paths):
+  one bit-reader refill per four state updates. `era5-le-i32-sample` decodes
+  14% faster in a portable build.
 - Add `Limits::max_dictionaries` (1024 strict, 64 paranoid) and
   `Limits::max_dictionary_bytes` (64 MiB strict, 16 MiB paranoid). They bound
   all dictionary bundles a `Decoder` holds and are checked from a bundle's
