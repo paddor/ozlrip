@@ -10,6 +10,24 @@ pub(super) fn write_transpose_split_output(
     output_len: usize,
     output: &mut Vec<u8>,
 ) {
+    // Portable builds only target the baseline CPU. Dispatch compiles the
+    // lane writers once per SIMD level, where they auto-vectorize.
+    #[cfg(feature = "std")]
+    fearless_simd::dispatch!(
+        fearless_simd::Level::new(),
+        _simd => write_lanes(inputs, output_len, output)
+    );
+    #[cfg(not(feature = "std"))]
+    write_lanes(inputs, output_len, output);
+}
+
+#[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
+fn write_lanes(inputs: &[StreamInput<'_>], output_len: usize, output: &mut Vec<u8>) {
     debug_assert!(output.is_empty());
     debug_assert!(output.capacity() >= output_len);
     match inputs {
@@ -143,6 +161,11 @@ fn write_8_safe(
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
 fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
     debug_assert_eq!(lane1.len(), len);
@@ -160,6 +183,11 @@ fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
 fn write_4(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
     debug_assert_eq!(lane1.len(), len);
@@ -184,6 +212,11 @@ fn write_4(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut 
 
 #[cfg(not(feature = "paranoid"))]
 #[expect(clippy::too_many_arguments, reason = "fixed-width lane writer")]
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
 fn write_8(
     lane0: &[u8],
     lane1: &[u8],

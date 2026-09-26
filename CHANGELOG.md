@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Transpose-split nodes pick the best SIMD level at runtime (with `std`, not
+  `paranoid`), so portable builds vectorize them. `le-u32-delta-16m` decodes
+  49% and `le-u64-timeseries-32m` 33% faster in a portable build, matching a
+  native build.
 - Faster quantize and partition decoding: the forward bit reader keeps
   pending bits in a register and refills eight bytes at a time. It is now
   safe code; the unsafe `fast_bitreader` leaf is gone.
