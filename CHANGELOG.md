@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Check decoded output against the size the frame declares before reserving
+  anything, after every chunk, and at the end. A tiny frame that declares a
+  huge output now fails on the expansion ratio instead of reserving it, and a
+  chunk that overruns the declared size is reported as such instead of as a
+  later chunk's checksum failure. zstd output that decodes straight into the
+  caller's buffer is capped at the remaining declared size.
+- The single-zstd fast path enforces the expansion ratio exactly. It used a
+  floor division that accepted slightly more output than allowed.
 - Fix quantize and partition decoding of 25- to 32-bit extra bits that start
   mid-byte. Release builds returned wrong values; debug builds panicked.
 - Breaking: remove the decoder plan cache, `Options::plan_cache_max_frame_bytes`

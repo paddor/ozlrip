@@ -10,10 +10,12 @@ use crate::parse::FramePlan;
 use crate::{parse::SingleZstdFrame, standard};
 
 use super::StandardNodeContext;
+#[cfg(feature = "zstd")]
+use super::output::{OutputBudget, size_mismatch};
 #[cfg(feature = "checksum")]
 use super::verify_decoded_checksum;
 #[cfg(feature = "zstd")]
-use super::{DecodeScratch, check_output_size, read_var_u64};
+use super::{DecodeScratch, read_var_u64};
 
 #[cfg(feature = "zstd")]
 pub(crate) fn decode_single_zstd_frame_with_context(
@@ -33,29 +35,22 @@ pub(crate) fn decode_single_zstd_frame_with_context(
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let declared = frame.decoded_bytes.ok_or_else(|| {
+        Error::new(ErrorKind::Unsupported)
+            .with_detail("unknown OpenZL output sizes are unsupported")
+    })?;
+    let mut budget = OutputBudget::new(declared, frame.frame_bytes, limits)?;
     let start = dst.len();
-    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
+    let written = match zstd.decompress_after_magic_into(magicless, dst, budget.remaining()) {
         Ok(written) => written,
         Err(err) => {
             dst.truncate(start);
-            return Err(map_zstd_error(&err));
+            return Err(map_budget_zstd_error(&err));
         }
     };
-    if written > limits.max_buffer_bytes {
+    if let Err(err) = budget.consume(written).and_then(|()| budget.finish()) {
         dst.truncate(start);
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    if let Some(expected) = frame.decoded_bytes
-        && expected != written
-    {
-        dst.truncate(start);
-        return Err(Error::new(ErrorKind::Malformed).with_detail("decoded output size mismatch"));
-    }
-    if frame.frame_bytes > 0 && written / frame.frame_bytes > limits.max_expansion_ratio {
-        dst.truncate(start);
-        return Err(Error::new(ErrorKind::LimitExceeded).with_detail("expansion ratio exceeded"));
+        return Err(err);
     }
     #[cfg(feature = "checksum")]
     if let Err(err) = verify_decoded_checksum(&dst[start..], frame.decoded_checksum) {
@@ -107,21 +102,16 @@ pub(super) fn try_decode_single_zstd_into_dst(
     let magicless = stored
         .get(offset..)
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+    let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
     let start = dst.len();
-    let written = match zstd.decompress_after_magic_into(magicless, dst, limits.max_decoded_bytes) {
+    let written = match zstd.decompress_after_magic_into(magicless, dst, budget.remaining()) {
         Ok(written) => written,
         Err(err) => {
             dst.truncate(start);
-            return Err(map_zstd_error(&err));
+            return Err(map_budget_zstd_error(&err));
         }
     };
-    if written > limits.max_buffer_bytes {
-        dst.truncate(start);
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    if let Err(err) = check_output_size(written, input.len(), plan, limits) {
+    if let Err(err) = budget.consume(written).and_then(|()| budget.finish()) {
         dst.truncate(start);
         return Err(err);
     }
@@ -185,6 +175,7 @@ pub(super) fn decode_zstd_chunk_to_output(
     header: &[u8],
     dict_index: Option<u32>,
     ctx: &mut StandardNodeContext<'_>,
+    max_output: usize,
     dst: &mut Vec<u8>,
 ) -> Result<()> {
     if !header.is_empty() {
@@ -206,16 +197,16 @@ pub(super) fn decode_zstd_chunk_to_output(
             Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
         })?;
         let zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
-        zstd.decompress_after_magic_into(magicless, dst, ctx.limits.max_decoded_bytes)
+        zstd.decompress_after_magic_into(magicless, dst, max_output)
     } else {
         ctx.zstd
-            .decompress_after_magic_into(magicless, dst, ctx.limits.max_decoded_bytes)
+            .decompress_after_magic_into(magicless, dst, max_output)
     };
     let written = match written {
         Ok(written) => written,
         Err(err) => {
             dst.truncate(start);
-            return Err(map_zstd_error(&err));
+            return Err(map_budget_zstd_error(&err));
         }
     };
     debug_assert_eq!(written, dst.len() - start);
@@ -269,6 +260,17 @@ fn decode_zstd_magicless_with_context(
     Ok(output)
 }
 
+/// Maps an error from zstd output capped at the frame's remaining declared
+/// size: running out of room means the output overran the declaration.
+#[cfg(feature = "zstd")]
+fn map_budget_zstd_error(err: &zrip::DecompressError) -> Error {
+    if *err == zrip::DecompressError::OutputTooSmall {
+        size_mismatch()
+    } else {
+        map_zstd_error(err)
+    }
+}
+
 #[cfg(feature = "zstd")]
 fn map_zstd_error(err: &zrip::DecompressError) -> Error {
     if *err == zrip::DecompressError::OutputTooSmall {
@@ -294,6 +296,7 @@ pub(super) fn decode_zstd_chunk_to_output(
     _header: &[u8],
     _dict_index: Option<u32>,
     _ctx: &mut StandardNodeContext<'_>,
+    _max_output: usize,
     _dst: &mut Vec<u8>,
 ) -> Result<()> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))

@@ -53,7 +53,7 @@ use numeric_nodes::{
 };
 #[cfg(feature = "checksum")]
 use output::verify_decoded_checksum;
-use output::{DecodedChunk, check_output_size};
+use output::{DecodedChunk, OutputBudget};
 use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 #[cfg(feature = "zstd")]
@@ -127,15 +127,14 @@ fn decode_serial_chunks(
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     let start_len = dst.len();
-    let mut reservation = OutputReservation::new(plan)?;
+    let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
     let single_chunk = plan.chunks.len() == 1;
-    let mut total_len = 0usize;
     for chunk in &plan.chunks {
         let chunk_start = dst.len();
         if chunk.has_nodes() {
             let execution = build_chunk_execution_plan(chunk)?;
             if direct_append_tail(&execution).is_some() {
-                reservation.reserve(dst)?;
+                budget.reserve(dst)?;
                 decode_transform_chunk_appending(
                     input,
                     DirectAppendChunk {
@@ -144,6 +143,7 @@ fn decode_serial_chunks(
                     },
                     plan.info.format_version,
                     limits,
+                    budget.remaining(),
                     dst,
                     plan.info.dictionary_bundle_id.as_deref(),
                     runtime,
@@ -158,13 +158,7 @@ fn decode_serial_chunks(
                     plan.info.dictionary_bundle_id.as_deref(),
                     runtime,
                 )?;
-                append_decoded_chunk(
-                    dst,
-                    decoded,
-                    single_chunk,
-                    &mut reservation,
-                    runtime.scratch,
-                )?;
+                append_decoded_chunk(dst, decoded, single_chunk, &mut budget, runtime.scratch)?;
             }
         } else {
             let stored = stored_only_chunk(input, chunk)?;
@@ -172,61 +166,21 @@ fn decode_serial_chunks(
                 dst,
                 DecodedChunk::Borrowed(stored),
                 single_chunk,
-                &mut reservation,
+                &mut budget,
                 runtime.scratch,
             )?;
         }
         let decoded = &dst[chunk_start..];
-        total_len = total_len
-            .checked_add(decoded.len())
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        // Charge the chunk before checking it, so an overrun is reported as
+        // such instead of as a later chunk's checksum failure.
+        budget.consume(decoded.len())?;
         #[cfg(not(feature = "checksum"))]
         let _ = chunk.decoded_checksum;
         #[cfg(feature = "checksum")]
         verify_decoded_checksum(decoded, chunk.decoded_checksum)?;
     }
-    check_output_size(total_len, input.len(), plan, limits)?;
+    budget.finish()?;
     Ok(dst.len() - start_len)
-}
-
-/// Reserves the frame's declared output size in `dst` once, before the
-/// first append.
-struct OutputReservation {
-    declared: Option<usize>,
-    done: bool,
-}
-
-impl OutputReservation {
-    fn new(plan: &FramePlan) -> Result<Self> {
-        let declared = plan
-            .info
-            .output_sizes
-            .first()
-            .and_then(|size| *size)
-            .map(|size| {
-                usize::try_from(size).map_err(|_| {
-                    Error::new(ErrorKind::LimitExceeded)
-                        .with_detail("decoded output size is too large")
-                })
-            })
-            .transpose()?;
-        Ok(Self {
-            declared,
-            done: false,
-        })
-    }
-
-    fn reserve(&mut self, dst: &mut Vec<u8>) -> Result<()> {
-        if !self.done {
-            if let Some(declared) = self.declared {
-                dst.try_reserve_exact(declared).map_err(|_| {
-                    Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
-                })?;
-            }
-            self.done = true;
-        }
-        Ok(())
-    }
 }
 
 /// Appends one decoded chunk. A single-chunk frame whose output is an owned
@@ -236,7 +190,7 @@ fn append_decoded_chunk(
     dst: &mut Vec<u8>,
     decoded: DecodedChunk<'_>,
     single_chunk: bool,
-    reservation: &mut OutputReservation,
+    budget: &mut OutputBudget,
     scratch: &mut DecodeScratch,
 ) -> Result<()> {
     if let DecodedChunk::Owned(bytes) = decoded {
@@ -247,17 +201,13 @@ fn append_decoded_chunk(
             }
             return Ok(());
         }
-        return append_slice(dst, &bytes, reservation);
+        return append_slice(dst, &bytes, budget);
     }
-    append_slice(dst, decoded.as_slice(), reservation)
+    append_slice(dst, decoded.as_slice(), budget)
 }
 
-fn append_slice(
-    dst: &mut Vec<u8>,
-    bytes: &[u8],
-    reservation: &mut OutputReservation,
-) -> Result<()> {
-    reservation.reserve(dst)?;
+fn append_slice(dst: &mut Vec<u8>, bytes: &[u8], budget: &mut OutputBudget) -> Result<()> {
+    budget.reserve(dst)?;
     dst.try_reserve(bytes.len()).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
     })?;
@@ -363,11 +313,18 @@ fn decode_transform_chunk_with_plan<'a>(
     }
 }
 
+/// `max_output` caps what the tail may append; it is the rest of the frame's
+/// declared output.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "direct-append decode needs the chunk, frame context, output cap and runtime"
+)]
 fn decode_transform_chunk_appending(
     input: &[u8],
     chunk: DirectAppendChunk<'_>,
     format_version: u32,
     limits: Limits,
+    max_output: usize,
     dst: &mut Vec<u8>,
     dictionary_bundle_id: Option<&[u8]>,
     runtime: &mut DecodeRuntime<'_>,
@@ -408,6 +365,7 @@ fn decode_transform_chunk_appending(
                         header,
                         node.dict_index,
                         &mut ctx,
+                        max_output,
                         dst,
                     )?;
                     1
