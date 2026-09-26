@@ -2040,6 +2040,119 @@ fn decodes_lz_node_with_overlapping_match() {
     assert_eq!(output, b"aaaaa");
 }
 
+/// Runs an LZ node with 8-byte offset and length streams through both the
+/// owned-output path and the direct-append path.
+fn decode_lz_u64(
+    literals: &[u8],
+    offsets: &[u64],
+    literal_lengths: &[u64],
+    match_lengths: &[u64],
+    output_len: u64,
+) -> [Result<Vec<u8>>; 2] {
+    let le = |values: &[u64]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    let (offsets, literal_lengths, match_lengths) =
+        (le(offsets), le(literal_lengths), le(match_lengths));
+    let stream = |bytes, element_width| StreamInput {
+        bytes,
+        element_width,
+        string_lengths: None,
+    };
+    let inputs = [
+        stream(literals, 1),
+        stream(&offsets, 8),
+        stream(&literal_lengths, 8),
+        stream(&match_lengths, 8),
+    ];
+    let mut header = Vec::new();
+    push_var_u64(&mut header, output_len);
+
+    let owned = decode_lz_node(&inputs, &header, Limits::default());
+    let mut output = Vec::new();
+    let appended = lz_nodes::decode_lz_node_to_output(
+        &inputs,
+        &header,
+        Limits::default(),
+        &mut output,
+        0,
+    )
+    .map(|()| output);
+    [owned, appended]
+}
+
+/// Ports upstream `eafc5fc` (LZ integer overflows): lengths and offsets with
+/// the high bit set, or large enough to wrap a position, are rejected.
+#[test]
+fn rejects_lz_lengths_and_offsets_that_overflow_positions() {
+    const HIGH: u64 = 1 << 63;
+    const MAX: u64 = i64::MAX as u64;
+    for result in decode_lz_u64(b"ABCD", &[3], &[4], &[2], 6) {
+        assert_eq!(result.unwrap(), b"ABCDBC");
+    }
+
+    let cases: [(&[u8], &[u64], &[u64], &[u64], u64); 9] = [
+        (b"", &[1], &[HIGH], &[0], 16),
+        (&[0; 4], &[HIGH], &[4], &[1], 16),
+        (&[0; 4], &[1], &[4], &[HIGH], 16),
+        (&[0; 8], &[1, 1], &[4, MAX], &[1, 0], 256),
+        (&[0; 4], &[1], &[4], &[MAX], 256),
+        (b"", &[1], &[u64::MAX], &[0], 16),
+        (&[0; 4], &[u64::MAX], &[4], &[1], 16),
+        (&[0; 4], &[1], &[4], &[u64::MAX], 16),
+        (&[0; 4], &[1], &[4], &[u64::MAX - 3], u64::MAX),
+    ];
+    for (index, (literals, offsets, literal_lengths, match_lengths, output_len)) in
+        cases.into_iter().enumerate()
+    {
+        for result in decode_lz_u64(
+            literals,
+            offsets,
+            literal_lengths,
+            match_lengths,
+            output_len,
+        ) {
+            assert!(result.is_err(), "case {index} decoded");
+        }
+    }
+}
+
+/// Field-LZ extras are 4 bytes, but with 8-byte elements a length or offset
+/// near `u32::MAX` overflows `usize` on 32-bit targets.
+#[test]
+fn rejects_field_lz_extras_that_overflow_with_wide_elements() {
+    let token = |offset_code: u16, literal_code: u16, match_code: u16| {
+        (offset_code | (literal_code << 2) | (match_code << 6)).to_le_bytes()
+    };
+    let max = u32::MAX.to_le_bytes();
+    let one = 1u32.to_le_bytes();
+    let literals = [0u8; 16];
+    // (token, offsets, extra literal lengths, extra match lengths)
+    let cases: [([u8; 2], &[u8], &[u8], &[u8]); 3] = [
+        (token(3, 15, 0), &one, &max, &[]),
+        (token(3, 1, 15), &one, &[], &max),
+        (token(3, 1, 0), &max, &[], &[]),
+    ];
+    for (index, (tokens, offsets, extra_literals, extra_matches)) in cases.into_iter().enumerate() {
+        let stream = |bytes, element_width| StreamInput {
+            bytes,
+            element_width,
+            string_lengths: None,
+        };
+        let result = decode_field_lz_node(
+            &[
+                stream(&literals, 8),
+                stream(&tokens, 2),
+                stream(offsets, 4),
+                stream(extra_literals, 4),
+                stream(extra_matches, 4),
+            ],
+            &[64],
+            Limits::default(),
+            &mut DecodeScratch::new(),
+        );
+        assert!(result.is_err(), "case {index} decoded");
+    }
+}
+
 #[test]
 fn decodes_field_lz_node_with_last_literals() {
     let mut scratch = DecodeScratch::new();
