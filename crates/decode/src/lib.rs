@@ -72,7 +72,7 @@ impl Decoder {
     ///
     /// Currently only zstd dictionary materialization is implemented.
     pub fn load_dictionary_bundle(&mut self, bytes: &[u8]) -> Result<()> {
-        self.dict_store.load_fat_bundle(bytes)
+        self.dict_store.load_fat_bundle(bytes, self.options.limits)
     }
 
     /// Clears all loaded dictionary bundles.
@@ -318,6 +318,29 @@ mod tests {
         assert_eq!(written, expected.len());
         assert_eq!(&output[..2], &[1, 2]);
         assert_eq!(&output[2..], expected);
+    }
+
+    /// Dictionary contexts are built on first use, and the dictionary limits
+    /// count every loaded bundle, except the one a reload replaces.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn limits_dictionaries_and_builds_contexts_on_first_use() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let raw_dict = test_zstd_dict_bytes();
+        let mut limits = Limits::strict();
+        limits.max_dictionaries = 1;
+        let mut decoder = Decoder::with_options(Options::from(limits));
+
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+        assert_eq!(decoder.dict_store.built_contexts(), 0);
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+        let err = decoder
+            .load_dictionary_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(decoder.dict_store.built_contexts(), 1);
     }
 
     #[cfg(feature = "zstd")]

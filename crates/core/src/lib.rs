@@ -153,6 +153,10 @@ pub struct Limits {
     pub max_live_bytes: usize,
     /// Deepest transform graph.
     pub max_graph_depth: usize,
+    /// Most dictionaries all loaded dictionary bundles may hold.
+    pub max_dictionaries: usize,
+    /// Largest total size of all loaded dictionary bundles.
+    pub max_dictionary_bytes: usize,
     /// Largest ratio of decoded bytes to frame bytes.
     pub max_expansion_ratio: usize,
 }
@@ -171,6 +175,8 @@ impl Limits {
             max_buffer_bytes: 64 * 1024 * 1024,
             max_live_bytes: 512 * 1024 * 1024,
             max_graph_depth: 1024,
+            max_dictionaries: 1024,
+            max_dictionary_bytes: 64 * 1024 * 1024,
             max_expansion_ratio: 256,
         }
     }
@@ -188,6 +194,8 @@ impl Limits {
             max_buffer_bytes: 16 * 1024 * 1024,
             max_live_bytes: 128 * 1024 * 1024,
             max_graph_depth: 256,
+            max_dictionaries: 64,
+            max_dictionary_bytes: 16 * 1024 * 1024,
             max_expansion_ratio: 64,
         }
     }

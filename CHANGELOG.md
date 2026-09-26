@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add `Limits::max_dictionaries` (1024 strict, 64 paranoid) and
+  `Limits::max_dictionary_bytes` (64 MiB strict, 16 MiB paranoid). They bound
+  all dictionary bundles a `Decoder` holds and are checked from a bundle's
+  header, before its dictionaries are parsed. A bundle could declare 65,535
+  dictionaries.
+- zstd dictionaries build their decode context on first use instead of at
+  load, so unused dictionaries hold no decode workspace.
 - Verify checksums in frames before format v21. Their flags sit in the chunk
   header, and the compressed checksum covers the whole frame. They were
   skipped, so corrupted or truncated legacy frames could decode.
