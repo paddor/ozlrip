@@ -1738,6 +1738,12 @@ fn rolz_deprecated_rep_offset(match_code: usize, reps: &[usize; 3]) -> Result<us
         return Ok(prev);
     }
     let delta = match_code >> 2;
+    // The rep update assumes rep0 keeps its offset, so upstream (cfcdf49)
+    // rejects a rep0 code with any delta other than the neutral one.
+    if rep == 0 && delta != ROLZ_DEPRECATED_REP_SUB {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("rolz_deprecated rep0 code carries an offset delta"));
+    }
     if delta >= ROLZ_DEPRECATED_REP_SUB {
         prev.checked_add(delta - ROLZ_DEPRECATED_REP_SUB)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
