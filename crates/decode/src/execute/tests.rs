@@ -5667,3 +5667,21 @@ fn rejects_fse_ncount_trailing_bytes() {
 
     assert_eq!(err.kind(), ErrorKind::Malformed);
 }
+
+#[test]
+fn bounds_live_intermediate_stream_bytes() {
+    // zigzag regenerates a 3-byte stream that delta consumes into the 4-byte
+    // output, so at most 4 bytes are live at once.
+    let input = zigzag_delta_graph_frame(&[2, 1, 6], 10);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut limits = Limits::default();
+
+    limits.max_live_bytes = 3;
+    let err = decode_plan(&input, &plan, &mut Vec::new(), limits).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+
+    limits.max_live_bytes = 4;
+    let mut output = Vec::new();
+    decode_plan(&input, &plan, &mut output, limits).unwrap();
+    assert_eq!(output.len(), 4);
+}

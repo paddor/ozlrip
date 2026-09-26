@@ -237,6 +237,7 @@ fn decode_transform_chunk_with_plan<'a>(
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedChunk<'a>> {
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
+    let mut live = LiveBytes::new(limits);
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
     let mut ctx = StandardNodeContext {
         format_version,
@@ -250,10 +251,16 @@ fn decode_transform_chunk_with_plan<'a>(
 
     for node in &plan.nodes {
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        if try_execute_single_input_splitn_node(&mut streams, node, header, limits)? {
+        if try_execute_single_input_splitn_node(&mut streams, node, header, limits, &mut live)? {
             continue;
         }
-        if try_execute_byte_preserving_conversion_node(&mut streams, node, header, limits)? {
+        if try_execute_byte_preserving_conversion_node(
+            &mut streams,
+            node,
+            header,
+            limits,
+            &mut live,
+        )? {
             continue;
         }
 
@@ -283,6 +290,7 @@ fn decode_transform_chunk_with_plan<'a>(
             node.input_start,
             node.input_count,
             ctx.scratch,
+            &mut live,
         )?;
         if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
@@ -297,6 +305,7 @@ fn decode_transform_chunk_with_plan<'a>(
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("node output overwrites an existing stream"));
             }
+            live.add(&output)?;
             *target = StreamSlot::Owned(output);
         }
     }
@@ -335,6 +344,7 @@ fn decode_transform_chunk_appending(
         Error::new(ErrorKind::InvalidGraph).with_detail("chunk is not direct-appendable")
     })?;
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
+    let mut live = LiveBytes::new(limits);
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
     let mut ctx = StandardNodeContext {
         format_version,
@@ -413,10 +423,16 @@ fn decode_transform_chunk_appending(
             }
             return Ok(dst.len() - output_start);
         }
-        if try_execute_single_input_splitn_node(&mut streams, node, header, limits)? {
+        if try_execute_single_input_splitn_node(&mut streams, node, header, limits, &mut live)? {
             continue;
         }
-        if try_execute_byte_preserving_conversion_node(&mut streams, node, header, limits)? {
+        if try_execute_byte_preserving_conversion_node(
+            &mut streams,
+            node,
+            header,
+            limits,
+            &mut live,
+        )? {
             continue;
         }
 
@@ -446,6 +462,7 @@ fn decode_transform_chunk_appending(
             node.input_start,
             node.input_count,
             ctx.scratch,
+            &mut live,
         )?;
         if outputs.len() != node.output_targets.len() {
             return Err(Error::new(ErrorKind::InvalidGraph)
@@ -460,6 +477,7 @@ fn decode_transform_chunk_appending(
                 return Err(Error::new(ErrorKind::InvalidGraph)
                     .with_detail("node output overwrites an existing stream"));
             }
+            live.add(&output)?;
             *target = StreamSlot::Owned(output);
         }
     }
@@ -752,6 +770,7 @@ fn try_execute_single_input_splitn_node(
     node: &NodeExecutionPlan,
     header: &[u8],
     limits: Limits,
+    live: &mut LiveBytes,
 ) -> Result<bool> {
     if !matches!(
         node.standard_id,
@@ -785,7 +804,7 @@ fn try_execute_single_input_splitn_node(
     } else {
         input.element_width
     };
-    move_stream_to_single_output(streams, node, output_width)
+    move_stream_to_single_output(streams, node, output_width, live)
 }
 
 fn try_execute_byte_preserving_conversion_node(
@@ -793,6 +812,7 @@ fn try_execute_byte_preserving_conversion_node(
     node: &NodeExecutionPlan,
     header: &[u8],
     limits: Limits,
+    live: &mut LiveBytes,
 ) -> Result<bool> {
     if !is_byte_preserving_conversion(node.standard_id) {
         return Ok(false);
@@ -807,13 +827,14 @@ fn try_execute_byte_preserving_conversion_node(
     else {
         return Ok(false);
     };
-    move_stream_to_single_output(streams, node, output_width)
+    move_stream_to_single_output(streams, node, output_width, live)
 }
 
 fn move_stream_to_single_output(
     streams: &mut [StreamSlot<'_>],
     node: &NodeExecutionPlan,
     output_width: usize,
+    live: &mut LiveBytes,
 ) -> Result<bool> {
     let [output_target] = node.output_targets.as_slice() else {
         return Err(Error::new(ErrorKind::InvalidGraph)
@@ -834,7 +855,9 @@ fn move_stream_to_single_output(
         }
         StreamSlot::Owned(mut stream) => {
             stream.element_width = output_width;
-            stream.string_lengths = None;
+            if let Some(lengths) = stream.string_lengths.take() {
+                live.release(lengths.len().saturating_mul(4));
+            }
             StreamSlot::Owned(stream)
         }
         StreamSlot::Empty => {
@@ -1547,6 +1570,7 @@ fn recycle_consumed_owned_streams(
     input_start: usize,
     input_count: usize,
     scratch: &mut DecodeScratch,
+    live: &mut LiveBytes,
 ) -> Result<()> {
     let input_end = input_start
         .checked_add(input_count)
@@ -1556,10 +1580,45 @@ fn recycle_consumed_owned_streams(
     })?;
     for slot in input_slots {
         if let StreamSlot::Owned(stream) = core::mem::replace(slot, StreamSlot::Empty) {
+            live.release(stream.live_bytes());
             scratch.recycle_owned_stream(stream);
         }
     }
     Ok(())
+}
+
+/// Bytes held by the owned intermediate streams of the chunk being decoded,
+/// bounded by [`Limits::max_live_bytes`]. Borrowed input streams do not
+/// count.
+struct LiveBytes {
+    current: usize,
+    limit: usize,
+}
+
+impl LiveBytes {
+    fn new(limits: Limits) -> Self {
+        Self {
+            current: 0,
+            limit: limits.max_live_bytes,
+        }
+    }
+
+    fn add(&mut self, stream: &OwnedStream) -> Result<()> {
+        self.current = self
+            .current
+            .checked_add(stream.live_bytes())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if self.current > self.limit {
+            return Err(Error::new(ErrorKind::LimitExceeded)
+                .with_detail("live intermediate stream limit exceeded"));
+        }
+        Ok(())
+    }
+
+    fn release(&mut self, bytes: usize) {
+        debug_assert!(bytes <= self.current);
+        self.current = self.current.saturating_sub(bytes);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1584,6 +1643,16 @@ struct OwnedStream {
 }
 
 impl OwnedStream {
+    /// Bytes this stream holds: its data plus four bytes per string length.
+    /// Length, not capacity, so reused and fresh decoders count the same.
+    fn live_bytes(&self) -> usize {
+        let lengths = self
+            .string_lengths
+            .as_ref()
+            .map_or(0, |lengths| lengths.len().saturating_mul(4));
+        self.bytes.len().saturating_add(lengths)
+    }
+
     fn serial(bytes: Vec<u8>) -> Self {
         Self {
             bytes,

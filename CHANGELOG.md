@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `Limits::max_live_bytes`: the most bytes all intermediate streams of
+  one chunk may hold at once (512 MiB strict, 128 MiB paranoid). Before, only
+  each stream was bounded, so a hostile chunk could hold many buffers of
+  `max_buffer_bytes` each. The largest observed need is about 3.5 times the
+  chunk output, for a wide CSV sample.
 - Check decoded output against the size the frame declares before reserving
   anything, after every chunk, and at the end. A tiny frame that declares a
   huge output now fails on the expansion ratio instead of reserving it, and a

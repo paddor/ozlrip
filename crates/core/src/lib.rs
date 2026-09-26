@@ -146,6 +146,11 @@ pub struct Limits {
     pub max_stored_stream_bytes: usize,
     /// Largest single intermediate or output buffer.
     pub max_buffer_bytes: usize,
+    /// Most bytes all intermediate streams of one chunk may hold at once.
+    ///
+    /// String-heavy graphs hold about 3.5 times their chunk output (a
+    /// wide CSV sample), so keep this well above `max_buffer_bytes`.
+    pub max_live_bytes: usize,
     /// Deepest transform graph.
     pub max_graph_depth: usize,
     /// Largest ratio of decoded bytes to frame bytes.
@@ -164,6 +169,7 @@ impl Limits {
             max_transform_header_bytes: 16 * 1024 * 1024,
             max_stored_stream_bytes: 64 * 1024 * 1024,
             max_buffer_bytes: 64 * 1024 * 1024,
+            max_live_bytes: 512 * 1024 * 1024,
             max_graph_depth: 1024,
             max_expansion_ratio: 256,
         }
@@ -180,6 +186,7 @@ impl Limits {
             max_transform_header_bytes: 4 * 1024 * 1024,
             max_stored_stream_bytes: 16 * 1024 * 1024,
             max_buffer_bytes: 16 * 1024 * 1024,
+            max_live_bytes: 128 * 1024 * 1024,
             max_graph_depth: 256,
             max_expansion_ratio: 64,
         }
