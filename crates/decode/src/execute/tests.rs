@@ -1557,6 +1557,46 @@ fn decodes_split_by_struct_node() {
     assert_eq!(output.bytes, [1, 3, 0, 2, 4, 0]);
 }
 
+/// The split_by_struct -> splitn direct-append tail applies splitn's width
+/// check: a 2-byte struct stream cannot join split_by_struct's byte output.
+#[test]
+fn split_by_struct_splitn_tail_rejects_mismatched_input_widths() {
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        6,
+        &[
+            // Decodes serial to 2-byte structs.
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::SPLIT_BY_STRUCT_ID,
+                variable_inputs: 2,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::SPLITN_ID,
+                variable_inputs: 2,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"ab", b"cd", b"ef"],
+        &[2, 1, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidType, "{err}");
+    assert!(output.is_empty());
+}
+
 #[test]
 fn rejects_split_by_struct_mismatched_element_counts() {
     let err = decode_split_by_struct_node(

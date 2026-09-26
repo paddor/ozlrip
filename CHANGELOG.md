@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- The `split_by_struct` to `splitn` fast path checks that all `splitn` inputs
+  have the same element width, as the general `splitn` decoder does. It
+  accepted frames the general path rejects.
 - `concat` nodes check their size table against the graph's output count
   before reserving outputs. A large size table could reserve about 16 times
   its own size in stream headers before the mismatch was reported.

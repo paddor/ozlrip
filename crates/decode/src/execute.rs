@@ -728,15 +728,19 @@ fn append_split_by_struct_to_final_splitn(
         let len = if stream_index == *split_output {
             split_by_struct_output_len(split_by_struct_inputs)?
         } else {
-            streams
+            let input = streams
                 .get(stream_index)
                 .ok_or_else(|| {
                     Error::new(ErrorKind::InvalidGraph)
                         .with_detail("node input range is out of bounds")
                 })?
-                .as_input()?
-                .bytes
-                .len()
+                .as_input()?;
+            // splitn inputs share one width, and split_by_struct outputs bytes.
+            if input.element_width != 1 {
+                return Err(Error::new(ErrorKind::InvalidType)
+                    .with_detail("splitn input widths must match"));
+            }
+            input.bytes.len()
         };
         total_len = total_len
             .checked_add(len)
