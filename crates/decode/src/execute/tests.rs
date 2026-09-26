@@ -1,6 +1,9 @@
+#[cfg(feature = "lz4")]
+use super::lz4::*;
 use super::*;
+use super::{layout_nodes::*, streams::*, string_nodes::*};
 use crate::parse::parse_frame_plan;
-use alloc::vec;
+use alloc::{format, vec};
 use ozlrip_test_support::{Chunk, FrameBuilder, Node};
 
 /// Last format version of each deprecated transform (upstream
