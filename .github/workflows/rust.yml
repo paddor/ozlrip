@@ -139,3 +139,5 @@ jobs:
         with:
           components: miri
       - run: cargo miri test -p ozlrip-decode --no-default-features --features alloc
+      - name: Miri on a big-endian target
+        run: cargo miri test -p ozlrip-decode --no-default-features --features alloc --target s390x-unknown-linux-gnu
