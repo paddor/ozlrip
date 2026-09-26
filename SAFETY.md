@@ -21,9 +21,6 @@ Current unsafe leaves:
   1/2/4/8-byte elements into pre-reserved `Vec<u8>` storage and sets the length
   after all bytes are initialized. The caller validates bit width, element
   width, output size, allocation limits, and capacity before entry.
-- `ozlrip-decode::execute::fast_bitreader`: performs bounded unaligned
-  little-endian window loads after checking that enough bytes remain. The safe
-  fallback builds the same window byte by byte.
 - `ozlrip-decode::execute::fast_csv`: appends validated dispatch-string CSV
   patterns into pre-reserved output storage and publishes `Vec::len` only after
   the full pattern has been written. The caller validates source counts, source

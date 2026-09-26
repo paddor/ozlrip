@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Faster quantize and partition decoding: the forward bit reader keeps
+  pending bits in a register and refills eight bytes at a time. It is now
+  safe code; the unsafe `fast_bitreader` leaf is gone.
+  `era5-le-i32-sample` decodes 6% faster in a portable build.
 - Faster interleaved FSE decoding (`fse_v2` and the deprecated FSE paths):
   one bit-reader refill per four state updates. `era5-le-i32-sample` decodes
   14% faster in a portable build.

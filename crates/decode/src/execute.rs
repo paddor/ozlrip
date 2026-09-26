@@ -12,7 +12,6 @@ mod direct_append;
 mod dispatch;
 mod entropy;
 mod fast_bitpack;
-mod fast_bitreader;
 mod fast_csv;
 mod fast_delta;
 mod fast_dispatch;

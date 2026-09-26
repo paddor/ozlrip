@@ -40,13 +40,9 @@ fn decode_u32_node_safe(
 
     let mut base_table = [0u64; 256];
     let mut bit_table = [u8::MAX; 256];
-    let mut mask_table = [0u32; 256];
     for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
         base_table[bucket] = base;
         bit_table[bucket] = bit_width;
-        if bit_width <= 32 {
-            mask_table[bucket] = bit_mask_u32(bit_width);
-        }
     }
 
     let mut out_pos = 0usize;
@@ -59,12 +55,7 @@ fn decode_u32_node_safe(
             );
         }
         let base = base_table[bucket];
-        let bit_width = usize::from(bit_width);
-        let offset = if bit_width <= 32 {
-            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
-        } else {
-            reader.read_u64(bit_width)?
-        };
+        let offset = reader.read_u64(usize::from(bit_width))?;
         let value = base
             .checked_add(offset)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -100,13 +91,9 @@ fn decode_u32_node_fast(
 
     let mut base_table = [0u64; 256];
     let mut bit_table = [u8::MAX; 256];
-    let mut mask_table = [0u32; 256];
     for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
         base_table[bucket] = base;
         bit_table[bucket] = bit_width;
-        if bit_width <= 32 {
-            mask_table[bucket] = bit_mask_u32(bit_width);
-        }
     }
 
     let mut out_pos = 0usize;
@@ -119,12 +106,7 @@ fn decode_u32_node_fast(
             );
         }
         let base = base_table[bucket];
-        let bit_width = usize::from(bit_width);
-        let offset = if bit_width <= 32 {
-            u64::from(reader.read_u32_window(bit_width, mask_table[bucket])?)
-        } else {
-            reader.read_u64(bit_width)?
-        };
+        let offset = reader.read_u64(usize::from(bit_width))?;
         let value = base
             .checked_add(offset)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -161,13 +143,5 @@ unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
             output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),
             value.to_le_bytes(),
         );
-    }
-}
-
-fn bit_mask_u32(bits: u8) -> u32 {
-    if bits == 32 {
-        u32::MAX
-    } else {
-        (1u32 << bits) - 1
     }
 }
