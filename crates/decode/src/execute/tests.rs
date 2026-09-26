@@ -2049,7 +2049,12 @@ fn decode_lz_u64(
     match_lengths: &[u64],
     output_len: u64,
 ) -> [Result<Vec<u8>>; 2] {
-    let le = |values: &[u64]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    let le = |values: &[u64]| {
+        values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
     let (offsets, literal_lengths, match_lengths) =
         (le(offsets), le(literal_lengths), le(match_lengths));
     let stream = |bytes, element_width| StreamInput {
@@ -2068,14 +2073,9 @@ fn decode_lz_u64(
 
     let owned = decode_lz_node(&inputs, &header, Limits::default());
     let mut output = Vec::new();
-    let appended = lz_nodes::decode_lz_node_to_output(
-        &inputs,
-        &header,
-        Limits::default(),
-        &mut output,
-        0,
-    )
-    .map(|()| output);
+    let appended =
+        lz_nodes::decode_lz_node_to_output(&inputs, &header, Limits::default(), &mut output, 0)
+            .map(|()| output);
     [owned, appended]
 }
 
@@ -2089,20 +2089,11 @@ fn rejects_lz_lengths_and_offsets_that_overflow_positions() {
         assert_eq!(result.unwrap(), b"ABCDBC");
     }
 
-    let cases: [(&[u8], &[u64], &[u64], &[u64], u64); 9] = [
-        (b"", &[1], &[HIGH], &[0], 16),
-        (&[0; 4], &[HIGH], &[4], &[1], 16),
-        (&[0; 4], &[1], &[4], &[HIGH], 16),
-        (&[0; 8], &[1, 1], &[4, MAX], &[1, 0], 256),
-        (&[0; 4], &[1], &[4], &[MAX], 256),
-        (b"", &[1], &[u64::MAX], &[0], 16),
-        (&[0; 4], &[u64::MAX], &[4], &[1], 16),
-        (&[0; 4], &[1], &[4], &[u64::MAX], 16),
-        (&[0; 4], &[1], &[4], &[u64::MAX - 3], u64::MAX),
-    ];
-    for (index, (literals, offsets, literal_lengths, match_lengths, output_len)) in
-        cases.into_iter().enumerate()
-    {
+    let rejects = |literals: &[u8],
+                   offsets: &[u64],
+                   literal_lengths: &[u64],
+                   match_lengths: &[u64],
+                   output_len| {
         for result in decode_lz_u64(
             literals,
             offsets,
@@ -2110,9 +2101,21 @@ fn rejects_lz_lengths_and_offsets_that_overflow_positions() {
             match_lengths,
             output_len,
         ) {
-            assert!(result.is_err(), "case {index} decoded");
+            assert!(
+                result.is_err(),
+                "{offsets:?} {literal_lengths:?} {match_lengths:?} decoded"
+            );
         }
-    }
+    };
+    rejects(b"", &[1], &[HIGH], &[0], 16);
+    rejects(&[0; 4], &[HIGH], &[4], &[1], 16);
+    rejects(&[0; 4], &[1], &[4], &[HIGH], 16);
+    rejects(&[0; 8], &[1, 1], &[4, MAX], &[1, 0], 256);
+    rejects(&[0; 4], &[1], &[4], &[MAX], 256);
+    rejects(b"", &[1], &[u64::MAX], &[0], 16);
+    rejects(&[0; 4], &[u64::MAX], &[4], &[1], 16);
+    rejects(&[0; 4], &[1], &[4], &[u64::MAX], 16);
+    rejects(&[0; 4], &[1], &[4], &[u64::MAX - 3], u64::MAX);
 }
 
 /// Field-LZ extras are 4 bytes, but with 8-byte elements a length or offset
@@ -2124,14 +2127,7 @@ fn rejects_field_lz_extras_that_overflow_with_wide_elements() {
     };
     let max = u32::MAX.to_le_bytes();
     let one = 1u32.to_le_bytes();
-    let literals = [0u8; 16];
-    // (token, offsets, extra literal lengths, extra match lengths)
-    let cases: [([u8; 2], &[u8], &[u8], &[u8]); 3] = [
-        (token(3, 15, 0), &one, &max, &[]),
-        (token(3, 1, 15), &one, &[], &max),
-        (token(3, 1, 0), &max, &[], &[]),
-    ];
-    for (index, (tokens, offsets, extra_literals, extra_matches)) in cases.into_iter().enumerate() {
+    let rejects = |tokens: [u8; 2], offsets: &[u8], extra_literals: &[u8], extra_matches: &[u8]| {
         let stream = |bytes, element_width| StreamInput {
             bytes,
             element_width,
@@ -2139,7 +2135,7 @@ fn rejects_field_lz_extras_that_overflow_with_wide_elements() {
         };
         let result = decode_field_lz_node(
             &[
-                stream(&literals, 8),
+                stream(&[0; 16], 8),
                 stream(&tokens, 2),
                 stream(offsets, 4),
                 stream(extra_literals, 4),
@@ -2149,8 +2145,11 @@ fn rejects_field_lz_extras_that_overflow_with_wide_elements() {
             Limits::default(),
             &mut DecodeScratch::new(),
         );
-        assert!(result.is_err(), "case {index} decoded");
-    }
+        assert!(result.is_err(), "{tokens:?} decoded");
+    };
+    rejects(token(3, 15, 0), &one, &max, &[]);
+    rejects(token(3, 1, 15), &one, &[], &max);
+    rejects(token(3, 1, 0), &max, &[], &[]);
 }
 
 #[test]
