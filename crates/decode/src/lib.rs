@@ -40,7 +40,7 @@ pub struct Decoder {
     scratch: execute::DecodeScratch,
     dict_store: DictionaryStore,
     #[cfg(feature = "zstd")]
-    zstd: zrip::DecompressContext,
+    zstd: zrip_decode::context::DecompressContext,
 }
 
 impl Decoder {
@@ -56,7 +56,7 @@ impl Decoder {
             scratch: execute::DecodeScratch::new(),
             dict_store: DictionaryStore::new(),
             #[cfg(feature = "zstd")]
-            zstd: zrip::DecompressContext::new(),
+            zstd: zrip_decode::context::DecompressContext::new(),
         }
     }
 

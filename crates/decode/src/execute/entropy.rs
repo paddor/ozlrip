@@ -7,7 +7,7 @@ use zrip_core::{
         FseDecodeEntry,
         table_builder::{build_decode_table, parse_fse_table_description},
     },
-    huffman::{HuffmanDecodeEntry, decode},
+    huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry, decode},
 };
 
 use super::{OwnedStream, StreamInput, numeric_element_count, read_var_u64, require_numeric_width};
@@ -1154,7 +1154,9 @@ fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDec
     let table_size = 1usize
         .checked_shl(u32::from(table_log))
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut table = vec![HuffmanDecodeEntry::default(); table_size];
+    // zrip's x4 decoder needs a full-size table; entries past `table_size`
+    // stay unused.
+    let mut table = vec![HuffmanDecodeEntry::default(); table_size.max(DECODE_TABLE_SIZE)];
     let max_weight = table_log
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -1196,7 +1198,7 @@ fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDec
         let end = start
             .checked_add(entries)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if end > table.len() {
+        if end > table_size {
             return Err(
                 Error::new(ErrorKind::Malformed).with_detail("huffman_v2 decode table overflows")
             );

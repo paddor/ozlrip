@@ -55,14 +55,14 @@ pub(crate) struct DecodeRuntime<'a> {
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
     pub(super) dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
-    pub(super) zstd: &'a mut zrip::DecompressContext,
+    pub(super) zstd: &'a mut zrip_decode::context::DecompressContext,
 }
 
 impl<'a> DecodeRuntime<'a> {
     pub(crate) fn new(
         scratch: &'a mut DecodeScratch,
         dict_store: &'a mut DictionaryStore,
-        #[cfg(feature = "zstd")] zstd: &'a mut zrip::DecompressContext,
+        #[cfg(feature = "zstd")] zstd: &'a mut zrip_decode::context::DecompressContext,
     ) -> Self {
         Self {
             scratch,

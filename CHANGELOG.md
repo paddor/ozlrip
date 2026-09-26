@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Update codec dependencies: `zrip-decode` 0.8.9 replaces `zrip`, so the zstd
+  encoder is no longer built; `zrip-core` 0.11; `lz4rip-decode` 0.10.4
+  replaces `lz4rip`; `fearless_simd` 1.0. A fresh resolve no longer builds two
+  versions of `zrip-core` or `fearless_simd`.
+- The `zstd` and `lz4` features need only `alloc`, so `no_std` builds decode
+  zstd and lz4 nodes. `std` still enables runtime CPU feature detection in the
+  codecs.
+- `paranoid` also enables `paranoid` in `zrip-core`, `zrip-decode`, and
+  `lz4rip-decode`.
+- lz4 block errors include the codec's error message in their detail.
+- Breaking: remove the no-op `checksum` feature from `ozlrip-core`.
 - Add `Limits::max_live_bytes`: the most bytes all intermediate streams of
   one chunk may hold at once (512 MiB strict, 128 MiB paranoid). Before, only
   each stream was bounded, so a hostile chunk could hold many buffers of

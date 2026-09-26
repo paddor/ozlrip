@@ -30,7 +30,7 @@ std = ["alloc", "ozlrip-core/std", "ozlrip-decode/std"]
 alloc = ["ozlrip-core/alloc", "ozlrip-decode/alloc"]
 zstd = ["ozlrip-decode/zstd"]
 lz4 = ["ozlrip-decode/lz4"]
-checksum = ["ozlrip-core/checksum", "ozlrip-decode/checksum"]
+checksum = ["ozlrip-decode/checksum"]
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
 
 [dependencies]
@@ -40,7 +40,7 @@ ozlrip-decode = { version = "0.5.0", path = "crates/decode", default-features = 
 [dev-dependencies]
 ozlrip-test-support = { path = "crates/test-support" }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
-zrip = { version = "0.8.5", default-features = false, features = ["std", "frame"] }
+zrip = { version = "0.8.10", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true

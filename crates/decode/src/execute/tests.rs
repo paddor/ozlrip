@@ -1412,7 +1412,7 @@ fn decodes_splitn_num_node() {
     let mut scratch = DecodeScratch::new();
     let mut dict_store = DictionaryStore::new();
     #[cfg(feature = "zstd")]
-    let mut zstd = zrip::DecompressContext::new();
+    let mut zstd = zrip_decode::context::DecompressContext::new();
     let mut ctx = StandardNodeContext {
         format_version: 21,
         limits: Limits::default(),
@@ -5506,6 +5506,53 @@ fn decodes_v21_huffman_v2_frame() {
     let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
 
     assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+/// zrip's x4 decoder indexes a fixed-size table, so a table log below its
+/// maximum still needs a full-size table.
+#[test]
+fn decodes_huffman_v2_x4_node_with_small_table_log() {
+    let expected = [0u8, 1, 1, 0, 1, 0, 0, 1];
+    let streams: Vec<_> = expected
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|symbols| {
+            let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+            for &symbol in symbols.iter().rev() {
+                writer.write_bits(u32::from(symbol), 1);
+            }
+            writer.close_reverse_stream();
+            writer.into_bytes()
+        })
+        .collect();
+    let mut bits = Vec::new();
+    for stream in &streams[..3] {
+        bits.extend_from_slice(&u16::try_from(stream.len()).unwrap().to_le_bytes());
+    }
+    for stream in &streams {
+        bits.extend_from_slice(stream);
+    }
+
+    let output = decode_huffman_v2_node(
+        &[
+            StreamInput {
+                bytes: &[1, 1],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &bits,
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[1, u8::try_from(expected.len()).unwrap()],
+        Limits::default(),
+    )
+    .unwrap();
+
     assert_eq!(output, expected);
 }
 

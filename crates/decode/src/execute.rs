@@ -75,7 +75,7 @@ pub(crate) fn decode_plan(
     limits: Limits,
 ) -> Result<usize> {
     #[cfg(feature = "zstd")]
-    let mut zstd = zrip::DecompressContext::new();
+    let mut zstd = zrip_decode::context::DecompressContext::new();
     let mut dict_store = DictionaryStore::new();
     let mut scratch = DecodeScratch::new();
     let mut runtime = DecodeRuntime::new(
@@ -1265,7 +1265,7 @@ struct StandardNodeContext<'a> {
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
     dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
-    zstd: &'a mut zrip::DecompressContext,
+    zstd: &'a mut zrip_decode::context::DecompressContext,
 }
 
 fn execute_standard_node(
@@ -3605,8 +3605,9 @@ fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<
         );
     }
     let mut output = alloc::vec![0; decoded_size];
-    let written = lz4rip::block::decompress_into(stored, &mut output)
-        .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("OpenZL lz4 block failed"))?;
+    let written = lz4rip_decode::decompress_into(stored, &mut output).map_err(|err| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("OpenZL lz4 block failed: {err}"))
+    })?;
     if written != decoded_size {
         return Err(Error::new(ErrorKind::Malformed).with_detail("OpenZL lz4 output size mismatch"));
     }

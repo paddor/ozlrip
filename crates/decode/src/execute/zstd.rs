@@ -23,7 +23,7 @@ pub(crate) fn decode_single_zstd_frame_with_context(
     frame: SingleZstdFrame,
     dst: &mut Vec<u8>,
     limits: Limits,
-    zstd: &mut zrip::DecompressContext,
+    zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<usize> {
     let stored = frame.stored.as_slice(input)?;
     let mut offset = 0usize;
@@ -68,7 +68,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
-    zstd: &mut zrip::DecompressContext,
+    zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] || plan.chunks.len() != 1 {
         return Ok(None);
@@ -224,7 +224,7 @@ fn decode_zstd_magicless_with_context(
     magicless: &[u8],
     limits: Limits,
     scratch: &mut DecodeScratch,
-    zstd: &mut zrip::DecompressContext,
+    zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<Vec<u8>> {
     if !magicless.is_empty() {
         let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
@@ -263,8 +263,8 @@ fn decode_zstd_magicless_with_context(
 /// Maps an error from zstd output capped at the frame's remaining declared
 /// size: running out of room means the output overran the declaration.
 #[cfg(feature = "zstd")]
-fn map_budget_zstd_error(err: &zrip::DecompressError) -> Error {
-    if *err == zrip::DecompressError::OutputTooSmall {
+fn map_budget_zstd_error(err: &zrip_core::DecompressError) -> Error {
+    if *err == zrip_core::DecompressError::OutputTooSmall {
         size_mismatch()
     } else {
         map_zstd_error(err)
@@ -272,8 +272,8 @@ fn map_budget_zstd_error(err: &zrip::DecompressError) -> Error {
 }
 
 #[cfg(feature = "zstd")]
-fn map_zstd_error(err: &zrip::DecompressError) -> Error {
-    if *err == zrip::DecompressError::OutputTooSmall {
+fn map_zstd_error(err: &zrip_core::DecompressError) -> Error {
+    if *err == zrip_core::DecompressError::OutputTooSmall {
         Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
     } else {
         Error::new(ErrorKind::Malformed).with_detail("OpenZL zstd frame failed")

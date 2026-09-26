@@ -29,7 +29,7 @@ the default decoder options are not the right fit. Load dictionary bundles with
 
 - [x] Defensive frame parsing, inspection, limits, and typed errors
 - [x] Whole-graph validation before execution
-- [x] Stored streams, checksums, zstd via `zrip`, lz4 via `lz4rip`
+- [x] Stored streams, checksums, zstd via `zrip-decode`, lz4 via `lz4rip-decode`
 - [x] Core graph transforms: concat, splitN, split-by-struct, transpose split,
   bit split, mux lengths, prefix, dispatch string, dispatchN-byTag
 - [x] Numeric/table transforms: endian conversion, delta, divide-by, dedup,

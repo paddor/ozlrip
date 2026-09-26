@@ -50,7 +50,7 @@ impl DictionaryStore {
         &mut self,
         bundle_id: &[u8],
         dict_index: u32,
-    ) -> Result<&mut zrip::DecompressContext> {
+    ) -> Result<&mut zrip_decode::context::DecompressContext> {
         let bundle_id: [u8; UNIQUE_ID_BYTES] = bundle_id.try_into().map_err(|_| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary bundle ID must be 32 bytes")
         })?;
@@ -87,7 +87,9 @@ struct LoadedDict {
 
 enum LoadedDictKind {
     #[cfg(feature = "zstd")]
-    Zstd { context: zrip::DecompressContext },
+    Zstd {
+        context: zrip_decode::context::DecompressContext,
+    },
 }
 
 fn parse_fat_bundle(bytes: &[u8]) -> Result<DictionaryBundle> {
@@ -178,10 +180,10 @@ fn parse_zstd_dict(content: &[u8]) -> Result<LoadedDictKind> {
 
     #[cfg(feature = "zstd")]
     {
-        let dict = zrip::Dictionary::from_bytes(raw_dict)
+        let dict = zrip_core::dict::Dictionary::from_bytes(raw_dict)
             .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("invalid zstd dictionary"))?;
         Ok(LoadedDictKind::Zstd {
-            context: zrip::DecompressContext::with_dict(dict),
+            context: zrip_decode::context::DecompressContext::with_dict(dict),
         })
     }
 

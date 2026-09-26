@@ -2,7 +2,9 @@
 
 The default build permits small encapsulated unsafe leaf modules after profiling.
 The `paranoid` feature applies `#![forbid(unsafe_code)]` inside each crate and
-uses safe fallbacks.
+uses safe fallbacks. It also enables `paranoid` in `zrip-core`, `zrip-decode`,
+and `lz4rip-decode`, so the zstd, lz4, Huffman, and FSE code ozlrip calls is
+forbidden from using unsafe code too.
 
 The baseline implementation uses safe scalar kernels unless a hot path has a
 documented unsafe leaf. Unsafe code must not call C, widen parser trust, or skip

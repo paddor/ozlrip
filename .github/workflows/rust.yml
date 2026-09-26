@@ -41,6 +41,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features --features alloc -- -D warnings
       - run: cargo clippy --workspace --all-targets --features paranoid -- -D warnings
       - run: cargo test --workspace --all-targets --features paranoid
+      - name: No duplicate dependencies
+        run: |
+          dups=$(cargo tree -d -e normal --workspace --target all 2>/dev/null)
+          if [ -n "$dups" ]; then echo "$dups"; exit 1; fi
+
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none
+      - run: cargo build --no-default-features --features alloc,zstd,lz4,checksum --target x86_64-unknown-none
+      - run: cargo build --no-default-features --features alloc,zstd,lz4,checksum,paranoid --target x86_64-unknown-none
 
   i686:
     runs-on: ubuntu-latest
