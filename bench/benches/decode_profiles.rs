@@ -571,7 +571,6 @@ fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResul
     BenchResult::new(OZLRIP_IMPL, case, stats, zli_rev)
 }
 
-
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
     let mut output = Vec::new();
     ozlrip::decode_into_with_options(frame, &mut output, ozlrip::Options::from(bench_limits()))?;
