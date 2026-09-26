@@ -1150,6 +1150,7 @@ fn decodes_concat_typed_outputs() {
             },
         ],
         &[],
+        2,
         Limits::default(),
     )
     .unwrap();
@@ -1179,6 +1180,7 @@ fn decodes_concat_string_outputs() {
             },
         ],
         &[],
+        2,
         Limits::default(),
     )
     .unwrap();
@@ -1345,6 +1347,33 @@ fn decodes_merge_sorted_outputs() {
     );
 }
 
+/// A size table longer than the graph's output list is rejected before any
+/// output is reserved, for typed and string concat.
+#[test]
+fn rejects_concat_size_table_longer_than_graph_outputs() {
+    let sizes = [0u32; 1024].map(u32::to_le_bytes).concat();
+    let sizes = StreamInput {
+        bytes: &sizes,
+        element_width: 4,
+        string_lengths: None,
+    };
+    let typed = StreamInput {
+        bytes: &[],
+        element_width: 2,
+        string_lengths: None,
+    };
+    let strings = StreamInput {
+        bytes: &[],
+        element_width: 1,
+        string_lengths: Some(&[]),
+    };
+
+    let err = decode_concat_node(&[sizes, typed], &[], 1, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    let err = decode_concat_string_node(&[sizes, strings], &[], 1, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+}
+
 #[test]
 fn rejects_concat_typed_size_mismatch() {
     let err = decode_concat_node(
@@ -1361,6 +1390,7 @@ fn rejects_concat_typed_size_mismatch() {
             },
         ],
         &[],
+        1,
         Limits::default(),
     )
     .unwrap_err();
@@ -1437,6 +1467,7 @@ fn decodes_splitn_num_node() {
             },
         ],
         2,
+        1,
         None,
         &[],
         &mut ctx,

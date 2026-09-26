@@ -279,6 +279,7 @@ fn decode_transform_chunk_with_plan<'a>(
                 node.standard_id,
                 &inputs,
                 node.variable_inputs,
+                node.output_targets.len(),
                 node.dict_index,
                 header,
                 &mut ctx,
@@ -451,6 +452,7 @@ fn decode_transform_chunk_appending(
                 node.standard_id,
                 &inputs,
                 node.variable_inputs,
+                node.output_targets.len(),
                 node.dict_index,
                 header,
                 &mut ctx,
@@ -1272,16 +1274,18 @@ fn execute_standard_node(
     standard_id: u32,
     inputs: &[StreamInput<'_>],
     variable_inputs: u32,
+    output_count: usize,
     dict_index: Option<u32>,
     header: &[u8],
     ctx: &mut StandardNodeContext<'_>,
 ) -> Result<SmallVec<[OwnedStream; 2]>> {
     match standard_id {
         standard::CONCAT_SERIAL_ID | standard::CONCAT_NUM_ID | standard::CONCAT_STRUCT_ID => {
-            decode_concat_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
+            decode_concat_node(inputs, header, output_count, ctx.limits).map(SmallVec::from_vec)
         }
         standard::CONCAT_STRING_ID => {
-            decode_concat_string_node(inputs, header, ctx.limits).map(SmallVec::from_vec)
+            decode_concat_string_node(inputs, header, output_count, ctx.limits)
+                .map(SmallVec::from_vec)
         }
         standard::INTERLEAVE_STRING_ID => {
             decode_interleave_string_node(single_stream(inputs)?, header, ctx.limits)
@@ -1684,6 +1688,7 @@ impl OwnedStream {
 fn decode_concat_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
+    expected_outputs: usize,
     limits: Limits,
 ) -> Result<Vec<OwnedStream>> {
     if !header.is_empty() {
@@ -1694,7 +1699,7 @@ fn decode_concat_node(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("concat input count does not match node shape"));
     };
-    let output_count = concat_size_count(sizes)?;
+    let output_count = concat_output_count(sizes, expected_outputs)?;
     if concatenated.element_width == 0 {
         return Err(Error::new(ErrorKind::InvalidType).with_detail("concat element width is zero"));
     }
@@ -1706,9 +1711,6 @@ fn decode_concat_node(
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("concat input has partial element")
         );
-    }
-    if output_count == 0 {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("concat size table is empty"));
     }
 
     let total_elements = numeric_element_count(concatenated.bytes, concatenated.element_width)?;
@@ -1764,6 +1766,7 @@ fn decode_concat_node(
 fn decode_concat_string_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
+    expected_outputs: usize,
     limits: Limits,
 ) -> Result<Vec<OwnedStream>> {
     if !header.is_empty() {
@@ -1774,10 +1777,7 @@ fn decode_concat_string_node(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("concat input count does not match node shape"));
     };
-    let output_count = concat_size_count(sizes)?;
-    if output_count == 0 {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("concat size table is empty"));
-    }
+    let output_count = concat_output_count(sizes, expected_outputs)?;
     if concatenated.element_width != 1 {
         return Err(Error::new(ErrorKind::InvalidType)
             .with_detail("concat_string input must be byte strings"));
@@ -1965,6 +1965,20 @@ fn concat_size_count(sizes: &StreamInput<'_>) -> Result<usize> {
             Err(Error::new(ErrorKind::InvalidType).with_detail("concat sizes width is unsupported"))
         }
     }
+}
+
+/// Checks the size table against the graph before any per-output allocation,
+/// so a large table cannot reserve outputs the graph does not have.
+fn concat_output_count(sizes: &StreamInput<'_>, expected_outputs: usize) -> Result<usize> {
+    let output_count = concat_size_count(sizes)?;
+    if output_count == 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("concat size table is empty"));
+    }
+    if output_count != expected_outputs {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("node output count does not match graph"));
+    }
+    Ok(output_count)
 }
 
 fn read_concat_size(sizes: &StreamInput<'_>, index: usize) -> Result<usize> {

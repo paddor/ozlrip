@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `concat` nodes check their size table against the graph's output count
+  before reserving outputs. A large size table could reserve about 16 times
+  its own size in stream headers before the mismatch was reported.
 - Fix 2-, 4-, and 8-byte delta decoding on big-endian targets: the first
   element was written in native byte order.
 - Update codec dependencies: `zrip-decode` 0.8.9 replaces `zrip`, so the zstd
