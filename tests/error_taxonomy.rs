@@ -242,6 +242,7 @@ fn feature_enabled(value: &str) -> bool {
     match value {
         "none" => true,
         "checksum" => cfg!(feature = "checksum"),
+        "lz4" => cfg!(feature = "lz4"),
         _ => panic!("bad error taxonomy feature: {value}"),
     }
 }
@@ -395,6 +396,33 @@ fn error_case(name: &str) -> ErrorCase {
         "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
         "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
         "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
+        "header-only-frame" => inspect_case(
+            {
+                let mut input = Vec::new();
+                input.extend_from_slice(&magic(21));
+                input.push(0);
+                input.push(1);
+                input.push(1);
+                input
+            },
+            Options::default(),
+        ),
+        "lz4-declared-size-beyond-expansion" => {
+            // A 3-byte block cannot decode to more than 3 * 255 bytes.
+            let decoded_len = 3 * 255 + 1;
+            let mut header = Vec::new();
+            push_var_u64(&mut header, u64::try_from(decoded_len).unwrap());
+            decode_case(
+                standard_transform_serial_frame(
+                    23,
+                    u8::try_from(LZ4_ID).unwrap(),
+                    &[0, 0, 0],
+                    decoded_len,
+                    &header,
+                ),
+                Options::default(),
+            )
+        }
         "legacy-bad-encoded-checksum" => {
             let mut input = legacy_checksum_frame(false, true);
             *input.last_mut().unwrap() ^= 1;

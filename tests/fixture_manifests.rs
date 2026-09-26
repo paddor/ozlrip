@@ -111,7 +111,7 @@ fn error_taxonomy_manifest_tracks_public_error_classes() {
             row[3]
         );
         assert!(
-            matches!(row[4], "none" | "checksum"),
+            matches!(row[4], "none" | "checksum" | "lz4"),
             "bad error taxonomy feature {}",
             row[4]
         );
