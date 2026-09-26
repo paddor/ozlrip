@@ -3196,6 +3196,41 @@ fn decodes_v21_delta_serial8_chunk() {
     assert_eq!(output, [2, 3, 4, 6, 0]);
 }
 
+/// Wide delta elements are little-endian on every target, including the
+/// first value copied from the header.
+#[test]
+fn decodes_wide_delta_elements_as_little_endian() {
+    fn check<const W: usize>(first: u64, deltas: &[u64], expected: &[u64]) {
+        let le = |values: &[u64]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes()[..W].to_vec())
+                .collect()
+        };
+        let stored = le(deltas);
+        let output = decode_delta_node(
+            StreamInput {
+                bytes: &stored,
+                element_width: W,
+                string_lengths: None,
+            },
+            &le(&[first]),
+            Limits::default(),
+            &mut DecodeScratch::new(),
+        )
+        .unwrap();
+        assert_eq!(output.bytes, le(expected), "width {W}");
+    }
+
+    check::<2>(0x0102, &[0x0100, 0xffff], &[0x0102, 0x0202, 0x0201]);
+    check::<4>(0x0102_0304, &[0x0100_0000], &[0x0102_0304, 0x0202_0304]);
+    check::<8>(
+        0x0102_0304_0506_0708,
+        &[0x0100_0000_0000_0000],
+        &[0x0102_0304_0506_0708, 0x0202_0304_0506_0708],
+    );
+}
+
 #[test]
 fn decodes_v21_two_node_regenerated_stream_graph() {
     let input = zigzag_delta_graph_frame(&[2, 1, 6], 10);

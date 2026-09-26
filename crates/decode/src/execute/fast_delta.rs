@@ -108,7 +108,7 @@ fn decode_delta_2(stored: &[u8], header: &[u8], output: &mut Vec<u8>) {
         let dst = output.as_mut_ptr();
         let src = stored.as_ptr();
         let mut previous = u16::from_le_bytes([header[0], header[1]]);
-        (dst as *mut u16).write_unaligned(previous);
+        (dst as *mut u16).write_unaligned(previous.to_le());
         for index in 0..elements {
             let delta_ptr = src.add(index * 2);
             let delta = (delta_ptr as *const u16).read_unaligned();
@@ -126,7 +126,7 @@ fn decode_delta_4(stored: &[u8], header: &[u8], output: &mut Vec<u8>) {
         let dst = output.as_mut_ptr();
         let src = stored.as_ptr();
         let mut previous = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-        (dst as *mut u32).write_unaligned(previous);
+        (dst as *mut u32).write_unaligned(previous.to_le());
         for index in 0..elements {
             let delta_ptr = src.add(index * 4);
             let delta = (delta_ptr as *const u32).read_unaligned();
@@ -146,7 +146,7 @@ fn decode_delta_8(stored: &[u8], header: &[u8], output: &mut Vec<u8>) {
         let mut previous = u64::from_le_bytes([
             header[0], header[1], header[2], header[3], header[4], header[5], header[6], header[7],
         ]);
-        (dst as *mut u64).write_unaligned(previous);
+        (dst as *mut u64).write_unaligned(previous.to_le());
         for index in 0..elements {
             let delta_ptr = src.add(index * 8);
             let delta = (delta_ptr as *const u64).read_unaligned();

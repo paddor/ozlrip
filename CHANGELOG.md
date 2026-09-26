@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix 2-, 4-, and 8-byte delta decoding on big-endian targets: the first
+  element was written in native byte order.
 - Update codec dependencies: `zrip-decode` 0.8.9 replaces `zrip`, so the zstd
   encoder is no longer built; `zrip-core` 0.11; `lz4rip-decode` 0.10.4
   replaces `lz4rip`; `fearless_simd` 1.0. A fresh resolve no longer builds two
