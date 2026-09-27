@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::{
-    OwnedStream, StreamInput, numeric_element_count, partition::write_numeric_element_vec,
+    OwnedStream, StreamInput, numeric::push_numeric_element, numeric_element_count,
     read_usize_numeric_element,
 };
 
@@ -111,7 +111,7 @@ fn append_run(
         return Ok(());
     }
     for _ in 0..distance {
-        write_numeric_element_vec(output, value_width, dominant);
+        push_numeric_element(output, value_width, dominant);
     }
     Ok(())
 }

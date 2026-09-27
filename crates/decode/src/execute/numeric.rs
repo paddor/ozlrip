@@ -1,4 +1,4 @@
-use alloc::format;
+use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
@@ -44,6 +44,39 @@ pub(super) fn write_numeric_element(dst: &mut [u8], element_width: usize, value:
         4 => dst[..4].copy_from_slice(&(value as u32).to_le_bytes()),
         8 => dst[..8].copy_from_slice(&value.to_le_bytes()),
         _ => dst[..element_width].copy_from_slice(&value.to_le_bytes()[..element_width]),
+    }
+}
+
+/// Reads one little-endian unsigned element of 1, 2, 4 or 8 bytes.
+pub(super) fn read_element(element: &[u8]) -> u64 {
+    match element.len() {
+        1 => u64::from(element[0]),
+        2 => u64::from(u16::from_le_bytes([element[0], element[1]])),
+        4 => u64::from(u32::from_le_bytes([
+            element[0], element[1], element[2], element[3],
+        ])),
+        8 => u64::from_le_bytes([
+            element[0], element[1], element[2], element[3], element[4], element[5], element[6],
+            element[7],
+        ]),
+        _ => unreachable!("numeric width prevalidated"),
+    }
+}
+
+/// Appends `value` as a little-endian element of 1, 2, 4 or 8 bytes.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::inline_always,
+    reason = "profiled numeric decode paths pay measurable call overhead"
+)]
+#[inline(always)]
+pub(super) fn push_numeric_element(output: &mut Vec<u8>, element_width: usize, value: u64) {
+    match element_width {
+        1 => output.push(value as u8),
+        2 => output.extend_from_slice(&(value as u16).to_le_bytes()),
+        4 => output.extend_from_slice(&(value as u32).to_le_bytes()),
+        8 => output.extend_from_slice(&value.to_le_bytes()),
+        _ => unreachable!("numeric element width was validated"),
     }
 }
 

@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::numeric::push_numeric_element;
+
 use super::{
     OwnedStream, StreamInput, fast_partition, max_numeric_value, read_var_u64,
     require_numeric_width,
@@ -346,7 +348,7 @@ pub(super) fn decode_partition_node(
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("partition value exceeds output element width"));
         }
-        write_numeric_element_vec(&mut output, element_width, value);
+        push_numeric_element(&mut output, element_width, value);
     }
 
     Ok(OwnedStream {
@@ -530,22 +532,6 @@ fn read_var_u64_from_slice(bytes: &mut &[u8]) -> Result<u64> {
         .get(offset..)
         .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("varint offset is invalid"))?;
     Ok(value)
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::inline_always,
-    reason = "profiled numeric decode paths pay measurable call overhead"
-)]
-#[inline(always)]
-pub(super) fn write_numeric_element_vec(output: &mut Vec<u8>, element_width: usize, value: u64) {
-    match element_width {
-        1 => output.push(value as u8),
-        2 => output.extend_from_slice(&(value as u16).to_le_bytes()),
-        4 => output.extend_from_slice(&(value as u32).to_le_bytes()),
-        8 => output.extend_from_slice(&value.to_le_bytes()),
-        _ => unreachable!("numeric element width was validated"),
-    }
 }
 
 /// Forward (least significant bit first) bit reader. Pending bits sit in a
