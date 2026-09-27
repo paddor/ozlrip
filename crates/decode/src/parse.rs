@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use crate::dict::{MAX_DICTS_PER_BUNDLE, UNIQUE_ID_BYTES};
 use crate::info::{FrameInfo, FrameValueType};
 use smallvec::SmallVec;
 
@@ -38,8 +39,6 @@ const MAX_FORMAT_VERSION: u32 = 27;
 const CHUNK_VERSION_MIN: u32 = 21;
 const COMMENT_VERSION_MIN: u32 = 22;
 const MATERIALIZED_DICT_VERSION_MIN: u32 = 25;
-const UNIQUE_ID_BYTES: usize = 32;
-const MAX_DICTS_PER_BUNDLE: u32 = 0xffff;
 const MAX_HEADER_COMMENT_BYTES: u64 = 10_000;
 
 pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {

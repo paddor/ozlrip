@@ -6,9 +6,12 @@ use crate::standard;
 
 const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
 const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
-const UNIQUE_ID_BYTES: usize = 32;
+/// Size of a bundle or dictionary ID.
+pub(crate) const UNIQUE_ID_BYTES: usize = 32;
 const FAT_BUNDLE_FLAG: u8 = 1;
-const MAX_DICTS_PER_BUNDLE: u32 = 0xffff;
+/// Most dictionaries one bundle holds, so the largest valid dictionary
+/// index a frame may name.
+pub(crate) const MAX_DICTS_PER_BUNDLE: u32 = 0xffff;
 const ZSTD_DICT_ENVELOPE_VERSION: u32 = 1;
 
 #[derive(Default)]
