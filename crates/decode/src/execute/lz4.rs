@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 #[cfg(feature = "lz4")]
-use super::numeric::read_var_u64;
+use crate::varint::read_var_u64;
 
 /// Most bytes one LZ4 block byte can decode to. A match sequence spends a
 /// token and a 2-byte offset on at most 19 bytes, and each length extension

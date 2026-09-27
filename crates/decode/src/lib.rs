@@ -11,6 +11,7 @@ mod execute;
 mod info;
 mod parse;
 mod standard;
+mod varint;
 
 pub use info::{FrameInfo, FrameValueType};
 

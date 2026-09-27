@@ -202,31 +202,6 @@ impl<'a> Reader<'a> {
     }
 
     pub(super) fn read_var_u64(&mut self) -> Result<u64> {
-        let start = self.offset;
-        let mut value = 0u64;
-        let mut shift = 0u32;
-        for index in 0..10 {
-            let absolute = start
-                .checked_add(index)
-                .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, start))?;
-            let byte = *self
-                .bytes
-                .get(absolute)
-                .ok_or_else(|| Error::at(ErrorKind::Truncated, absolute))?;
-            let payload = u64::from(byte & 0x7f);
-            if index == 9 && payload > 1 {
-                return Err(Error::at(ErrorKind::IntegerOverflow, start)
-                    .with_detail("u64 varint payload overflows"));
-            }
-            value |= payload << shift;
-            if byte & 0x80 == 0 {
-                self.offset = absolute
-                    .checked_add(1)
-                    .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, absolute))?;
-                return Ok(value);
-            }
-            shift += 7;
-        }
-        Err(Error::at(ErrorKind::Malformed, start).with_detail("u64 varint is too long"))
+        crate::varint::read_var_u64(self.bytes, &mut self.offset)
     }
 }

@@ -156,32 +156,3 @@ pub(super) fn require_numeric_width(
     numeric_element_count(stream.bytes, expected)?;
     Ok(())
 }
-
-pub(super) fn read_var_u64(input: &[u8], offset: &mut usize) -> Result<u64> {
-    let start = *offset;
-    let mut value = 0u64;
-    for index in 0..10 {
-        let byte = *input
-            .get(*offset)
-            .ok_or_else(|| Error::at(ErrorKind::Truncated, *offset))?;
-        *offset = (*offset)
-            .checked_add(1)
-            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, *offset))?;
-        let payload = u64::from(byte & 0x7f);
-        if index == 9 && payload > 1 {
-            return Err(Error::at(ErrorKind::IntegerOverflow, start)
-                .with_detail("u64 varint payload overflows"));
-        }
-        let shift = index * 7;
-        let shifted = payload
-            .checked_shl(shift)
-            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, start))?;
-        value = value
-            .checked_add(shifted)
-            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, start))?;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    Err(Error::at(ErrorKind::Malformed, start).with_detail("u64 varint is too long"))
-}
