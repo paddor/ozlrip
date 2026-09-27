@@ -13,27 +13,19 @@ fuzz_target!(|data: &[u8]| {
         source0.len() + source1.len(),
         &[&source1, &source0, &sizes, &tags],
     );
-    let limits = Limits {
-        max_frame_bytes: 8192,
-        max_decoded_bytes: 4096,
-        max_chunks: 1,
-        max_nodes: 1,
-        max_streams: 6,
-        max_transform_header_bytes: 0,
-        max_stored_stream_bytes: 8192,
-        max_buffer_bytes: 4096,
-        max_graph_depth: 1,
-        max_expansion_ratio: 4096,
-    };
+    let mut limits = Limits::strict();
+    limits.max_frame_bytes = 8192;
+    limits.max_decoded_bytes = 4096;
+    limits.max_chunks = 1;
+    limits.max_nodes = 1;
+    limits.max_streams = 6;
+    limits.max_transform_header_bytes = 0;
+    limits.max_stored_stream_bytes = 8192;
+    limits.max_buffer_bytes = 4096;
+    limits.max_graph_depth = 1;
+    limits.max_expansion_ratio = 4096;
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(
-        &frame,
-        &mut output,
-        ozlrip::Options {
-            limits,
-            ..ozlrip::Options::default()
-        },
-    );
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
 
 fn dispatch_inputs(data: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {

@@ -73,13 +73,15 @@ pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> 
             Error::new(ErrorKind::Unsupported).with_detail("unknown OpenZL standard transform ID")
         );
     };
-    if format_version < min_version {
+    let too_new = max_version(id).is_some_and(|max_version| format_version > max_version);
+    if format_version < min_version || too_new {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform ID is not available in this format version"));
     }
     Ok(())
 }
 
+// Version ranges follow upstream `src/openzl/codecs/decoder_registry.c`.
 const fn min_version(id: u32) -> Option<u32> {
     match id {
         1..=3 | 5..=10 | 15..=17 | 20..=32 => Some(3),
@@ -87,8 +89,9 @@ const fn min_version(id: u32) -> Option<u32> {
         34 => Some(6),
         35..=37 => Some(8),
         40..=43 => Some(9),
-        11 | 12 | 38 | 44..=46 => Some(11),
-        4 | 47 | 48 => Some(14),
+        11 | 12 => Some(10),
+        4 | 38 | 44..=46 => Some(11),
+        47 | 48 => Some(14),
         49..=52 => Some(15),
         53..=56 => Some(16),
         57 | 58 => Some(17),
@@ -100,6 +103,16 @@ const fn min_version(id: u32) -> Option<u32> {
         18 | 19 | 63..=65 => Some(24),
         66 => Some(26),
         67 => Some(27),
+        _ => None,
+    }
+}
+
+/// Last format version that registers a deprecated transform.
+const fn max_version(id: u32) -> Option<u32> {
+    match id {
+        23 => Some(10),
+        20 | 21 => Some(12),
+        15..=17 => Some(14),
         _ => None,
     }
 }
@@ -123,5 +136,30 @@ mod tests {
         let err = validate_transform_id(67, 26).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         validate_transform_id(67, 27).unwrap();
+    }
+
+    #[test]
+    fn matches_upstream_minimum_versions() {
+        for (id, first) in [(TRANSPOSE_SPLIT_ID, 11), (11, 10), (12, 10)] {
+            validate_transform_id(id, first).unwrap();
+            let err = validate_transform_id(id, first - 1).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn rejects_deprecated_transforms_after_their_last_version() {
+        for (id, last) in [
+            (ZSTD_FIXED_ID, 10),
+            (ROLZ_DEPRECATED_ID, 12),
+            (FASTLZ_DEPRECATED_ID, 12),
+            (FSE_DEPRECATED_ID, 14),
+            (HUFFMAN_DEPRECATED_ID, 14),
+            (HUFFMAN_FIXED_DEPRECATED_ID, 14),
+        ] {
+            validate_transform_id(id, last).unwrap();
+            let err = validate_transform_id(id, last + 1).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+        }
     }
 }

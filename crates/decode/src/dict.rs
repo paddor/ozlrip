@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use ozlrip_core::{Error, ErrorKind, Result};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::standard;
 
@@ -27,8 +27,10 @@ impl DictionaryStore {
         self.bundles.clear();
     }
 
-    pub(crate) fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
-        let bundle = parse_fat_bundle(bytes)?;
+    /// Loads a fat bundle, replacing a loaded bundle with the same ID.
+    /// `limits` bound the dictionaries and bytes of all loaded bundles.
+    pub(crate) fn load_fat_bundle(&mut self, bytes: &[u8], limits: Limits) -> Result<()> {
+        let bundle = parse_fat_bundle(bytes, &self.bundles, limits)?;
         if let Some(existing) = self
             .bundles
             .iter_mut()
@@ -50,7 +52,7 @@ impl DictionaryStore {
         &mut self,
         bundle_id: &[u8],
         dict_index: u32,
-    ) -> Result<&mut zrip::DecompressContext> {
+    ) -> Result<&mut zrip_decode::context::DecompressContext> {
         let bundle_id: [u8; UNIQUE_ID_BYTES] = bundle_id.try_into().map_err(|_| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary bundle ID must be 32 bytes")
         })?;
@@ -68,29 +70,47 @@ impl DictionaryStore {
             Error::new(ErrorKind::Unsupported)
                 .with_detail("dictionary index is not in loaded bundle")
         })?;
-        match &mut loaded.kind {
-            LoadedDictKind::Zstd { context } => Ok(context),
+        // Contexts hold decode workspaces, so only dictionaries a frame uses
+        // get one.
+        if let Some(dict) = loaded.dict.take() {
+            loaded.context = Some(zrip_decode::context::DecompressContext::with_dict(dict));
         }
+        loaded.context.as_mut().ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dictionary context is missing")
+        })
+    }
+
+    #[cfg(all(test, feature = "zstd"))]
+    pub(crate) fn built_contexts(&self) -> usize {
+        self.bundles
+            .iter()
+            .flat_map(|bundle| &bundle.dicts)
+            .filter(|dict| dict.context.is_some())
+            .count()
     }
 }
 
 struct DictionaryBundle {
     id: [u8; UNIQUE_ID_BYTES],
+    /// Size of the bundle as loaded, charged to `Limits::max_dictionary_bytes`.
+    bytes: usize,
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
     dicts: Vec<LoadedDict>,
 }
 
-#[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+/// A zstd dictionary, parsed at load and moved into `context` on first use.
 struct LoadedDict {
-    kind: LoadedDictKind,
-}
-
-enum LoadedDictKind {
     #[cfg(feature = "zstd")]
-    Zstd { context: zrip::DecompressContext },
+    dict: Option<zrip_core::dict::Dictionary>,
+    #[cfg(feature = "zstd")]
+    context: Option<zrip_decode::context::DecompressContext>,
 }
 
-fn parse_fat_bundle(bytes: &[u8]) -> Result<DictionaryBundle> {
+fn parse_fat_bundle(
+    bytes: &[u8],
+    loaded: &[DictionaryBundle],
+    limits: Limits,
+) -> Result<DictionaryBundle> {
     let mut reader = BundleReader::new(bytes);
     if reader.read_u32_le()? != BUNDLE_INFO_MAGIC {
         return Err(Error::new(ErrorKind::Malformed).with_detail("invalid dictionary bundle magic"));
@@ -109,6 +129,7 @@ fn parse_fat_bundle(bytes: &[u8]) -> Result<DictionaryBundle> {
     let dict_count = usize::try_from(dict_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dictionary count is too large")
     })?;
+    check_dictionary_limits(loaded, bundle_id, dict_count, bytes.len(), limits)?;
     let mut dict_ids = Vec::new();
     dict_ids.try_reserve_exact(dict_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dictionary ID allocation failed")
@@ -132,8 +153,34 @@ fn parse_fat_bundle(bytes: &[u8]) -> Result<DictionaryBundle> {
 
     Ok(DictionaryBundle {
         id: bundle_id,
+        bytes: bytes.len(),
         dicts,
     })
+}
+
+/// Checks the totals the store would hold after loading this bundle. A
+/// loaded bundle with the same ID is replaced, so it does not count.
+fn check_dictionary_limits(
+    loaded: &[DictionaryBundle],
+    bundle_id: [u8; UNIQUE_ID_BYTES],
+    dict_count: usize,
+    bundle_bytes: usize,
+    limits: Limits,
+) -> Result<()> {
+    let (mut dicts, mut bytes) = (dict_count, bundle_bytes);
+    for bundle in loaded.iter().filter(|bundle| bundle.id != bundle_id) {
+        dicts = dicts.saturating_add(bundle.dicts.len());
+        bytes = bytes.saturating_add(bundle.bytes);
+    }
+    if dicts > limits.max_dictionaries {
+        return Err(Error::new(ErrorKind::LimitExceeded).with_detail("dictionary limit exceeded"));
+    }
+    if bytes > limits.max_dictionary_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("dictionary byte limit exceeded")
+        );
+    }
+    Ok(())
 }
 
 fn parse_packed_dict(
@@ -163,10 +210,10 @@ fn parse_packed_dict(
             .with_detail("only zstd dictionary materialization is implemented"));
     }
 
-    parse_zstd_dict(content).map(|kind| LoadedDict { kind })
+    parse_zstd_dict(content)
 }
 
-fn parse_zstd_dict(content: &[u8]) -> Result<LoadedDictKind> {
+fn parse_zstd_dict(content: &[u8]) -> Result<LoadedDict> {
     let mut reader = BundleReader::new(content);
     let version = reader.read_u32_le()?;
     if version != ZSTD_DICT_ENVELOPE_VERSION {
@@ -178,10 +225,11 @@ fn parse_zstd_dict(content: &[u8]) -> Result<LoadedDictKind> {
 
     #[cfg(feature = "zstd")]
     {
-        let dict = zrip::Dictionary::from_bytes(raw_dict)
+        let dict = zrip_core::dict::Dictionary::from_bytes(raw_dict)
             .map_err(|_| Error::new(ErrorKind::Malformed).with_detail("invalid zstd dictionary"))?;
-        Ok(LoadedDictKind::Zstd {
-            context: zrip::DecompressContext::with_dict(dict),
+        Ok(LoadedDict {
+            dict: Some(dict),
+            context: None,
         })
     }
 
@@ -258,6 +306,7 @@ impl<'a> BundleReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ozlrip_core::Limits;
 
     const BUNDLE_ID: [u8; UNIQUE_ID_BYTES] = [7; UNIQUE_ID_BYTES];
     const DICT_ID: [u8; UNIQUE_ID_BYTES] = [9; UNIQUE_ID_BYTES];
@@ -286,9 +335,35 @@ mod tests {
         content
     }
 
+    fn limits(max_dictionaries: usize, max_dictionary_bytes: usize) -> Limits {
+        let mut limits = Limits::strict();
+        limits.max_dictionaries = max_dictionaries;
+        limits.max_dictionary_bytes = max_dictionary_bytes;
+        limits
+    }
+
+    /// Both limits are checked from the bundle header, before any dictionary
+    /// is parsed, so the result does not depend on the zstd feature.
+    #[test]
+    fn enforces_dictionary_count_and_byte_limits() {
+        let bundle = bundle_with_dict(standard::ZSTD_ID, false, &zstd_envelope(1, b"dict"));
+        let mut store = DictionaryStore::new();
+
+        let err = store
+            .load_fat_bundle(&bundle, limits(0, usize::MAX))
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+
+        let err = store
+            .load_fat_bundle(&bundle, limits(usize::MAX, bundle.len() - 1))
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+        assert!(store.bundles.is_empty());
+    }
+
     #[test]
     fn rejects_empty_bundle() {
-        let err = parse_fat_bundle(&[]).err().unwrap();
+        let err = parse_fat_bundle(&[], &[], Limits::default()).err().unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Truncated);
     }
@@ -298,7 +373,9 @@ mod tests {
         let mut bundle = Vec::new();
         bundle.extend_from_slice(&0u32.to_le_bytes());
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
     }
@@ -311,7 +388,9 @@ mod tests {
         bundle.push(0);
         bundle.extend_from_slice(&0u32.to_le_bytes());
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
@@ -322,7 +401,9 @@ mod tests {
         let packed_id = 4 + UNIQUE_ID_BYTES + 1 + 4 + UNIQUE_ID_BYTES + 4;
         bundle[packed_id] ^= 1;
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
     }
@@ -332,7 +413,9 @@ mod tests {
         let content = zstd_envelope(1, b"dict");
         let bundle = bundle_with_dict(standard::ZSTD_ID, true, &content);
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
@@ -341,7 +424,9 @@ mod tests {
     fn rejects_non_zstd_materializer() {
         let bundle = bundle_with_dict(standard::LZ4_ID, false, b"dict");
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
@@ -350,7 +435,9 @@ mod tests {
     fn rejects_bad_zstd_envelope_version() {
         let bundle = bundle_with_dict(standard::ZSTD_ID, false, &zstd_envelope(2, b"dict"));
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
     }
@@ -360,7 +447,9 @@ mod tests {
     fn rejects_zstd_materializer_when_zstd_feature_is_disabled() {
         let bundle = bundle_with_dict(standard::ZSTD_ID, false, &zstd_envelope(1, b"dict"));
 
-        let err = parse_fat_bundle(&bundle).err().unwrap();
+        let err = parse_fat_bundle(&bundle, &[], Limits::default())
+            .err()
+            .unwrap();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }

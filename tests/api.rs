@@ -112,6 +112,7 @@ fn comment_frame(comment: &[u8]) -> Vec<u8> {
     input.push(4);
     input.push(u8::try_from(comment.len()).unwrap());
     input.extend_from_slice(comment);
+    input.push(0);
     input
 }
 
@@ -256,12 +257,9 @@ fn reusable_decoder_decode_returns_owned_output() {
 }
 
 #[test]
-fn reusable_decoder_options_can_disable_plan_cache() {
+fn reusable_decoder_appends_repeated_decodes() {
     let frame = stored_serial_frame(&[7, 8, 9]);
-    let options = Options {
-        plan_cache_max_frame_bytes: 0,
-        ..Options::default()
-    };
+    let options = Options::default();
     let mut decoder = ozlrip::Decoder::with_options(options);
     let mut dst = Vec::new();
 
@@ -275,8 +273,43 @@ fn reusable_decoder_options_can_disable_plan_cache() {
     assert_eq!(dst, [7, 8, 9, 7, 8, 9]);
 }
 
+/// A numeric-output frame whose chunk ends in a zstd direct-append tail. The
+/// serial API does not support it, and a reused decoder must agree with a
+/// fresh one on every call (a removed plan cache once decoded it on the
+/// second call).
+#[cfg(feature = "zstd")]
 #[test]
-fn reusable_decoder_rejects_mutated_cached_frame_buffer() {
+fn reused_decoder_matches_fresh_decoder_for_numeric_output() {
+    use ozlrip_test_support::{Chunk, FrameBuilder, Node, OutputType, ZSTD_TRANSFORM_ID};
+
+    const CONVERT_NUM_TO_SERIAL_LE_ID: u32 = 10;
+    let payload = [1u8, 0, 0, 0, 2, 0, 0, 0];
+    let compressed = zrip::compress(&payload, 1).unwrap();
+    let mut stored = Vec::new();
+    ozlrip_test_support::push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&compressed[4..]);
+    let frame = FrameBuilder::new(21)
+        .output(OutputType::Numeric, payload.len())
+        .chunk(
+            Chunk::new()
+                .node(Node::new(ZSTD_TRANSFORM_ID))
+                .node(Node::new(CONVERT_NUM_TO_SERIAL_LE_ID).header([2]))
+                .stored_stream(stored),
+        )
+        .build();
+
+    let fresh = ozlrip::decode(&frame).map_err(|err| err.kind());
+    let mut decoder = ozlrip::Decoder::new();
+    let first = decoder.decode(&frame).map_err(|err| err.kind());
+    let second = decoder.decode(&frame).map_err(|err| err.kind());
+
+    assert_eq!(fresh, Err(ErrorKind::Unsupported));
+    assert_eq!(first, fresh);
+    assert_eq!(second, fresh);
+}
+
+#[test]
+fn reusable_decoder_rejects_mutated_frame_buffer() {
     let mut frame = stored_serial_frame(&[7, 8, 9]);
     let mut decoder = ozlrip::Decoder::new();
     let mut dst = Vec::new();
@@ -288,6 +321,33 @@ fn reusable_decoder_rejects_mutated_cached_frame_buffer() {
     assert_eq!(written, 3);
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(dst, [7, 8, 9]);
+}
+
+/// `shrink_to_fit` frees the reused buffers and zstd state, and later
+/// decodes are unchanged.
+#[cfg(feature = "zstd")]
+#[test]
+fn decoder_decodes_the_same_after_shrink_to_fit() {
+    use ozlrip_test_support::{Chunk, FrameBuilder, Node, ZSTD_TRANSFORM_ID};
+
+    let payload = b"zstd node payload, ".repeat(16);
+    let compressed = zrip::compress(&payload, 1).unwrap();
+    let mut stored = Vec::new();
+    ozlrip_test_support::push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&compressed[4..]);
+    let frame = FrameBuilder::new(21)
+        .serial_output(payload.len())
+        .chunk(
+            Chunk::new()
+                .node(Node::new(ZSTD_TRANSFORM_ID))
+                .stored_stream(stored),
+        )
+        .build();
+    let mut decoder = ozlrip::Decoder::new();
+
+    assert_eq!(decoder.decode(&frame).unwrap(), payload);
+    decoder.shrink_to_fit();
+    assert_eq!(decoder.decode(&frame).unwrap(), payload);
 }
 
 #[test]
@@ -318,20 +378,11 @@ fn inspect_reports_header_comment_bytes() {
 #[test]
 fn inspect_enforces_stored_stream_limit() {
     let frame = stored_serial_frame(&[7, 8, 9]);
-    let limits = Limits {
-        max_stored_stream_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_stored_stream_bytes = 2;
 
-    let err = ozlrip::decode_into_with_options(
-        &frame,
-        &mut Vec::new(),
-        Options {
-            limits,
-            ..Options::default()
-        },
-    )
-    .unwrap_err();
+    let err = ozlrip::decode_into_with_options(&frame, &mut Vec::new(), Options::from(limits))
+        .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }

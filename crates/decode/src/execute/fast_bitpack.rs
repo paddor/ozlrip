@@ -86,7 +86,12 @@ fn unpack_lsb_bits_u16_window_safe(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     output.resize(start + output_len, 0);
 
-    for (element, out) in output[start..].chunks_exact_mut(2).enumerate() {
+    for (element, out) in output[start..]
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
         let bit_index = element * bits;
         let byte_index = bit_index / 8;
         let shift = bit_index & 7;

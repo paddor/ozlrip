@@ -65,14 +65,11 @@ fn parse_int_rejects_truncated_i64_stream() {
 #[test]
 fn parse_int_obeys_output_limits() {
     let input = numbers(&[100]);
-    let err = parse_int::decode_node(
-        stream(&input, 8),
-        &[],
-        Limits {
-            max_decoded_bytes: 2,
-            ..Limits::default()
-        },
-    )
+    let err = parse_int::decode_node(stream(&input, 8), &[], {
+        let mut limits = Limits::default();
+        limits.max_decoded_bytes = 2;
+        limits
+    })
     .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);

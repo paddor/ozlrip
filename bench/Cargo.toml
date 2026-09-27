@@ -13,10 +13,8 @@ no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
 paranoid = ["ozlrip/default", "ozlrip/paranoid"]
 
 [dependencies]
+openzl-shim = { path = "../tools/openzl-shim" }
 ozlrip = { path = "..", default-features = false }
-
-[build-dependencies]
-cc = "1.2"
 
 [[bench]]
 name = "decode_profiles"

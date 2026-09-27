@@ -34,3 +34,9 @@ stored-stream-size-overflow	overflow	inspect	IntegerOverflow	none
 bad-header-checksum	checksum	inspect	ChecksumMismatch	checksum
 bad-encoded-checksum	checksum	inspect	ChecksumMismatch	checksum
 bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
+legacy-bad-encoded-checksum	checksum	inspect	ChecksumMismatch	checksum
+legacy-bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
+legacy-truncated-checksum	truncated	inspect	Truncated	none
+legacy-trailing-bytes	malformed	inspect	Malformed	none
+header-only-frame	truncated	inspect	Truncated	none
+lz4-declared-size-beyond-expansion	malformed	decode	Malformed	lz4

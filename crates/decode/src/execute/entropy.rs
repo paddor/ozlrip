@@ -7,7 +7,7 @@ use zrip_core::{
         FseDecodeEntry,
         table_builder::{build_decode_table, parse_fse_table_description},
     },
-    huffman::{HuffmanDecodeEntry, decode},
+    huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry, decode},
 };
 
 use super::{OwnedStream, StreamInput, numeric_element_count, read_var_u64, require_numeric_width};
@@ -712,10 +712,8 @@ pub(super) fn decode_fse_v2_node(
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("fse distribution allocation failed")
         })?;
-    for count in norm.bytes.chunks_exact(2) {
-        distribution.push(i16::from_le_bytes(count.try_into().map_err(|_| {
-            Error::new(ErrorKind::Malformed).with_detail("invalid fse count")
-        })?));
+    for count in norm.bytes.as_chunks::<2>().0 {
+        distribution.push(i16::from_le_bytes(*count));
     }
     let accuracy_log = validate_fse_distribution(&distribution)?;
     let table = build_decode_table(&distribution, accuracy_log).map_err(|err| {
@@ -884,20 +882,10 @@ pub(super) fn decode_fse_symbols(
     })?;
     match nb_states {
         2 => {
-            let mut states = [
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-            ];
-            decode_fse_symbols_2(&mut reader, &mut states, output_len, &mut output)?;
+            decode_fse_interleaved::<2>(&mut reader, table, accuracy_log, output_len, &mut output)?;
         }
         4 => {
-            let mut states = [
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-                OpenZlFseState::new(table, accuracy_log, &mut reader)?,
-            ];
-            decode_fse_symbols_4(&mut reader, &mut states, output_len, &mut output)?;
+            decode_fse_interleaved::<4>(&mut reader, table, accuracy_log, output_len, &mut output)?;
         }
         _ => {
             return Err(Error::new(ErrorKind::Unsupported)
@@ -911,75 +899,62 @@ pub(super) fn decode_fse_symbols(
     Ok(output)
 }
 
-#[expect(
-    clippy::inline_always,
-    reason = "profiled FSE v2 fixed-state loop benefits from inlining"
-)]
-#[inline(always)]
-fn decode_fse_symbols_2(
-    reader: &mut ReverseBitReader<'_>,
-    states: &mut [OpenZlFseState<'_>; 2],
-    output_len: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let update_len = output_len - 2;
-    let mut index = 0usize;
-    while index < update_len {
-        output.push(states[0].symbol()?);
-        states[0].update(reader)?;
-        index += 1;
-        if index >= update_len {
-            break;
-        }
-        output.push(states[1].symbol()?);
-        states[1].update(reader)?;
-        index += 1;
-    }
-    while index < output_len {
-        output.push(states[index & 1].symbol()?);
-        index += 1;
-    }
-    Ok(())
-}
+/// Updates per refill in the batched loop. Each reads at most
+/// `FSE_BATCH_MAX_LOG` bits, and a refill leaves at least 57 bits in the
+/// container, so a batch never needs a second refill.
+const FSE_BATCH: usize = 4;
+const FSE_BATCH_MAX_LOG: u8 = 12;
 
-#[expect(
-    clippy::inline_always,
-    reason = "profiled FSE v2 fixed-state loop benefits from inlining"
-)]
-#[inline(always)]
-fn decode_fse_symbols_4(
+/// Decodes `N` interleaved FSE states: every symbol but the last `N` is
+/// followed by a state update, and the last `N` are read from the final
+/// states.
+fn decode_fse_interleaved<const N: usize>(
     reader: &mut ReverseBitReader<'_>,
-    states: &mut [OpenZlFseState<'_>; 4],
+    table: &[FseDecodeEntry],
+    accuracy_log: u8,
     output_len: usize,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let update_len = output_len - 4;
+    let mut states = [0u32; N];
+    for state in &mut states {
+        *state = OpenZlFseState::new(table, accuracy_log, reader)?.state;
+    }
+    let update_len = output_len - N;
     let mut index = 0usize;
+
+    // Batched loop: refill once per batch and read without checks.
+    // `bits_remaining` is the only overrun guard, so a batch runs only
+    // while the stream still holds its worst case. `FSE_BATCH` is a
+    // multiple of `N`, so lane `k` of every batch is state `k % N`.
+    let table_len = table.len();
+    if accuracy_log <= FSE_BATCH_MAX_LOG && table_len == 1usize << accuracy_log {
+        let mask = table_len - 1;
+        let batch_bits = FSE_BATCH * usize::from(accuracy_log);
+        while update_len - index >= FSE_BATCH {
+            reader.refill_fast_or_regular();
+            if reader.bits_remaining() < batch_bits {
+                break;
+            }
+            for lane in 0..FSE_BATCH {
+                let state = &mut states[lane % N];
+                let entry = table[*state as usize & mask];
+                output.push(entry.symbol);
+                *state = u32::from(entry.base_line) + reader.read_bits_branchless(entry.num_bits);
+            }
+            index += FSE_BATCH;
+        }
+    }
+
+    // Checked tail: the stream end, and tables the batch cannot take.
+    let mut lanes = states.map(|state| OpenZlFseState { table, state });
     while index < update_len {
-        output.push(states[0].symbol()?);
-        states[0].update(reader)?;
-        index += 1;
-        if index >= update_len {
-            break;
-        }
-        output.push(states[1].symbol()?);
-        states[1].update(reader)?;
-        index += 1;
-        if index >= update_len {
-            break;
-        }
-        output.push(states[2].symbol()?);
-        states[2].update(reader)?;
-        index += 1;
-        if index >= update_len {
-            break;
-        }
-        output.push(states[3].symbol()?);
-        states[3].update(reader)?;
+        let lane = &mut lanes[index % N];
+        output.push(lane.symbol()?);
+        lane.update(reader)?;
         index += 1;
     }
     while index < output_len {
-        output.push(states[index & 3].symbol()?);
+        output.push(lanes[index % N].symbol()?);
         index += 1;
     }
     Ok(())
@@ -1153,10 +1128,18 @@ fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDec
     if table_log > 12 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("huffman_v2 table is too large"));
     }
+    // The format allows 12, but upstream encoders cap Huffman v2 at 11 and
+    // zrip decodes at most 11.
+    if table_log > zrip_core::huffman::MAX_TABLE_LOG {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("huffman_v2 table log 12 is unsupported"));
+    }
     let table_size = 1usize
         .checked_shl(u32::from(table_log))
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut table = vec![HuffmanDecodeEntry::default(); table_size];
+    // zrip's x4 decoder needs a full-size table; entries past `table_size`
+    // stay unused.
+    let mut table = vec![HuffmanDecodeEntry::default(); table_size.max(DECODE_TABLE_SIZE)];
     let max_weight = table_log
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -1198,7 +1181,7 @@ fn build_complete_huffman_decode_table(weights: &[u8]) -> Result<(Vec<HuffmanDec
         let end = start
             .checked_add(entries)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if end > table.len() {
+        if end > table_size {
             return Err(
                 Error::new(ErrorKind::Malformed).with_detail("huffman_v2 decode table overflows")
             );

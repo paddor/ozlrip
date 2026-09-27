@@ -11,7 +11,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ozlrip = { path = "..", features = ["dev-format"] }
+ozlrip = { path = ".." }
+ozlrip-test-support = { path = "../crates/test-support" }
 
 [[bin]]
 name = "parse_frame"
@@ -191,6 +192,13 @@ bench = false
 [[bin]]
 name = "decode_two_node_graph"
 path = "fuzz_targets/decode_two_node_graph.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_reuse"
+path = "fuzz_targets/decode_reuse.rs"
 test = false
 doc = false
 bench = false

@@ -242,6 +242,7 @@ fn feature_enabled(value: &str) -> bool {
     match value {
         "none" => true,
         "checksum" => cfg!(feature = "checksum"),
+        "lz4" => cfg!(feature = "lz4"),
         _ => panic!("bad error taxonomy feature: {value}"),
     }
 }
@@ -329,53 +330,43 @@ fn error_case(name: &str) -> ErrorCase {
         "bad-dictionary-bundle-magic" => dictionary_case([0xff, 0xff, 0xff, 0xff].to_vec()),
         "frame-byte-limit" => inspect_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_frame_bytes: 3,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_frame_bytes = 3;
+                limits
+            }),
         ),
         "decoded-byte-limit" => decode_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_decoded_bytes: 2,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_decoded_bytes = 2;
+                limits
+            }),
         ),
         "stored-stream-byte-limit" => decode_case(
             stored_serial_frame(&[7, 8, 9]),
-            Options {
-                limits: Limits {
-                    max_stored_stream_bytes: 2,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_stored_stream_bytes = 2;
+                limits
+            }),
         ),
         "output-count-limit" => inspect_case(
             stored_serial_frame(&[]),
-            Options {
-                limits: Limits {
-                    max_streams: 0,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_streams = 0;
+                limits
+            }),
         ),
         "transform-header-byte-limit" => inspect_case(
             standard_transform_serial_frame(21, 22, &[1, 2, 3], 3, &[99]),
-            Options {
-                limits: Limits {
-                    max_transform_header_bytes: 0,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_transform_header_bytes = 0;
+                limits
+            }),
         ),
         "invalid-graph-node-input" => {
             inspect_case(invalid_graph_node_input_frame(), Options::default())
@@ -394,19 +385,64 @@ fn error_case(name: &str) -> ErrorCase {
         ),
         "stored-stream-size-overflow" => inspect_case(
             stored_stream_size_overflow_frame(),
-            Options {
-                limits: Limits {
-                    max_stored_stream_bytes: usize::MAX,
-                    max_buffer_bytes: usize::MAX,
-                    max_decoded_bytes: usize::MAX,
-                    ..Limits::default()
-                },
-                ..Options::default()
-            },
+            Options::from({
+                let mut limits = Limits::default();
+                limits.max_stored_stream_bytes = usize::MAX;
+                limits.max_buffer_bytes = usize::MAX;
+                limits.max_decoded_bytes = usize::MAX;
+                limits
+            }),
         ),
         "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
         "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
         "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
+        "header-only-frame" => inspect_case(
+            {
+                let mut input = Vec::new();
+                input.extend_from_slice(&magic(21));
+                input.push(0);
+                input.push(1);
+                input.push(1);
+                input
+            },
+            Options::default(),
+        ),
+        "lz4-declared-size-beyond-expansion" => {
+            // A 3-byte block cannot decode to more than 3 * 255 bytes.
+            let decoded_len = 3 * 255 + 1;
+            let mut header = Vec::new();
+            push_var_u64(&mut header, u64::try_from(decoded_len).unwrap());
+            decode_case(
+                standard_transform_serial_frame(
+                    23,
+                    u8::try_from(LZ4_ID).unwrap(),
+                    &[0, 0, 0],
+                    decoded_len,
+                    &header,
+                ),
+                Options::default(),
+            )
+        }
+        "legacy-bad-encoded-checksum" => {
+            let mut input = legacy_checksum_frame(false, true);
+            *input.last_mut().unwrap() ^= 1;
+            inspect_case(input, Options::default())
+        }
+        "legacy-bad-decoded-checksum" => {
+            let mut input = legacy_checksum_frame(true, false);
+            *input.last_mut().unwrap() ^= 1;
+            decode_case(input, Options::default())
+        }
+        "legacy-truncated-checksum" => {
+            let mut input = legacy_checksum_frame(true, true);
+            input.pop();
+            inspect_case(input, Options::default())
+        }
+        "legacy-trailing-bytes" => {
+            let mut input = legacy_checksum_frame(false, false);
+            input.push(0);
+            inspect_case(input, Options::default())
+        }
         _ => panic!("unknown error taxonomy case: {name}"),
     }
 }
@@ -630,6 +666,16 @@ fn compressed_checksum(bytes: &[u8]) -> u32 {
         let _ = bytes;
         0
     }
+}
+
+/// A v20 frame, whose checksum flags live in the chunk header.
+fn legacy_checksum_frame(content: bool, compressed: bool) -> Vec<u8> {
+    ozlrip_test_support::FrameBuilder::new(20)
+        .content_checksum(content)
+        .compressed_checksum(compressed)
+        .serial_output(3)
+        .chunk(ozlrip_test_support::Chunk::stored(*b"abc"))
+        .build()
 }
 
 fn inspect_case(input: Vec<u8>, options: Options) -> ErrorCase {

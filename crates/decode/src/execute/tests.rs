@@ -1,6 +1,16 @@
+#[cfg(feature = "lz4")]
+use super::lz4::*;
 use super::*;
+use super::{layout_nodes::*, streams::*, string_nodes::*};
 use crate::parse::parse_frame_plan;
-use alloc::vec;
+use alloc::{format, vec};
+use ozlrip_test_support::{Chunk, FrameBuilder, Node};
+
+/// Last format version of each deprecated transform (upstream
+/// `decoder_registry.c`).
+const ZSTD_FIXED_LAST_VERSION: u32 = 10;
+const LEGACY_LZ_LAST_VERSION: u32 = 12;
+const LEGACY_ENTROPY_LAST_VERSION: u32 = 14;
 
 const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
@@ -50,38 +60,14 @@ fn standard_transform_serial_frame(
     decoded_len: usize,
     transform_header: &[u8],
 ) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&magic(version));
-    input.push(0);
-    input.push(1);
-    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
-    append_standard_transform_chunk(&mut input, transform_id, stored, transform_header);
-    input.push(0);
-    input
-}
-
-fn append_standard_transform_chunk(
-    input: &mut Vec<u8>,
-    transform_id: u8,
-    stored: &[u8],
-    transform_header: &[u8],
-) {
-    input.push(2);
-    input.push(1);
-    input.push(0);
-    input.push(transform_id);
-    if transform_header.is_empty() {
-        input.push(0);
-    } else {
-        input.push(1);
-        push_var_u64(input, u64::try_from(transform_header.len() - 1).unwrap());
-    }
-    input.push(0);
-    input.push(0);
-    input.push(0);
-    push_var_u64(input, u64::try_from(stored.len()).unwrap());
-    input.extend_from_slice(transform_header);
-    input.extend_from_slice(stored);
+    FrameBuilder::new(version)
+        .serial_output(decoded_len)
+        .chunk(
+            Chunk::new()
+                .node(Node::new(u32::from(transform_id)).header(transform_header))
+                .stored_stream(stored),
+        )
+        .build()
 }
 
 struct StandardGraphNode<'a> {
@@ -273,7 +259,7 @@ fn zstd_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
 }
 
 fn zstd_fixed_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
-    standard_transform_serial_frame(21, 23, stored, decoded_len, &[])
+    standard_transform_serial_frame(ZSTD_FIXED_LAST_VERSION, 23, stored, decoded_len, &[])
 }
 
 fn legacy_entropy_raw_payload(payload: &[u8], element_width: usize) -> Vec<u8> {
@@ -392,6 +378,63 @@ fn fse_multistate_bitstream(
     }
     writer.close_reverse_stream();
     writer.into_bytes()
+}
+
+/// Long streams take the batched FSE loop and short ones only the checked
+/// tail; both must match the encoder, and a truncated stream must fail.
+#[test]
+fn decodes_interleaved_fse_streams_of_every_length() {
+    let cases: [(u8, &[i16]); 2] = [
+        (5, &[16, 8, 4, 2, 1, 1]),
+        (12, &[2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1]),
+    ];
+    for (accuracy_log, distribution) in cases {
+        let table =
+            zrip_core::fse::table_builder::build_decode_table(distribution, accuracy_log).unwrap();
+        // Symbols drawn with the distribution's skew, from a fixed LCG.
+        let mut seed = 0x2545_f491_u32;
+        let symbols: Vec<u8> = (0..3000)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let mut pick = i32::try_from(seed >> 20).unwrap() % (1 << accuracy_log);
+                let mut symbol = 0;
+                while pick >= i32::from(distribution[symbol]) {
+                    pick -= i32::from(distribution[symbol]);
+                    symbol += 1;
+                }
+                u8::try_from(symbol).unwrap()
+            })
+            .collect();
+        for nb_states in [2, 4] {
+            for len in (nb_states..40).chain([100, 1000, 2999, 3000]) {
+                let symbols = &symbols[..len];
+                let bits = fse_multistate_bitstream(symbols, nb_states, distribution, accuracy_log);
+
+                let decoded =
+                    entropy::decode_fse_symbols(&bits, len, nb_states, &table, accuracy_log, "t")
+                        .unwrap();
+                assert_eq!(
+                    decoded, symbols,
+                    "log {accuracy_log} states {nb_states} len {len}"
+                );
+
+                if bits.len() > 1 {
+                    assert!(
+                        entropy::decode_fse_symbols(
+                            &bits[1..],
+                            len,
+                            nb_states,
+                            &table,
+                            accuracy_log,
+                            "t"
+                        )
+                        .is_err(),
+                        "truncated log {accuracy_log} states {nb_states} len {len}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
@@ -648,25 +691,24 @@ fn zstd_stored_stream(decoded: &[u8]) -> Vec<u8> {
 #[cfg(feature = "zstd")]
 fn mixed_direct_append_frame() -> Vec<u8> {
     let zstd_output = b"zstd";
-    let zstd_stored = zstd_stored_stream(zstd_output);
     let mut constant_header = Vec::new();
     push_var_u64(&mut constant_header, 3);
 
-    let mut input = Vec::new();
-    input.extend_from_slice(&magic(21));
-    input.push(0);
-    input.push(1);
-    push_var_u64(
-        &mut input,
-        u64::try_from(zstd_output.len() + 3 + 1).unwrap(),
-    );
-    append_standard_transform_chunk(&mut input, 22, &zstd_stored, &[]);
-    append_standard_transform_chunk(&mut input, 44, b"!", &constant_header);
-    input.push(0);
-    input
+    FrameBuilder::new(21)
+        .serial_output(zstd_output.len() + 3)
+        .chunk(
+            Chunk::new()
+                .node(Node::new(22))
+                .stored_stream(zstd_stored_stream(zstd_output)),
+        )
+        .chunk(
+            Chunk::new()
+                .node(Node::new(44).header(constant_header))
+                .stored_stream(*b"!"),
+        )
+        .build()
 }
 
-#[cfg(feature = "dev-format")]
 fn pivco_huffman_frame() -> Vec<u8> {
     let mut input = Vec::new();
     input.extend_from_slice(&magic(27));
@@ -978,7 +1020,6 @@ fn supported_standard_nodes_have_decode_coverage() {
         standard::PARTITION_ID,
         standard::PARSE_INT_ID,
         standard::PREFIX_ID,
-        #[cfg(feature = "dev-format")]
         standard::PIVCO_HUFFMAN_ID,
         standard::QUANTIZE_LENGTHS_ID,
         standard::QUANTIZE_OFFSETS_ID,
@@ -1008,8 +1049,6 @@ fn supported_standard_nodes_have_decode_coverage() {
     supported.push(standard::ZSTD_FIXED_ID);
 
     let mut covered = covered_standard_node_ids();
-    #[cfg(not(feature = "dev-format"))]
-    covered.retain(|&id| id != standard::PIVCO_HUFFMAN_ID);
     #[cfg(not(feature = "lz4"))]
     covered.retain(|&id| id != standard::LZ4_ID);
     #[cfg(not(feature = "zstd"))]
@@ -1117,15 +1156,17 @@ fn decodes_v21_stored_serial_chunks() {
 
 #[cfg(feature = "zstd")]
 #[test]
-fn prepares_mixed_direct_append_chunk_plans() {
+fn chooses_direct_append_per_chunk() {
     let input = mixed_direct_append_frame();
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
 
-    let plans = prepare_direct_append_chunk_plans(&plan).unwrap().unwrap();
+    let direct = plan
+        .chunks
+        .iter()
+        .map(|chunk| direct_append_tail(&build_chunk_execution_plan(chunk).unwrap()).is_some())
+        .collect::<Vec<_>>();
 
-    assert_eq!(plans.chunk_plans.len(), 2);
-    assert!(plans.chunk_plans[0].is_some());
-    assert!(plans.chunk_plans[1].is_none());
+    assert_eq!(direct, [true, false]);
 }
 
 #[cfg(feature = "zstd")]
@@ -1169,6 +1210,7 @@ fn decodes_concat_typed_outputs() {
             },
         ],
         &[],
+        2,
         Limits::default(),
     )
     .unwrap();
@@ -1198,6 +1240,7 @@ fn decodes_concat_string_outputs() {
             },
         ],
         &[],
+        2,
         Limits::default(),
     )
     .unwrap();
@@ -1364,6 +1407,33 @@ fn decodes_merge_sorted_outputs() {
     );
 }
 
+/// A size table longer than the graph's output list is rejected before any
+/// output is reserved, for typed and string concat.
+#[test]
+fn rejects_concat_size_table_longer_than_graph_outputs() {
+    let sizes = [0u32; 1024].map(u32::to_le_bytes).concat();
+    let sizes = StreamInput {
+        bytes: &sizes,
+        element_width: 4,
+        string_lengths: None,
+    };
+    let typed = StreamInput {
+        bytes: &[],
+        element_width: 2,
+        string_lengths: None,
+    };
+    let strings = StreamInput {
+        bytes: &[],
+        element_width: 1,
+        string_lengths: Some(&[]),
+    };
+
+    let err = decode_concat_node(&[sizes, typed], &[], 1, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+    let err = decode_concat_string_node(&[sizes, strings], &[], 1, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidGraph);
+}
+
 #[test]
 fn rejects_concat_typed_size_mismatch() {
     let err = decode_concat_node(
@@ -1380,6 +1450,7 @@ fn rejects_concat_typed_size_mismatch() {
             },
         ],
         &[],
+        1,
         Limits::default(),
     )
     .unwrap_err();
@@ -1392,11 +1463,9 @@ fn rejects_concat_serial_output_limit_without_mutating_destination() {
     let input = concat_serial_frame(b"openzl concat");
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -1433,7 +1502,7 @@ fn decodes_splitn_num_node() {
     let mut scratch = DecodeScratch::new();
     let mut dict_store = DictionaryStore::new();
     #[cfg(feature = "zstd")]
-    let mut zstd = zrip::DecompressContext::new();
+    let mut zstd = None;
     let mut ctx = StandardNodeContext {
         format_version: 21,
         limits: Limits::default(),
@@ -1458,6 +1527,7 @@ fn decodes_splitn_num_node() {
             },
         ],
         2,
+        1,
         None,
         &[],
         &mut ctx,
@@ -1545,6 +1615,46 @@ fn decodes_split_by_struct_node() {
 
     assert_eq!(output.element_width, 1);
     assert_eq!(output.bytes, [1, 3, 0, 2, 4, 0]);
+}
+
+/// The split_by_struct -> splitn direct-append tail applies splitn's width
+/// check: a 2-byte struct stream cannot join split_by_struct's byte output.
+#[test]
+fn split_by_struct_splitn_tail_rejects_mismatched_input_widths() {
+    let input = standard_graph_serial_frame_with_distances(
+        21,
+        6,
+        &[
+            // Decodes serial to 2-byte structs.
+            StandardGraphNode {
+                transform_id: standard::CONVERT_STRUCT_TO_SERIAL_ID,
+                variable_inputs: 0,
+                outputs: 1,
+                header: &[2],
+            },
+            StandardGraphNode {
+                transform_id: standard::SPLIT_BY_STRUCT_ID,
+                variable_inputs: 2,
+                outputs: 1,
+                header: &[],
+            },
+            StandardGraphNode {
+                transform_id: standard::SPLITN_ID,
+                variable_inputs: 2,
+                outputs: 1,
+                header: &[],
+            },
+        ],
+        &[b"ab", b"cd", b"ef"],
+        &[2, 1, 0],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidType, "{err}");
+    assert!(output.is_empty());
 }
 
 #[test]
@@ -1671,11 +1781,9 @@ fn rejects_splitn_output_limit_without_mutating_destination() {
     let input = splitn_serial_frame(&[b"open", b"zl", b" splitn"]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -1990,6 +2098,118 @@ fn decodes_lz_node_with_overlapping_match() {
     .unwrap();
 
     assert_eq!(output, b"aaaaa");
+}
+
+/// Runs an LZ node with 8-byte offset and length streams through both the
+/// owned-output path and the direct-append path.
+fn decode_lz_u64(
+    literals: &[u8],
+    offsets: &[u64],
+    literal_lengths: &[u64],
+    match_lengths: &[u64],
+    output_len: u64,
+) -> [Result<Vec<u8>>; 2] {
+    let le = |values: &[u64]| {
+        values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
+    let (offsets, literal_lengths, match_lengths) =
+        (le(offsets), le(literal_lengths), le(match_lengths));
+    let stream = |bytes, element_width| StreamInput {
+        bytes,
+        element_width,
+        string_lengths: None,
+    };
+    let inputs = [
+        stream(literals, 1),
+        stream(&offsets, 8),
+        stream(&literal_lengths, 8),
+        stream(&match_lengths, 8),
+    ];
+    let mut header = Vec::new();
+    push_var_u64(&mut header, output_len);
+
+    let owned = decode_lz_node(&inputs, &header, Limits::default());
+    let mut output = Vec::new();
+    let appended =
+        lz_nodes::decode_lz_node_to_output(&inputs, &header, Limits::default(), &mut output, 0)
+            .map(|()| output);
+    [owned, appended]
+}
+
+/// Ports upstream `eafc5fc` (LZ integer overflows): lengths and offsets with
+/// the high bit set, or large enough to wrap a position, are rejected.
+#[test]
+fn rejects_lz_lengths_and_offsets_that_overflow_positions() {
+    const HIGH: u64 = 1 << 63;
+    const MAX: u64 = i64::MAX as u64;
+    for result in decode_lz_u64(b"ABCD", &[3], &[4], &[2], 6) {
+        assert_eq!(result.unwrap(), b"ABCDBC");
+    }
+
+    let rejects = |literals: &[u8],
+                   offsets: &[u64],
+                   literal_lengths: &[u64],
+                   match_lengths: &[u64],
+                   output_len| {
+        for result in decode_lz_u64(
+            literals,
+            offsets,
+            literal_lengths,
+            match_lengths,
+            output_len,
+        ) {
+            assert!(
+                result.is_err(),
+                "{offsets:?} {literal_lengths:?} {match_lengths:?} decoded"
+            );
+        }
+    };
+    rejects(b"", &[1], &[HIGH], &[0], 16);
+    rejects(&[0; 4], &[HIGH], &[4], &[1], 16);
+    rejects(&[0; 4], &[1], &[4], &[HIGH], 16);
+    rejects(&[0; 8], &[1, 1], &[4, MAX], &[1, 0], 256);
+    rejects(&[0; 4], &[1], &[4], &[MAX], 256);
+    rejects(b"", &[1], &[u64::MAX], &[0], 16);
+    rejects(&[0; 4], &[u64::MAX], &[4], &[1], 16);
+    rejects(&[0; 4], &[1], &[4], &[u64::MAX], 16);
+    rejects(&[0; 4], &[1], &[4], &[u64::MAX - 3], u64::MAX);
+}
+
+/// Field-LZ extras are 4 bytes, but with 8-byte elements a length or offset
+/// near `u32::MAX` overflows `usize` on 32-bit targets.
+#[test]
+fn rejects_field_lz_extras_that_overflow_with_wide_elements() {
+    let token = |offset_code: u16, literal_code: u16, match_code: u16| {
+        (offset_code | (literal_code << 2) | (match_code << 6)).to_le_bytes()
+    };
+    let max = u32::MAX.to_le_bytes();
+    let one = 1u32.to_le_bytes();
+    let rejects = |tokens: [u8; 2], offsets: &[u8], extra_literals: &[u8], extra_matches: &[u8]| {
+        let stream = |bytes, element_width| StreamInput {
+            bytes,
+            element_width,
+            string_lengths: None,
+        };
+        let result = decode_field_lz_node(
+            &[
+                stream(&[0; 16], 8),
+                stream(&tokens, 2),
+                stream(offsets, 4),
+                stream(extra_literals, 4),
+                stream(extra_matches, 4),
+            ],
+            &[64],
+            Limits::default(),
+            &mut DecodeScratch::new(),
+        );
+        assert!(result.is_err(), "{tokens:?} decoded");
+    };
+    rejects(token(3, 15, 0), &one, &max, &[]);
+    rejects(token(3, 1, 15), &one, &[], &max);
+    rejects(token(3, 1, 0), &max, &[], &[]);
 }
 
 #[test]
@@ -2926,11 +3146,9 @@ fn rejects_bitpack_output_limit_without_mutating_destination() {
     let input = bitpack_serial_frame(&expected, 3);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -2979,11 +3197,9 @@ fn rejects_bitunpack_output_limit_without_mutating_destination() {
     let input = bitunpack_serial_frame(&[2, 7, 3, 4, 5, 1, 7, 6], 3, None);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 2,
-        max_buffer_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 2;
+    limits.max_buffer_bytes = 2;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3032,11 +3248,9 @@ fn rejects_range_pack_output_limit_without_mutating_destination() {
     let input = range_pack_serial_frame(&[0, 1, 5], Some(10));
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 2,
-        max_buffer_bytes: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 2;
+    limits.max_buffer_bytes = 2;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3078,7 +3292,9 @@ fn decodes_constant_fixed_chunk() {
         string_lengths: None,
     };
 
-    let output = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap();
+    let output =
+        decode_constant_fixed_chunk(input, &header, Limits::default(), &mut DecodeScratch::new())
+            .unwrap();
 
     assert_eq!(output.element_width, 2);
     assert_eq!(output.bytes, [0xaa, 0xbb, 0xaa, 0xbb, 0xaa, 0xbb]);
@@ -3095,7 +3311,9 @@ fn rejects_constant_fixed_partial_input() {
         string_lengths: None,
     };
 
-    let err = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap_err();
+    let err =
+        decode_constant_fixed_chunk(input, &header, Limits::default(), &mut DecodeScratch::new())
+            .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Malformed);
 }
@@ -3109,13 +3327,12 @@ fn rejects_constant_fixed_output_limit() {
         element_width: 2,
         string_lengths: None,
     };
-    let limits = Limits {
-        max_decoded_bytes: 5,
-        max_buffer_bytes: 5,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 5;
+    limits.max_buffer_bytes = 5;
 
-    let err = decode_constant_fixed_chunk(input, &header, limits).unwrap_err();
+    let err =
+        decode_constant_fixed_chunk(input, &header, limits, &mut DecodeScratch::new()).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }
@@ -3137,11 +3354,9 @@ fn rejects_constant_serial_output_limit_without_mutating_destination() {
     let input = constant_serial_frame(b'x', 6);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3207,11 +3422,9 @@ fn rejects_zigzag_output_limit_without_mutating_destination() {
     let input = zigzag_serial_frame(b"bytes");
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3229,6 +3442,41 @@ fn decodes_v21_delta_serial8_chunk() {
 
     assert_eq!(written, 5);
     assert_eq!(output, [2, 3, 4, 6, 0]);
+}
+
+/// Wide delta elements are little-endian on every target, including the
+/// first value copied from the header.
+#[test]
+fn decodes_wide_delta_elements_as_little_endian() {
+    fn check<const W: usize>(first: u64, deltas: &[u64], expected: &[u64]) {
+        let le = |values: &[u64]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes()[..W].to_vec())
+                .collect()
+        };
+        let stored = le(deltas);
+        let output = decode_delta_node(
+            StreamInput {
+                bytes: &stored,
+                element_width: W,
+                string_lengths: None,
+            },
+            &le(&[first]),
+            Limits::default(),
+            &mut DecodeScratch::new(),
+        )
+        .unwrap();
+        assert_eq!(output.bytes, le(expected), "width {W}");
+    }
+
+    check::<2>(0x0102, &[0x0100, 0xffff], &[0x0102, 0x0202, 0x0201]);
+    check::<4>(0x0102_0304, &[0x0100_0000], &[0x0102_0304, 0x0202_0304]);
+    check::<8>(
+        0x0102_0304_0506_0708,
+        &[0x0100_0000_0000_0000],
+        &[0x0102_0304_0506_0708, 0x0202_0304_0506_0708],
+    );
 }
 
 #[test]
@@ -3272,11 +3520,9 @@ fn rejects_delta_output_limit_without_mutating_destination() {
     let input = delta_serial_frame(Some(2), &[1, 1, 2, 250]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3640,11 +3886,9 @@ fn rejects_convert_serial_to_struct_output_limit_without_mutating_destination() 
     let input = standard_transform_serial_frame(21, 5, b"bytes", 5, &[]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3657,11 +3901,9 @@ fn rejects_convert_struct_to_serial_output_limit_without_mutating_destination() 
     let input = standard_transform_serial_frame(21, 6, b"bytes", 5, &[1]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -3698,11 +3940,9 @@ fn rejects_flatpack_output_limit_without_mutating_destination() {
     let input = flatpack_serial_frame(b"abc", &[0, 1, 2, 1, 0]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 4,
-        max_buffer_bytes: 4,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 4;
+    limits.max_buffer_bytes = 4;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4174,7 +4414,7 @@ fn decodes_v21_zstd_serial_chunk() {
 
 #[cfg(feature = "zstd")]
 #[test]
-fn decodes_v21_zstd_fixed_serial_chunk() {
+fn decodes_v10_zstd_fixed_serial_chunk() {
     let expected = b"legacy zstd fixed OpenZL serial chunk";
     let stored = zstd_stored_stream(expected);
     let input = zstd_fixed_serial_frame(&stored, expected.len());
@@ -4185,6 +4425,31 @@ fn decodes_v21_zstd_fixed_serial_chunk() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+/// The zstd node caps its output at the zstd frame's content size. Output
+/// past that size is a malformed frame, as when zrip checks the size itself.
+#[cfg(feature = "zstd")]
+#[test]
+fn rejects_zstd_node_output_past_its_content_size() {
+    let compressible = b"zstd content longer than its header says ".repeat(4);
+    let incompressible = (0u8..200).map(|i| i.wrapping_mul(97) ^ 0x5a).collect();
+    for payload in [compressible, incompressible] {
+        let mut stored = zstd_stored_stream(&payload);
+        // Single segment with a one-byte content size after the descriptor.
+        assert_eq!(stored[1] & 0xe0, 0x20);
+        assert_eq!(usize::from(stored[2]), payload.len());
+        stored[2] -= 1;
+        // The fixed-zstd node never decodes straight into the output.
+        let input = zstd_fixed_serial_frame(&stored, payload.len());
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
 }
 
 #[cfg(feature = "zstd")]
@@ -4239,7 +4504,6 @@ fn rejects_zstd_transform_header_without_mutating_destination() {
     assert_eq!(output, [1, 2]);
 }
 
-#[cfg(feature = "dev-format")]
 #[test]
 fn decodes_empty_pivco_huffman_without_mutating_destination() {
     let input = pivco_huffman_frame();
@@ -4263,11 +4527,9 @@ fn enforces_zstd_output_limit_without_mutating_destination() {
     let input = zstd_serial_frame(&stored, expected.len());
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 8,
-        max_buffer_bytes: 8,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 8;
+    limits.max_buffer_bytes = 8;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4314,17 +4576,37 @@ fn rejects_malformed_lz4_chunk_without_mutating_destination() {
     assert_eq!(output, [1, 2]);
 }
 
+/// An LZ4 block expands at most 255 times, so a larger declared size is
+/// rejected before the output is allocated. A near-maximal real block still
+/// decodes.
+#[cfg(feature = "lz4")]
+#[test]
+fn rejects_lz4_declared_size_beyond_maximum_expansion() {
+    let mut header = Vec::new();
+    push_var_u64(&mut header, 3 * 255 + 1);
+    let err = decode_lz4_chunk(&[0, 0, 0], &header, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert!(err.detail().unwrap().contains("expansion"), "{err}");
+
+    let zeros = vec![0u8; 1 << 20];
+    let compressed = lz4rip::block::compress(&zeros);
+    assert!(compressed.len() * 250 < zeros.len());
+    let mut header = Vec::new();
+    push_var_u64(&mut header, u64::try_from(zeros.len()).unwrap());
+    let decoded = decode_lz4_chunk(&compressed, &header, Limits::default()).unwrap();
+    assert_eq!(decoded.len(), zeros.len());
+    assert!(decoded.iter().all(|&byte| byte == 0));
+}
+
 #[cfg(feature = "lz4")]
 #[test]
 fn enforces_lz4_header_output_limit_without_mutating_destination() {
     let input = lz4_serial_frame(&[0], 4096);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_decoded_bytes: 1024,
-        max_buffer_bytes: 1024,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_decoded_bytes = 1024;
+    limits.max_buffer_bytes = 1024;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4380,10 +4662,8 @@ fn enforces_expansion_ratio_without_mutating_destination() {
     input.push(0);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = vec![1, 2];
-    let limits = Limits {
-        max_expansion_ratio: 0,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_expansion_ratio = 0;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 
@@ -4530,11 +4810,11 @@ fn decodes_legacy_fse_raw_node() {
 }
 
 #[test]
-fn decodes_v21_fse_deprecated_raw_frame() {
+fn decodes_v14_fse_deprecated_raw_frame() {
     let expected = b"legacy fse raw frame";
     let payload = legacy_entropy_raw_payload(expected, 1);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4550,11 +4830,11 @@ fn decodes_v21_fse_deprecated_raw_frame() {
 }
 
 #[test]
-fn decodes_v21_fse_deprecated_bit_frame() {
+fn decodes_v14_fse_deprecated_bit_frame() {
     let expected = [0, 1, 2, 3, 4, 5];
     let payload = legacy_entropy_bit_payload(&[0, 1, 2, 3, 4, 5], 3);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4570,14 +4850,14 @@ fn decodes_v21_fse_deprecated_bit_frame() {
 }
 
 #[test]
-fn decodes_v21_fse_deprecated_fse_frame() {
+fn decodes_v14_fse_deprecated_fse_frame() {
     let expected = [
         0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0,
         1, 1, 0, 1, 0, 1, 1, 0, 1, 0,
     ];
     let payload = legacy_entropy_fse_payload(&expected, 4);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4596,7 +4876,7 @@ fn decodes_v21_fse_deprecated_fse_frame() {
 fn rejects_fse_deprecated_invalid_state_count_without_mutating_destination() {
     let payload = legacy_entropy_raw_payload(b"state", 1);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
         &payload,
         5,
@@ -4612,11 +4892,11 @@ fn rejects_fse_deprecated_invalid_state_count_without_mutating_destination() {
 }
 
 #[test]
-fn decodes_v21_huffman_deprecated_constant_frame() {
+fn decodes_v14_huffman_deprecated_constant_frame() {
     let expected = vec![b'Z'; 19];
     let payload = legacy_entropy_constant_payload(b"Z", expected.len());
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4632,7 +4912,7 @@ fn decodes_v21_huffman_deprecated_constant_frame() {
 }
 
 #[test]
-fn decodes_v21_huffman_deprecated_multi_frame() {
+fn decodes_v14_huffman_deprecated_multi_frame() {
     let expected = b"abZZ\x01\x02";
     let payload = legacy_entropy_multi_payload(&[
         legacy_entropy_raw_payload(b"ab", 1),
@@ -4640,7 +4920,7 @@ fn decodes_v21_huffman_deprecated_multi_frame() {
         legacy_entropy_bit_payload(&[1, 2], 2),
     ]);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4696,11 +4976,11 @@ fn decodes_huffman_fixed_deprecated_bit_node() {
 }
 
 #[test]
-fn decodes_v21_huffman_fixed_deprecated_raw_frame() {
+fn decodes_v14_huffman_fixed_deprecated_raw_frame() {
     let expected = [0x34, 0x12, 0x78, 0x56];
     let payload = legacy_entropy_raw_payload(&expected, 2);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_FIXED_DEPRECATED_ID).unwrap(),
         &payload,
         expected.len(),
@@ -4718,7 +4998,7 @@ fn decodes_v21_huffman_fixed_deprecated_raw_frame() {
 #[test]
 fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &[0],
         2,
@@ -4737,7 +5017,7 @@ fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
 fn rejects_deprecated_entropy_full_width_bit_mode_without_mutating_destination() {
     let payload = legacy_entropy_bit_payload(&[0], 8);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &payload,
         1,
@@ -4756,7 +5036,7 @@ fn rejects_deprecated_entropy_full_width_bit_mode_without_mutating_destination()
 fn rejects_deprecated_entropy_empty_multi_block_without_mutating_destination() {
     let payload = legacy_entropy_multi_payload(&[legacy_entropy_raw_payload(&[], 1)]);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_ENTROPY_LAST_VERSION,
         u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
         &payload,
         0,
@@ -4789,10 +5069,10 @@ fn decodes_empty_fastlz_deprecated_node() {
 }
 
 #[test]
-fn decodes_v21_empty_fastlz_deprecated_frame() {
+fn decodes_v12_empty_fastlz_deprecated_frame() {
     let stored = empty_fastlz_deprecated_stream();
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         0,
@@ -4808,11 +5088,11 @@ fn decodes_v21_empty_fastlz_deprecated_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_raw_literals_frame() {
+fn decodes_v12_fastlz_deprecated_raw_literals_frame() {
     let expected = b"legacy fastlz literals";
     let stored = fastlz_deprecated_literal_only_stream(expected);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -4828,12 +5108,12 @@ fn decodes_v21_fastlz_deprecated_raw_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_constant_literals_frame() {
+fn decodes_v12_fastlz_deprecated_constant_literals_frame() {
     let expected = vec![b'F'; 19];
     let literal_entropy = legacy_entropy_constant_payload(b"F", expected.len());
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -4849,13 +5129,13 @@ fn decodes_v21_fastlz_deprecated_constant_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_bit_literals_frame() {
+fn decodes_v12_fastlz_deprecated_bit_literals_frame() {
     let expected = [0u8, 1, 2, 3, 2, 1, 0];
     let values = expected.iter().copied().map(u64::from).collect::<Vec<_>>();
     let literal_entropy = legacy_entropy_bit_payload(&values, 2);
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -4871,7 +5151,7 @@ fn decodes_v21_fastlz_deprecated_bit_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_fse_literals_frame() {
+fn decodes_v12_fastlz_deprecated_fse_literals_frame() {
     let expected = [
         0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0,
         1, 1,
@@ -4879,7 +5159,7 @@ fn decodes_v21_fastlz_deprecated_fse_literals_frame() {
     let literal_entropy = legacy_entropy_fse_payload(&expected, 2);
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -4895,7 +5175,7 @@ fn decodes_v21_fastlz_deprecated_fse_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_multi_literals_frame() {
+fn decodes_v12_fastlz_deprecated_multi_literals_frame() {
     let expected = b"ab\x00\x01\x02";
     let literal_entropy = legacy_entropy_multi_payload(&[
         legacy_entropy_raw_payload(b"ab", 1),
@@ -4903,7 +5183,7 @@ fn decodes_v21_fastlz_deprecated_multi_literals_frame() {
     ]);
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -4919,7 +5199,7 @@ fn decodes_v21_fastlz_deprecated_multi_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
+fn decodes_v12_fastlz_deprecated_raw_sequence_frame() {
     let literals = b"abcdefghijklmnop!";
     let token = 1u16.to_le_bytes();
     let stored = fastlz_deprecated_stream(
@@ -4930,7 +5210,7 @@ fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
         &[16, 16],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         33,
@@ -4946,7 +5226,7 @@ fn decodes_v21_fastlz_deprecated_raw_sequence_frame() {
 }
 
 #[test]
-fn decodes_v21_fastlz_deprecated_bit_token_frame() {
+fn decodes_v12_fastlz_deprecated_bit_token_frame() {
     let literals = b"abcdefghijklmnop!";
     let stored = fastlz_deprecated_stream(
         33,
@@ -4956,7 +5236,7 @@ fn decodes_v21_fastlz_deprecated_bit_token_frame() {
         &[16, 16],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         33,
@@ -4989,10 +5269,10 @@ fn decodes_empty_rolz_deprecated_node() {
 }
 
 #[test]
-fn decodes_v21_empty_rolz_deprecated_frame() {
+fn decodes_v12_empty_rolz_deprecated_frame() {
     let stored = empty_rolz_deprecated_stream();
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         0,
@@ -5008,11 +5288,11 @@ fn decodes_v21_empty_rolz_deprecated_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_raw_literals_frame() {
+fn decodes_v12_rolz_deprecated_raw_literals_frame() {
     let expected = b"legacy rolz literals";
     let stored = rolz_deprecated_literal_only_stream(expected);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -5028,12 +5308,12 @@ fn decodes_v21_rolz_deprecated_raw_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_constant_literals_frame() {
+fn decodes_v12_rolz_deprecated_constant_literals_frame() {
     let expected = vec![b'R'; 17];
     let literal_entropy = legacy_entropy_constant_payload(b"R", expected.len());
     let stored = rolz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -5049,7 +5329,7 @@ fn decodes_v21_rolz_deprecated_constant_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_fse_literals_frame() {
+fn decodes_v12_rolz_deprecated_fse_literals_frame() {
     let expected = [
         0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0,
         1, 1,
@@ -5057,7 +5337,7 @@ fn decodes_v21_rolz_deprecated_fse_literals_frame() {
     let literal_entropy = legacy_entropy_fse_payload(&expected, 2);
     let stored = rolz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -5073,7 +5353,7 @@ fn decodes_v21_rolz_deprecated_fse_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_o1_literals_frame() {
+fn decodes_v12_rolz_deprecated_o1_literals_frame() {
     let expected = b"ababa!";
     let literal_payload = rolz_deprecated_o1_literal_payload(
         b'b',
@@ -5091,7 +5371,7 @@ fn decodes_v21_rolz_deprecated_o1_literals_frame() {
         &[],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         expected.len(),
@@ -5107,7 +5387,7 @@ fn decodes_v21_rolz_deprecated_o1_literals_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_o1_rep0_sequence_frame() {
+fn decodes_v12_rolz_deprecated_o1_rep0_sequence_frame() {
     let literal_payload = rolz_deprecated_o1_literal_payload(
         b'c',
         &[(0, 0), (b'a', 1), (b'b', 2), (b'c', 3)],
@@ -5124,7 +5404,7 @@ fn decodes_v21_rolz_deprecated_o1_rep0_sequence_frame() {
         &[0],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         7,
@@ -5149,7 +5429,7 @@ fn rejects_rolz_deprecated_o1_unknown_context_without_mutating_destination() {
     let stored =
         rolz_deprecated_stream_with_literal_order(3, 3, 1, &literal_payload, &[], &[], &[], &[]);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         3,
@@ -5165,7 +5445,7 @@ fn rejects_rolz_deprecated_o1_unknown_context_without_mutating_destination() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_raw_lz_sequence_frame() {
+fn decodes_v12_rolz_deprecated_raw_lz_sequence_frame() {
     let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
     let stored = rolz_deprecated_stream(
         41,
@@ -5177,7 +5457,7 @@ fn decodes_v21_rolz_deprecated_raw_lz_sequence_frame() {
         &[33],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         41,
@@ -5193,7 +5473,7 @@ fn decodes_v21_rolz_deprecated_raw_lz_sequence_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_bit_match_type_frame() {
+fn decodes_v12_rolz_deprecated_bit_match_type_frame() {
     let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
     let stored = rolz_deprecated_stream_with_entropy(
         41,
@@ -5207,7 +5487,7 @@ fn decodes_v21_rolz_deprecated_bit_match_type_frame() {
         &[33],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         41,
@@ -5223,7 +5503,7 @@ fn decodes_v21_rolz_deprecated_bit_match_type_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_multi_match_type_frame() {
+fn decodes_v12_rolz_deprecated_multi_match_type_frame() {
     let literals = b"abcdefghijklmnopqrstuvwxyzABCDEFG!";
     let match_type_entropy =
         legacy_entropy_multi_payload(&[legacy_entropy_constant_payload(&[0], 1)]);
@@ -5239,7 +5519,7 @@ fn decodes_v21_rolz_deprecated_multi_match_type_frame() {
         &[33],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         41,
@@ -5255,7 +5535,7 @@ fn decodes_v21_rolz_deprecated_multi_match_type_frame() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_rep0_sequence_frame() {
+fn decodes_v12_rolz_deprecated_rep0_sequence_frame() {
     let literals = b"abc!";
     let stored = rolz_deprecated_stream(
         7,
@@ -5267,7 +5547,7 @@ fn decodes_v21_rolz_deprecated_rep0_sequence_frame() {
         &[0],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         7,
@@ -5282,6 +5562,121 @@ fn decodes_v21_rolz_deprecated_rep0_sequence_frame() {
     assert_eq!(output, b"abcccc!");
 }
 
+/// A rep0 match whose code carries `delta` above the rep index bits.
+fn rolz_deprecated_rep0_frame(delta: usize) -> Vec<u8> {
+    let literals = b"abc!";
+    let stored = rolz_deprecated_stream(
+        7,
+        literals.len(),
+        &legacy_entropy_raw_payload(literals, 1),
+        &[2],
+        &[3],
+        &[0],
+        &[delta << 2],
+    );
+    standard_transform_serial_frame(
+        LEGACY_LZ_LAST_VERSION,
+        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        &stored,
+        7,
+        &[],
+    )
+}
+
+/// Upstream `cfcdf49`: a rep0 code may carry the neutral delta `REP_SUB`,
+/// but any other delta is rejected.
+#[test]
+fn rejects_rolz_deprecated_rep0_code_with_offset_delta() {
+    let input = rolz_deprecated_rep0_frame(4);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+    decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+    assert_eq!(output, b"abcccc!");
+
+    let input = rolz_deprecated_rep0_frame(5);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(output, [1, 2]);
+}
+
+/// `kOobReadFrame` from upstream `tests/round_trip/rolz_test_data.h`: a ROLZ
+/// payload that read out of bounds in the C decoder before `cfcdf49`.
+const ROLZ_OOB_READ_FRAME: [u8; 915] = [
+    0x02, 0x0c, 0x04, 0x03, 0x01, 0x07, 0x03, 0x04, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0xff, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x05, 0x02, 0x00, 0x00, 0xab, 0x20, 0x00, 0x00, 0x00, 0x03, 0x00, 0x06, 0x00, 0x09, 0x00,
+    0x0c, 0x00, 0x0f, 0x00, 0x12, 0x00, 0x15, 0x00, 0x18, 0x00, 0x1b, 0x00, 0x1e, 0x00, 0x21, 0x00,
+    0x24, 0x00, 0x27, 0x00, 0x2a, 0x00, 0x2d, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x05, 0x02, 0x00, 0x00, 0xab, 0x20, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x06, 0x00, 0x09, 0x00, 0x0c, 0x00, 0x0f, 0x00, 0x12, 0x00, 0x15, 0x00, 0x18, 0x00, 0x1b,
+    0x00, 0x1e, 0x00, 0x21, 0x00, 0x24, 0x00, 0x27, 0x00, 0x2a, 0x00, 0x2d, 0x00, 0x30, 0x00, 0x33,
+    0x00, 0x36, 0x00, 0x39, 0x00, 0x3c, 0x00, 0x3f, 0x00, 0x42, 0x00, 0x45, 0x00, 0x48, 0x00, 0x4b,
+    0x00, 0x4e, 0x00, 0x51, 0x00, 0x54, 0x00, 0x57, 0x00, 0x5a, 0x00, 0x5d, 0x00, 0x60, 0x00, 0x63,
+    0x00, 0x66, 0x00, 0x69, 0x00, 0x6c, 0x00, 0x6f, 0x00, 0x72, 0x00, 0x75, 0x00, 0x78, 0x00, 0x7b,
+    0x00, 0x7e, 0x00, 0x81, 0x00, 0x84, 0x00, 0x87, 0x00, 0x8a, 0x00, 0x8d, 0x00, 0x90, 0x00, 0x93,
+    0x00, 0x96, 0x00, 0x99, 0x00, 0x9c, 0x00, 0x9f, 0x00, 0xa2, 0x00, 0xa5, 0x00, 0xa8, 0x00, 0xab,
+    0x00, 0xae, 0x00, 0xb1, 0x00, 0xb4, 0x00, 0xb7, 0x00, 0xba, 0x00, 0xbd, 0x00, 0xc0, 0x00, 0xc3,
+    0x00, 0xc6, 0x00, 0xc9, 0x00, 0xcc, 0x00, 0xcf, 0x00, 0xd2, 0x00, 0xd5, 0x00, 0xd8, 0x00, 0xdb,
+    0x00, 0xde, 0x00, 0xe1, 0x00, 0xe4, 0x00, 0xe7, 0x00, 0xea, 0x00, 0xed, 0x00, 0xf0, 0x00, 0xf3,
+    0x00, 0xf6, 0x00, 0xf9, 0x00, 0xfc, 0x00, 0xff, 0x00, 0x02, 0x00, 0x05, 0x00, 0x08, 0x00, 0x0b,
+    0x00, 0x0e, 0x00, 0x11, 0x00, 0x14, 0x00, 0x17, 0x00, 0x1a, 0x00, 0x1d, 0x00, 0x20, 0x00, 0x23,
+    0x00, 0x26, 0x00, 0x29, 0x00, 0x2c, 0x00, 0x2f, 0x00, 0x32, 0x00, 0x35, 0x00, 0x38, 0x00, 0x3b,
+    0x00, 0x3e, 0x00, 0x41, 0x00, 0x44, 0x00, 0x47, 0x00, 0x4a, 0x00, 0x4d, 0x00, 0x50, 0x00, 0x53,
+    0x00, 0x56, 0x00, 0x59, 0x00, 0x5c, 0x00, 0x5f, 0x00, 0x62, 0x00, 0x65, 0x00, 0x68, 0x00, 0x6b,
+    0x00, 0x6e, 0x00, 0x71, 0x00, 0x74, 0x00, 0x77, 0x00, 0x7a, 0x00, 0x7d, 0x00, 0x80, 0x00, 0x83,
+    0x00, 0x86, 0x00, 0x89, 0x00, 0x8c, 0x00, 0x8f, 0x00, 0x92, 0x00, 0x95, 0x00, 0x98, 0x00, 0x9b,
+    0x00, 0x9e, 0x00, 0xa1, 0x00, 0xa4, 0x00, 0xa7, 0x00, 0xaa, 0x00, 0xad, 0x00, 0xb0, 0x00, 0xb3,
+    0x00, 0xb6, 0x00, 0xb9, 0x00, 0xbc, 0x00, 0xbf, 0x00, 0xc2, 0x00, 0xc5, 0x00, 0xc8, 0x00, 0xcb,
+    0x00, 0xce, 0x00, 0xd1, 0x00, 0xd4, 0x00, 0xd7, 0x00, 0xda, 0x00, 0xdd, 0x00, 0xe0, 0x00, 0xe3,
+    0x00, 0xe6, 0x00, 0xe9, 0x00, 0xec, 0x00, 0xef, 0x00, 0xf2, 0x00, 0xf5, 0x00, 0xf8, 0x00, 0xfb,
+    0x00, 0xfe, 0x00, 0x01, 0x6a, 0x00, 0x6d, 0x00, 0x70, 0x00, 0x73, 0x00, 0x76, 0x00, 0x79, 0x00,
+    0x7c, 0x00, 0x7f, 0x00, 0x82, 0x00, 0x85, 0x00, 0x88, 0x00, 0x8b, 0x00, 0x8e, 0x00, 0x91, 0x00,
+    0x94, 0x00, 0x97, 0x00, 0x9a, 0x00, 0x9d, 0x00, 0xa0, 0x00, 0xa3, 0x00, 0xa6, 0x00, 0xa9, 0x00,
+    0xac, 0x00, 0xaf, 0x00, 0xb2, 0x00, 0xb5, 0x00, 0xb8, 0x00, 0xbb, 0x00, 0xbe, 0x00, 0xc1, 0x00,
+    0xc4, 0x00, 0xc7, 0x00, 0xca, 0x00, 0xcd, 0x00, 0xd0, 0x00, 0xd3, 0x00, 0xd6, 0x00, 0xd9, 0x00,
+    0xdc, 0x00, 0xdf, 0x00, 0xe2, 0x00, 0xe5, 0x00, 0xe8, 0x00, 0xeb, 0x00, 0xee, 0x00, 0xf1, 0x00,
+    0xf4, 0x00, 0xf7, 0x00, 0xfa, 0x00, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0x00, 0x00, 0x00,
+    0xfa, 0x0f, 0x00, 0x0b, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x04, 0x03, 0x03, 0x0b, 0x24, 0x03, 0x03, 0x03, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xf9, 0x1c, 0x03, 0x0b, 0x27, 0x03, 0x03, 0x03, 0x03, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x03, 0x0b, 0x00, 0x03,
+    0x03, 0x03, 0x03,
+];
+
+#[test]
+fn rejects_upstream_rolz_oob_read_frame() {
+    let mut stored = (8u32 << 20).to_le_bytes().to_vec();
+    stored.extend_from_slice(&ROLZ_OOB_READ_FRAME);
+    let source = StreamInput {
+        bytes: &stored,
+        element_width: 1,
+        string_lengths: None,
+    };
+
+    assert!(decode_rolz_deprecated_node(source, &[], Limits::default()).is_err());
+}
+
 #[test]
 fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
     let stored = rolz_deprecated_stream(
@@ -5294,7 +5689,7 @@ fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
         &[1],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         7,
@@ -5310,7 +5705,7 @@ fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
 }
 
 #[test]
-fn decodes_v21_rolz_deprecated_rolz_sequence_frame() {
+fn decodes_v12_rolz_deprecated_rolz_sequence_frame() {
     let stored = rolz_deprecated_stream(
         8,
         5,
@@ -5321,7 +5716,7 @@ fn decodes_v21_rolz_deprecated_rolz_sequence_frame() {
         &[0],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
         &stored,
         8,
@@ -5347,7 +5742,7 @@ fn rejects_fastlz_deprecated_short_offset_without_mutating_destination() {
         &[16, 16],
     );
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         33,
@@ -5367,7 +5762,7 @@ fn rejects_fastlz_deprecated_full_width_bit_literals_without_mutating_destinatio
     let literal_entropy = legacy_entropy_bit_payload(&[0], 8);
     let stored = fastlz_deprecated_literal_entropy_stream(1, &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         1,
@@ -5387,7 +5782,7 @@ fn rejects_fastlz_deprecated_empty_multi_block_without_mutating_destination() {
     let literal_entropy = legacy_entropy_multi_payload(&[legacy_entropy_raw_payload(&[], 1)]);
     let stored = fastlz_deprecated_literal_entropy_stream(0, &literal_entropy);
     let input = standard_transform_serial_frame(
-        21,
+        LEGACY_LZ_LAST_VERSION,
         u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
         &stored,
         0,
@@ -5419,8 +5814,10 @@ fn decodes_fse_ncount_node() {
 
     let decoded = output
         .bytes
-        .chunks_exact(2)
-        .map(|bytes| i16::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| i16::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(output.element_width, 2);
     assert_eq!(decoded, distribution);
@@ -5554,6 +5951,78 @@ fn decodes_v21_huffman_v2_frame() {
     let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
 
     assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+/// The format allows table log 12, but upstream encoders never exceed 11 and
+/// zrip decodes at most 11, so log 12 is a typed `Unsupported`.
+#[test]
+fn reports_huffman_v2_table_log_12_as_unsupported() {
+    let err = decode_huffman_v2_node(
+        &[
+            StreamInput {
+                bytes: &[12, 12],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &[0x80],
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[0, 2],
+        Limits::default(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported, "{err}");
+}
+
+/// zrip's x4 decoder indexes a fixed-size table, so a table log below its
+/// maximum still needs a full-size table.
+#[test]
+fn decodes_huffman_v2_x4_node_with_small_table_log() {
+    let expected = [0u8, 1, 1, 0, 1, 0, 0, 1];
+    let streams: Vec<_> = expected
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|symbols| {
+            let mut writer = zrip_core::bitstream::writer::BitWriter::new();
+            for &symbol in symbols.iter().rev() {
+                writer.write_bits(u32::from(symbol), 1);
+            }
+            writer.close_reverse_stream();
+            writer.into_bytes()
+        })
+        .collect();
+    let mut bits = Vec::new();
+    for stream in &streams[..3] {
+        bits.extend_from_slice(&u16::try_from(stream.len()).unwrap().to_le_bytes());
+    }
+    for stream in &streams {
+        bits.extend_from_slice(stream);
+    }
+
+    let output = decode_huffman_v2_node(
+        &[
+            StreamInput {
+                bytes: &[1, 1],
+                element_width: 1,
+                string_lengths: None,
+            },
+            StreamInput {
+                bytes: &bits,
+                element_width: 1,
+                string_lengths: None,
+            },
+        ],
+        &[1, u8::try_from(expected.len()).unwrap()],
+        Limits::default(),
+    )
+    .unwrap();
+
     assert_eq!(output, expected);
 }
 
@@ -5714,4 +6183,22 @@ fn rejects_fse_ncount_trailing_bytes() {
     .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[test]
+fn bounds_live_intermediate_stream_bytes() {
+    // zigzag regenerates a 3-byte stream that delta consumes into the 4-byte
+    // output, so at most 4 bytes are live at once.
+    let input = zigzag_delta_graph_frame(&[2, 1, 6], 10);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut limits = Limits::default();
+
+    limits.max_live_bytes = 3;
+    let err = decode_plan(&input, &plan, &mut Vec::new(), limits).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+
+    limits.max_live_bytes = 4;
+    let mut output = Vec::new();
+    decode_plan(&input, &plan, &mut output, limits).unwrap();
+    assert_eq!(output.len(), 4);
 }

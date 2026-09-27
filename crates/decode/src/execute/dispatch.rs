@@ -105,9 +105,9 @@ pub(super) fn decode_dispatch_string_node(
             }
         }
         2 => {
-            for source in indices.bytes.chunks_exact(2) {
+            for source in indices.bytes.as_chunks::<2>().0 {
                 append_dispatched_string(
-                    usize::from(u16::from_le_bytes([source[0], source[1]])),
+                    usize::from(u16::from_le_bytes(*source)),
                     &mut sources,
                     &mut output,
                     &mut output_lengths,
@@ -289,17 +289,17 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
                 )? {
                     return Ok(());
                 }
-                for source in indices.bytes.chunks_exact(2) {
+                for source in indices.bytes.as_chunks::<2>().0 {
                     append_dispatched_string_to_serial(
-                        usize::from(u16::from_le_bytes([source[0], source[1]])),
+                        usize::from(u16::from_le_bytes(*source)),
                         &mut sources,
                         output,
                     )?;
                 }
             } else {
-                for source in indices.bytes.chunks_exact(2) {
+                for source in indices.bytes.as_chunks::<2>().0 {
                     append_dispatched_string_to_serial(
-                        usize::from(u16::from_le_bytes([source[0], source[1]])),
+                        usize::from(u16::from_le_bytes(*source)),
                         &mut sources,
                         output,
                     )?;
@@ -361,8 +361,10 @@ fn append_dispatched_string_2byte_csv_wide_header_pattern_fast(
         return Ok(false);
     }
     if !indices[..header_bytes]
-        .chunks_exact(2)
-        .all(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) == header_index)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|chunk| u16::from_le_bytes(*chunk) == header_index)
     {
         return Ok(false);
     }
@@ -546,8 +548,10 @@ fn append_dispatched_string_2byte_csv_header_pattern_fast(
         return Ok(false);
     }
     if !indices[..header_bytes]
-        .chunks_exact(2)
-        .all(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) == HEADER_SOURCE)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|chunk| u16::from_le_bytes(*chunk) == HEADER_SOURCE)
     {
         return Ok(false);
     }

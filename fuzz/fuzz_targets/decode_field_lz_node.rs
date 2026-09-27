@@ -7,33 +7,25 @@ const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 
 fuzz_target!(|data: &[u8]| {
     let frame = field_lz_graph_frame(data);
-    let limits = Limits {
-        max_frame_bytes: 8192,
-        max_decoded_bytes: 4096,
-        max_chunks: 1,
-        max_nodes: 5,
-        max_streams: 10,
-        max_transform_header_bytes: 8,
-        max_stored_stream_bytes: 8192,
-        max_buffer_bytes: 4096,
-        max_graph_depth: 2,
-        max_expansion_ratio: 4096,
-    };
+    let mut limits = Limits::strict();
+    limits.max_frame_bytes = 8192;
+    limits.max_decoded_bytes = 4096;
+    limits.max_chunks = 1;
+    limits.max_nodes = 5;
+    limits.max_streams = 10;
+    limits.max_transform_header_bytes = 8;
+    limits.max_stored_stream_bytes = 8192;
+    limits.max_buffer_bytes = 4096;
+    limits.max_graph_depth = 2;
+    limits.max_expansion_ratio = 4096;
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(
-        &frame,
-        &mut output,
-        ozlrip::Options {
-            limits,
-            ..ozlrip::Options::default()
-        },
-    );
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
 
 fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {
-    let decoded_elements = data
-        .get(..2)
-        .map_or(0, |bytes| u16::from_le_bytes([bytes[0], bytes[1]]) as usize & 0x0fff);
+    let decoded_elements = data.get(..2).map_or(0, |bytes| {
+        u16::from_le_bytes([bytes[0], bytes[1]]) as usize & 0x0fff
+    });
     let payload = data.get(2..).unwrap_or_default();
     let (tokens, rest) = take_aligned(payload, data.get(2).copied(), 2);
     let (offsets, rest) = take_aligned(rest, data.get(3).copied(), 4);
@@ -51,7 +43,10 @@ fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {
         .chain(field_lz_header.iter().copied())
         .collect::<Vec<_>>();
     let stored_streams = [tokens, offsets, extra_literals, extra_matches, literals];
-    let stored_size = stored_streams.iter().map(|stream| stream.len()).sum::<usize>();
+    let stored_size = stored_streams
+        .iter()
+        .map(|stream| stream.len())
+        .sum::<usize>();
 
     let mut input = Vec::new();
     input.extend_from_slice(&(MAGIC_BASE + 24).to_le_bytes());

@@ -29,10 +29,8 @@ pub(super) fn decode_node(
     })?;
 
     let mut output = Vec::new();
-    for raw in input.bytes.chunks_exact(8) {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(raw);
-        let text = i64::from_le_bytes(bytes).to_string();
+    for raw in input.bytes.as_chunks::<8>().0 {
+        let text = i64::from_le_bytes(*raw).to_string();
         let len = u32::try_from(text.len()).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
         let new_len = output
             .len()

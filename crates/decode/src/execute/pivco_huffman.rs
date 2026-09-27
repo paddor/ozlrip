@@ -4,8 +4,6 @@ use core::cmp;
 #[cfg(all(feature = "std", not(feature = "paranoid")))]
 use fearless_simd::{Level, Simd, mask8x16, prelude::*, u8x16};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
-#[cfg(all(feature = "std", not(feature = "paranoid")))]
-use std::sync::OnceLock;
 
 use super::{StreamInput, read_var_u64};
 
@@ -559,17 +557,10 @@ fn merge_constant_constant_simd(
     right: u8,
     output: &mut Vec<u8>,
 ) {
-    let level = pivco_simd_level();
     fearless_simd::dispatch!(
-        level,
+        Level::new(),
         simd => merge_constant_constant_simd_impl(simd, bitmap, count, left, right, output)
     );
-}
-
-#[cfg(all(feature = "std", not(feature = "paranoid")))]
-fn pivco_simd_level() -> Level {
-    static LEVEL: OnceLock<Level> = OnceLock::new();
-    *LEVEL.get_or_init(Level::new)
 }
 
 #[cfg(all(feature = "std", not(feature = "paranoid")))]
@@ -962,11 +953,9 @@ mod tests {
     #[test]
     fn enforces_output_limit() {
         let weights = [1];
-        let limits = Limits {
-            max_decoded_bytes: 2,
-            max_buffer_bytes: 2,
-            ..Limits::default()
-        };
+        let mut limits = Limits::default();
+        limits.max_decoded_bytes = 2;
+        limits.max_buffer_bytes = 2;
 
         let err =
             decode_node(&[stream(&weights), stream(&[])], &header(3, None), limits).unwrap_err();

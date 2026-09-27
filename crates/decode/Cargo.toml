@@ -13,23 +13,36 @@ workspace = true
 
 [features]
 default = ["std"]
-std = ["alloc", "dep:fearless_simd", "ozlrip-core/std"]
+std = [
+  "alloc",
+  "dep:fearless_simd",
+  "ozlrip-core/std",
+  "zrip-core/std",
+  "zrip-decode?/std",
+  "zrip-decode?/simd",
+  "lz4rip-decode?/std",
+]
 alloc = ["ozlrip-core/alloc"]
-zstd = ["std", "dep:zrip", "zrip/simd"]
-lz4 = ["std", "dep:lz4rip"]
-checksum = ["ozlrip-core/checksum", "dep:xxhash-rust"]
-paranoid = ["ozlrip-core/paranoid"]
-dev-format = ["ozlrip-core/dev-format"]
-interop = ["std"]
+zstd = ["alloc", "dep:zrip-decode"]
+lz4 = ["alloc", "dep:lz4rip-decode"]
+checksum = ["dep:xxhash-rust"]
+paranoid = [
+  "ozlrip-core/paranoid",
+  "zrip-core/paranoid",
+  "zrip-decode?/paranoid",
+  "lz4rip-decode?/paranoid",
+]
 
 [dependencies]
 ozlrip-core = { version = "0.5.0", path = "../core", default-features = false }
-fearless_simd = { version = "0.6.0", default-features = false, features = ["std"], optional = true }
-zrip-core = { version = "0.9.1", default-features = false, features = ["alloc"] }
-zrip = { version = "0.8.5", default-features = false, features = ["std", "frame"], optional = true }
-lz4rip = { version = "0.11.3", default-features = false, features = ["std", "frame"], optional = true }
+fearless_simd = { version = "1.0.0", default-features = false, features = ["std"], optional = true }
+zrip-core = { version = "0.11.0", default-features = false, features = ["alloc"] }
+zrip-decode = { version = "0.8.9", default-features = false, features = ["alloc"], optional = true }
+lz4rip-decode = { version = "0.10.4", default-features = false, optional = true }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics"] }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
 
 [dev-dependencies]
-ozlrip = { path = "../..", default-features = false, features = ["alloc"] }
+ozlrip-test-support = { path = "../test-support" }
+lz4rip = { version = "0.11.8", default-features = false, features = ["alloc"] }
+zrip = { version = "0.8.10", default-features = false, features = ["alloc"] }
