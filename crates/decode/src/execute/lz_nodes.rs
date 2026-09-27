@@ -22,109 +22,9 @@ pub(super) fn decode_lz_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    let [literals, offsets, literal_lengths, match_lengths] = inputs else {
-        return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("lz input count does not match node shape"));
-    };
-    if literals.element_width != 1 {
-        return Err(
-            Error::new(ErrorKind::InvalidType).with_detail("lz literals must be serial bytes")
-        );
-    }
-    validate_numeric_stream_width(offsets.element_width, "lz offsets")?;
-    validate_numeric_stream_width(literal_lengths.element_width, "lz literal lengths")?;
-    validate_numeric_stream_width(match_lengths.element_width, "lz match lengths")?;
-    let sequence_count = numeric_element_count(offsets.bytes, offsets.element_width)?;
-    if numeric_element_count(literal_lengths.bytes, literal_lengths.element_width)?
-        != sequence_count
-        || numeric_element_count(match_lengths.bytes, match_lengths.element_width)?
-            != sequence_count
-    {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("lz sequence stream counts do not match")
-        );
-    }
-
-    let mut offset = 0usize;
-    let output_len = read_var_u64(header, &mut offset)?;
-    if offset != header.len() {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("lz header has trailing bytes"));
-    }
-    let output_len = usize::try_from(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("lz output size is too large")
-    })?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    let (output_len, sequence_count) = validate_lz_node(inputs, header, limits)?;
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_len)
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("lz allocation failed"))?;
-
-    let mut out_pos = 0usize;
-    let mut lit_pos = 0usize;
-    for sequence in 0..sequence_count {
-        let literal_len = read_usize_numeric_element(
-            literal_lengths.bytes,
-            literal_lengths.element_width,
-            sequence,
-        )?;
-        let match_offset =
-            read_usize_numeric_element(offsets.bytes, offsets.element_width, sequence)?;
-        let match_len =
-            read_usize_numeric_element(match_lengths.bytes, match_lengths.element_width, sequence)?;
-
-        let literal_end = lit_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let out_literal_end = out_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let literal_src = literals.bytes.get(lit_pos..literal_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-        })?;
-        if out_literal_end > output_len {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("lz literal length exceeds output size"));
-        }
-        output.extend_from_slice(literal_src);
-        lit_pos = literal_end;
-        out_pos = out_literal_end;
-
-        if match_offset == 0 {
-            return Err(Error::new(ErrorKind::Malformed).with_detail("lz offset is zero"));
-        }
-        if match_offset > out_pos {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz offset exceeds decoded prefix")
-            );
-        }
-        let out_match_end = out_pos
-            .checked_add(match_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if out_match_end > output_len {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
-            );
-        }
-        append_lz_match(&mut output, out_pos, match_offset, match_len);
-        out_pos = out_match_end;
-    }
-
-    let remaining_literals = literals.bytes.get(lit_pos..).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-    })?;
-    let out_end = out_pos
-        .checked_add(remaining_literals.len())
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if out_end != output_len {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("lz output size does not match header")
-        );
-    }
-    output.extend_from_slice(remaining_literals);
+    decode_lz_node_to_output_validated(inputs, sequence_count, output_len, &mut output, 0)?;
     Ok(output)
 }
 
@@ -285,9 +185,7 @@ fn decode_lz_node_to_output_generic(
     output: &mut Vec<u8>,
     output_base: usize,
 ) -> Result<()> {
-    let mut out_pos = output_base;
-    let mut lit_pos = 0usize;
-    for sequence in 0..sequence_count {
+    let sequences = (0..sequence_count).map(|sequence| {
         let literal_len = read_usize_numeric_element(
             literal_lengths.bytes,
             literal_lengths.element_width,
@@ -297,57 +195,13 @@ fn decode_lz_node_to_output_generic(
             read_usize_numeric_element(offsets.bytes, offsets.element_width, sequence)?;
         let match_len =
             read_usize_numeric_element(match_lengths.bytes, match_lengths.element_width, sequence)?;
-
-        let literal_end = lit_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let out_literal_end = out_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let literal_src = literals.bytes.get(lit_pos..literal_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-        })?;
-        if out_literal_end > output_limit {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("lz literal length exceeds output size"));
-        }
-        output.extend_from_slice(literal_src);
-        lit_pos = literal_end;
-        out_pos = out_literal_end;
-
-        if match_offset == 0 {
-            return Err(Error::new(ErrorKind::Malformed).with_detail("lz offset is zero"));
-        }
-        if match_offset > out_pos - output_base {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz offset exceeds decoded prefix")
-            );
-        }
-        let out_match_end = out_pos
-            .checked_add(match_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if out_match_end > output_limit {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
-            );
-        }
-        append_lz_match(output, out_pos, match_offset, match_len);
-        out_pos = out_match_end;
-    }
-
-    let remaining_literals = literals.bytes.get(lit_pos..).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-    })?;
-    let out_end = out_pos
-        .checked_add(remaining_literals.len())
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if out_end != output_limit {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("lz output size does not match header")
-        );
-    }
-    output.extend_from_slice(remaining_literals);
-    Ok(())
+        Ok(LzSequence {
+            literal_len,
+            match_offset,
+            match_len,
+        })
+    });
+    decode_lz_sequences(sequences, literals.bytes, output_limit, output, output_base)
 }
 
 #[cfg(feature = "paranoid")]
@@ -358,10 +212,6 @@ fn decode_lz_node_to_output_generic(
 #[expect(
     clippy::too_many_arguments,
     reason = "arguments are split stream slices from the validated LZ node shape"
-)]
-#[expect(
-    clippy::needless_range_loop,
-    reason = "sequence index addresses parallel byte streams with different widths"
 )]
 #[inline(always)]
 fn decode_lz_u8_u16_u16_to_output_safe(
@@ -381,70 +231,18 @@ fn decode_lz_u8_u16_u16_to_output_safe(
     let output_limit = output_base
         .checked_add(output_len)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut out_pos = output_base;
-    let mut lit_pos = 0usize;
-    for sequence in 0..sequence_count {
-        let length_offset = sequence * 2;
-        let literal_len = usize::from(u16::from_le_bytes([
-            literal_lengths[length_offset],
-            literal_lengths[length_offset + 1],
-        ]));
-        let match_offset = usize::from(offsets[sequence]);
-        let match_len = usize::from(u16::from_le_bytes([
-            match_lengths[length_offset],
-            match_lengths[length_offset + 1],
-        ]));
-
-        let literal_end = lit_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let out_literal_end = out_pos
-            .checked_add(literal_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let literal_src = literals.get(lit_pos..literal_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-        })?;
-        if out_literal_end > output_limit {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("lz literal length exceeds output size"));
-        }
-        output.extend_from_slice(literal_src);
-        lit_pos = literal_end;
-        out_pos = out_literal_end;
-
-        if match_offset == 0 {
-            return Err(Error::new(ErrorKind::Malformed).with_detail("lz offset is zero"));
-        }
-        if match_offset > out_pos - output_base {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz offset exceeds decoded prefix")
-            );
-        }
-        let out_match_end = out_pos
-            .checked_add(match_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if out_match_end > output_limit {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
-            );
-        }
-        append_lz_match(output, out_pos, match_offset, match_len);
-        out_pos = out_match_end;
-    }
-
-    let remaining_literals = literals.get(lit_pos..).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-    })?;
-    let out_end = out_pos
-        .checked_add(remaining_literals.len())
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if out_end != output_limit {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("lz output size does not match header")
-        );
-    }
-    output.extend_from_slice(remaining_literals);
-    Ok(())
+    let sequences = offsets
+        .iter()
+        .zip(literal_lengths.as_chunks::<2>().0)
+        .zip(match_lengths.as_chunks::<2>().0)
+        .map(|((&offset, literal_len), match_len)| {
+            Ok(LzSequence {
+                literal_len: usize::from(u16::from_le_bytes(*literal_len)),
+                match_offset: usize::from(offset),
+                match_len: usize::from(u16::from_le_bytes(*match_len)),
+            })
+        });
+    decode_lz_sequences(sequences, literals, output_limit, output, output_base)
 }
 
 #[expect(
@@ -470,20 +268,55 @@ fn decode_lz_u32_u16_u16_to_output(
     let output_limit = output_base
         .checked_add(output_len)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut out_pos = output_base;
-    let mut lit_pos = 0usize;
-    for ((offset, literal_len), match_len) in offsets
+    let sequences = offsets
         .as_chunks::<4>()
         .0
         .iter()
         .zip(literal_lengths.as_chunks::<2>().0)
         .zip(match_lengths.as_chunks::<2>().0)
-    {
-        let literal_len = usize::from(u16::from_le_bytes(*literal_len));
-        let match_offset = usize::try_from(u32::from_le_bytes(*offset)).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
-        })?;
-        let match_len = usize::from(u16::from_le_bytes(*match_len));
+        .map(|((offset, literal_len), match_len)| {
+            let match_offset = usize::try_from(u32::from_le_bytes(*offset)).map_err(|_| {
+                Error::new(ErrorKind::LimitExceeded).with_detail("numeric value is too large")
+            })?;
+            Ok(LzSequence {
+                literal_len: usize::from(u16::from_le_bytes(*literal_len)),
+                match_offset,
+                match_len: usize::from(u16::from_le_bytes(*match_len)),
+            })
+        });
+    decode_lz_sequences(sequences, literals, output_limit, output, output_base)
+}
+
+struct LzSequence {
+    literal_len: usize,
+    match_offset: usize,
+    match_len: usize,
+}
+
+/// The LZ sequence loop. `output` holds `output_base` bytes from before
+/// this node; each sequence appends its literals and then its match, and
+/// the literals left after the last sequence end the output at exactly
+/// `output_limit`.
+#[expect(
+    clippy::inline_always,
+    reason = "each LZ stream layout gets its own copy of the loop"
+)]
+#[inline(always)]
+fn decode_lz_sequences(
+    sequences: impl Iterator<Item = Result<LzSequence>>,
+    literals: &[u8],
+    output_limit: usize,
+    output: &mut Vec<u8>,
+    output_base: usize,
+) -> Result<()> {
+    let mut out_pos = output_base;
+    let mut lit_pos = 0usize;
+    for sequence in sequences {
+        let LzSequence {
+            literal_len,
+            match_offset,
+            match_len,
+        } = sequence?;
 
         let literal_end = lit_pos
             .checked_add(literal_len)
