@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Update `zrip-decode` to 0.8.10. It caps a zstd frame's output at its
+  declared content size and reserves that size up front, which the zstd node
+  used to do itself.
 - `Decoder::new` no longer allocates: the zstd context is created for the
   first zstd frame or node, and `inspect` no longer builds a decoder.
   One-shot `decode` of a small stored frame takes 0.38 µs instead of 1.2 µs.

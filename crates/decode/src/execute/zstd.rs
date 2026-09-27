@@ -235,10 +235,9 @@ fn decode_zstd_magicless_with_context(
     zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<Vec<u8>> {
     if !magicless.is_empty() {
-        // Size the output from the frame header, as upstream does. zrip
-        // reserves a whole block past the output unless `max_output` is
-        // tighter, and its block writer wants 64 bytes of slack at the end.
-        // Reserve no more up front than zrip itself would.
+        // Take a pooled buffer that fits the frame's content size. zrip caps
+        // the output at that size and reserves it, plus 64 bytes of slack
+        // for its block writer, up to its largest window.
         let content_size =
             zstd_content_size(magicless).filter(|&size| size <= limits.max_decoded_bytes);
         let capacity = content_size.map_or(0, |size| {
@@ -249,18 +248,11 @@ fn decode_zstd_magicless_with_context(
         let written = match zstd.decompress_after_magic_into(
             magicless,
             &mut output,
-            content_size.unwrap_or(limits.max_decoded_bytes),
+            limits.max_decoded_bytes,
         ) {
             Ok(written) => written,
             Err(err) => {
                 scratch.recycle_byte_buffer(output);
-                // Running out of room below the limit means the frame
-                // overran its own content size.
-                if content_size.is_some() && err == zrip_core::DecompressError::OutputTooSmall {
-                    return Err(map_zstd_error(
-                        &zrip_core::DecompressError::FrameSizeMismatch,
-                    ));
-                }
                 return Err(map_zstd_error(&err));
             }
         };

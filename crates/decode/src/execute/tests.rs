@@ -4427,8 +4427,8 @@ fn decodes_v10_zstd_fixed_serial_chunk() {
     assert_eq!(output, expected);
 }
 
-/// The zstd node caps its output at the zstd frame's content size. Output
-/// past that size is a malformed frame, as when zrip checks the size itself.
+/// zrip caps a zstd node's output at the zstd frame's content size. Output
+/// past that size is a malformed frame.
 #[cfg(feature = "zstd")]
 #[test]
 fn rejects_zstd_node_output_past_its_content_size() {
