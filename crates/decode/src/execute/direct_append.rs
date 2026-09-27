@@ -32,97 +32,45 @@ pub(super) enum DirectAppendKind {
 }
 
 pub(super) fn direct_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
-    field_lz_append_tail_start(plan)
-        .or_else(|| zstd_append_tail_start(plan))
+    conversion_chain_tail(plan, standard::FIELD_LZ_ID, DirectAppendKind::FieldLz)
+        .or_else(|| conversion_chain_tail(plan, standard::ZSTD_ID, DirectAppendKind::Zstd))
         .or_else(|| dispatch_string_to_serial_append_tail(plan))
         .or_else(|| split_by_struct_to_splitn_append_tail(plan))
-        .or_else(|| lz_append_tail_start(plan))
+        .or_else(|| conversion_chain_tail(plan, standard::LZ_ID, DirectAppendKind::Lz))
 }
 
-pub(super) fn lz_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
-    let final_stream = plan.regen_targets.len().checked_sub(1)?;
-    for (index, node) in plan.nodes.iter().enumerate() {
-        if node.standard_id != standard::LZ_ID || node.output_targets.len() != 1 {
-            continue;
-        }
-        let mut next_input = node.output_targets[0];
-        for tail in &plan.nodes[index + 1..] {
-            if !is_byte_preserving_conversion(tail.standard_id)
-                || tail.input_count != 1
-                || tail.input_start != next_input
-                || tail.output_targets.len() != 1
-            {
-                return None;
-            }
-            next_input = tail.output_targets[0];
-        }
-        if next_input == final_stream {
-            return Some(DirectAppendTail {
-                start: index,
-                kind: DirectAppendKind::Lz,
-            });
-        }
-    }
-    None
-}
-
-pub(super) fn field_lz_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
-    let final_stream = plan.regen_targets.len().checked_sub(1)?;
-    for (index, node) in plan.nodes.iter().enumerate() {
-        if node.standard_id != standard::FIELD_LZ_ID || node.output_targets.len() != 1 {
-            continue;
-        }
-        let mut next_input = node.output_targets[0];
-        for tail in &plan.nodes[index + 1..] {
-            if !is_byte_preserving_conversion(tail.standard_id)
-                || tail.input_count != 1
-                || tail.input_start != next_input
-                || tail.output_targets.len() != 1
-            {
-                return None;
-            }
-            next_input = tail.output_targets[0];
-        }
-        if next_input == final_stream {
-            return Some(DirectAppendTail {
-                start: index,
-                kind: DirectAppendKind::FieldLz,
-            });
-        }
-    }
-    None
-}
-
-pub(super) fn zstd_append_tail_start(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
-    let final_stream = plan.regen_targets.len().checked_sub(1)?;
-    for (index, node) in plan.nodes.iter().enumerate() {
-        if node.standard_id != standard::ZSTD_ID || node.output_targets.len() != 1 {
-            continue;
-        }
-        let mut next_input = node.output_targets[0];
-        for tail in &plan.nodes[index + 1..] {
-            if !is_byte_preserving_conversion(tail.standard_id)
-                || tail.input_count != 1
-                || tail.input_start != next_input
-                || tail.output_targets.len() != 1
-            {
-                return None;
-            }
-            next_input = tail.output_targets[0];
-        }
-        if next_input == final_stream {
-            return Some(DirectAppendTail {
-                start: index,
-                kind: DirectAppendKind::Zstd,
-            });
-        }
-    }
-    None
-}
-
-pub(super) fn dispatch_string_to_serial_append_tail(
+/// Matches the first node with `standard_id` and one output when only
+/// single-input byte-preserving conversions follow it, chained from its
+/// output to the chunk's final stream.
+fn conversion_chain_tail(
     plan: &ChunkExecutionPlan,
+    standard_id: u32,
+    kind: DirectAppendKind,
 ) -> Option<DirectAppendTail> {
+    let final_stream = plan.regen_targets.len().checked_sub(1)?;
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if node.standard_id != standard_id || node.output_targets.len() != 1 {
+            continue;
+        }
+        let mut next_input = node.output_targets[0];
+        for tail in &plan.nodes[index + 1..] {
+            if !is_byte_preserving_conversion(tail.standard_id)
+                || tail.input_count != 1
+                || tail.input_start != next_input
+                || tail.output_targets.len() != 1
+            {
+                return None;
+            }
+            next_input = tail.output_targets[0];
+        }
+        if next_input == final_stream {
+            return Some(DirectAppendTail { start: index, kind });
+        }
+    }
+    None
+}
+
+fn dispatch_string_to_serial_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
     let final_stream = plan.regen_targets.len().checked_sub(1)?;
     for (index, node) in plan.nodes.iter().enumerate() {
         if node.standard_id != standard::DISPATCH_STRING_ID || node.output_targets.len() != 1 {
@@ -145,9 +93,7 @@ pub(super) fn dispatch_string_to_serial_append_tail(
     None
 }
 
-pub(super) fn split_by_struct_to_splitn_append_tail(
-    plan: &ChunkExecutionPlan,
-) -> Option<DirectAppendTail> {
+fn split_by_struct_to_splitn_append_tail(plan: &ChunkExecutionPlan) -> Option<DirectAppendTail> {
     let final_stream = plan.regen_targets.len().checked_sub(1)?;
     let [split_by_struct, splitn] = plan
         .nodes

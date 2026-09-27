@@ -77,7 +77,7 @@ use numeric_nodes::{
 use output::verify_decoded_checksum;
 use output::{DecodedChunk, OutputBudget};
 use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
-use plan::{ChunkExecutionPlan, build_chunk_execution_plan};
+use plan::{ChunkExecutionPlan, NodeExecutionPlan, build_chunk_execution_plan};
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 use streams::{
     LiveBytes, OwnedStream, StreamInput, StreamSlot, collect_node_inputs, initialize_stream_slots,
@@ -280,64 +280,7 @@ fn decode_transform_chunk_with_plan<'a>(
 
     for node in &plan.nodes {
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        if try_execute_single_input_splitn_node(&mut streams, node, header, limits, &mut live)? {
-            continue;
-        }
-        if try_execute_byte_preserving_conversion_node(
-            &mut streams,
-            node,
-            header,
-            limits,
-            &mut live,
-        )? {
-            continue;
-        }
-
-        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
-        let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
-            one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
-        } else if node.standard_id == standard::DEDUP_NUM_ID {
-            SmallVec::from_vec(decode_dedup_num_node(
-                single_stream(&inputs)?,
-                header,
-                node.output_targets.len(),
-                ctx.limits,
-            )?)
-        } else {
-            execute_standard_node(
-                node.standard_id,
-                &inputs,
-                node.variable_inputs,
-                node.output_targets.len(),
-                node.dict_index,
-                header,
-                &mut ctx,
-            )?
-        };
-        drop(inputs);
-        recycle_consumed_owned_streams(
-            &mut streams,
-            node.input_start,
-            node.input_count,
-            ctx.scratch,
-            &mut live,
-        )?;
-        if outputs.len() != node.output_targets.len() {
-            return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("node output count does not match graph"));
-        }
-        for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
-            let target = streams.get_mut(output_target).ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("node output target is out of bounds")
-            })?;
-            if !matches!(target, StreamSlot::Empty) {
-                return Err(Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("node output overwrites an existing stream"));
-            }
-            live.add(&output)?;
-            *target = StreamSlot::Owned(output);
-        }
+        execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
     }
 
     let final_index = streams.len().checked_sub(1).ok_or_else(|| {
@@ -350,6 +293,70 @@ fn decode_transform_chunk_with_plan<'a>(
             Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
         }
     }
+}
+
+/// Executes one node: the splitn and conversion shortcuts, or a node decoder
+/// whose outputs fill their stream slots. Consumed owned inputs go back to
+/// the scratch pool.
+fn execute_node(
+    streams: &mut [StreamSlot<'_>],
+    node: &NodeExecutionPlan,
+    header: &[u8],
+    ctx: &mut StandardNodeContext<'_>,
+    live: &mut LiveBytes,
+) -> Result<()> {
+    if try_execute_single_input_splitn_node(streams, node, header, ctx.limits, live)? {
+        return Ok(());
+    }
+    if try_execute_byte_preserving_conversion_node(streams, node, header, ctx.limits, live)? {
+        return Ok(());
+    }
+
+    let inputs = collect_node_inputs(streams, node.input_start, node.input_count)?;
+    let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
+        one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
+    } else if node.standard_id == standard::DEDUP_NUM_ID {
+        SmallVec::from_vec(decode_dedup_num_node(
+            single_stream(&inputs)?,
+            header,
+            node.output_targets.len(),
+            ctx.limits,
+        )?)
+    } else {
+        execute_standard_node(
+            node.standard_id,
+            &inputs,
+            node.variable_inputs,
+            node.output_targets.len(),
+            node.dict_index,
+            header,
+            ctx,
+        )?
+    };
+    drop(inputs);
+    recycle_consumed_owned_streams(
+        streams,
+        node.input_start,
+        node.input_count,
+        ctx.scratch,
+        live,
+    )?;
+    if outputs.len() != node.output_targets.len() {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("node output count does not match graph"));
+    }
+    for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
+        let target = streams.get_mut(output_target).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("node output target is out of bounds")
+        })?;
+        if !matches!(target, StreamSlot::Empty) {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("node output overwrites an existing stream"));
+        }
+        live.add(&output)?;
+        *target = StreamSlot::Owned(output);
+    }
+    Ok(())
 }
 
 /// `max_output` caps what the tail may append; it is the rest of the frame's
@@ -458,64 +465,7 @@ fn decode_transform_chunk_appending(
             }
             return Ok(dst.len() - output_start);
         }
-        if try_execute_single_input_splitn_node(&mut streams, node, header, limits, &mut live)? {
-            continue;
-        }
-        if try_execute_byte_preserving_conversion_node(
-            &mut streams,
-            node,
-            header,
-            limits,
-            &mut live,
-        )? {
-            continue;
-        }
-
-        let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
-        let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
-            one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
-        } else if node.standard_id == standard::DEDUP_NUM_ID {
-            SmallVec::from_vec(decode_dedup_num_node(
-                single_stream(&inputs)?,
-                header,
-                node.output_targets.len(),
-                ctx.limits,
-            )?)
-        } else {
-            execute_standard_node(
-                node.standard_id,
-                &inputs,
-                node.variable_inputs,
-                node.output_targets.len(),
-                node.dict_index,
-                header,
-                &mut ctx,
-            )?
-        };
-        drop(inputs);
-        recycle_consumed_owned_streams(
-            &mut streams,
-            node.input_start,
-            node.input_count,
-            ctx.scratch,
-            &mut live,
-        )?;
-        if outputs.len() != node.output_targets.len() {
-            return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("node output count does not match graph"));
-        }
-        for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
-            let target = streams.get_mut(output_target).ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("node output target is out of bounds")
-            })?;
-            if !matches!(target, StreamSlot::Empty) {
-                return Err(Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("node output overwrites an existing stream"));
-            }
-            live.add(&output)?;
-            *target = StreamSlot::Owned(output);
-        }
+        execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
     }
 
     Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
