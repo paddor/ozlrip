@@ -184,81 +184,6 @@ fn repeat_constant_element(element: &[u8], output_len: usize, output: &mut Vec<u
     }
 }
 
-pub(super) fn decode_byte_preserving_conversion_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("conversion headers are unsupported")
-        );
-    }
-    copy_byte_preserving_conversion(stored, stored.element_width, limits)
-}
-
-pub(super) fn decode_num_to_struct_le_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_num_to_struct_le headers are unsupported"));
-    }
-    copy_byte_preserving_conversion(stored, stored.element_width, limits)
-}
-
-pub(super) fn decode_serial_to_struct_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<OwnedStream> {
-    let mut offset = 0usize;
-    let element_width = read_var_u64(header, &mut offset)?;
-    if offset != header.len() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("convert_struct_to_serial header has trailing bytes"));
-    }
-    let element_width = usize::try_from(element_width).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("conversion element width is too large")
-    })?;
-    if element_width == 0 {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("conversion element width must be nonzero"));
-    }
-    if !stored.bytes.len().is_multiple_of(element_width) {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("serial stream size is not a multiple of struct width"));
-    }
-    copy_byte_preserving_conversion(stored, element_width, limits)
-}
-
-pub(super) fn decode_numeric_to_serial_le_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_serial_to_num_le headers are unsupported"));
-    }
-    Ok(copy_byte_preserving_conversion(stored, 1, limits)?.bytes)
-}
-
-pub(super) fn decode_serial_to_numeric_le_chunk(
-    stored: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<OwnedStream> {
-    let int_size = read_conversion_int_size(header, "convert_num_to_serial_le")?;
-    if !stored.bytes.len().is_multiple_of(int_size) {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("serial stream size is not a multiple of integer width"));
-    }
-    copy_byte_preserving_conversion(stored, int_size, limits)
-}
-
 pub(super) fn decode_struct_to_num_be_chunk(
     stored: StreamInput<'_>,
     header: &[u8],
@@ -308,30 +233,6 @@ fn decode_big_endian_numeric_conversion(
     for element in stored.bytes.chunks_exact(element_width) {
         output.extend(element.iter().rev().copied());
     }
-    Ok(OwnedStream {
-        bytes: output,
-        element_width,
-        string_lengths: None,
-        recyclable: false,
-    })
-}
-
-fn copy_byte_preserving_conversion(
-    stored: StreamInput<'_>,
-    element_width: usize,
-    limits: Limits,
-) -> Result<OwnedStream> {
-    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
-    {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
-    })?;
-    output.extend_from_slice(stored.bytes);
     Ok(OwnedStream {
         bytes: output,
         element_width,

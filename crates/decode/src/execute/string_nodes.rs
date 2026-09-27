@@ -305,40 +305,6 @@ pub(super) fn decode_string_component_lengths(
     Ok((string_lengths, total))
 }
 
-pub(super) fn decode_string_to_serial_node(
-    input: StreamInput<'_>,
-    header: &[u8],
-    limits: Limits,
-) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("convert_string_to_serial header must be empty"));
-    }
-    if input.element_width != 1 {
-        return Err(Error::new(ErrorKind::InvalidType)
-            .with_detail("convert_string_to_serial input must be byte strings"));
-    }
-    let lengths = input.string_lengths.ok_or_else(|| {
-        Error::new(ErrorKind::InvalidType)
-            .with_detail("convert_string_to_serial input is missing string lengths")
-    })?;
-    if checked_sum_u32(lengths)? != input.bytes.len() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("convert_string_to_serial lengths do not sum to content size"));
-    }
-    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(input.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
-    })?;
-    output.extend_from_slice(input.bytes);
-    Ok(output)
-}
-
 pub(super) fn decode_prefix_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],

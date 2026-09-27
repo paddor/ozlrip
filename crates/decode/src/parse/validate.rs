@@ -1,6 +1,6 @@
 use alloc::{format, vec::Vec};
 
-use crate::standard;
+use crate::standard::{self, NodeShape};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::reader::{check_limit, checked_add, sum_usize};
@@ -72,7 +72,7 @@ pub(super) fn validate_chunk_plan(
         header_end = checked_add(node.transform_header_start, node.transform_header_size)?;
         let variable_inputs = usize::try_from(node.variable_outputs)
             .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-        if variable_inputs > 0 && !shape.allows_variable_inputs {
+        if variable_inputs > 0 && !shape.variable_inputs {
             return Err(Error::new(ErrorKind::InvalidGraph)
                 .with_detail("node has unexpected variable inputs"));
         }
@@ -190,7 +190,7 @@ pub(super) fn validate_single_node_chunk_plan(
     }
     let variable_inputs =
         usize::try_from(node.variable_outputs).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-    if variable_inputs > 0 && !shape.allows_variable_inputs {
+    if variable_inputs > 0 && !shape.variable_inputs {
         return Err(
             Error::new(ErrorKind::InvalidGraph).with_detail("node has unexpected variable inputs")
         );
@@ -273,20 +273,22 @@ pub(super) fn validate_single_node_chunk_plan(
     Ok(())
 }
 
-pub(super) fn validate_known_standard_node_shape(node: &NodePlan) -> Result<StandardNodeShape> {
+pub(super) fn validate_known_standard_node_shape(node: &NodePlan) -> Result<NodeShape> {
     let Some(id) = node.standard_id() else {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("custom OpenZL transforms are not implemented"));
     };
-    let shape = standard_node_shape(id).ok_or_else(|| {
-        Error::new(ErrorKind::Unsupported).with_detail(format!(
-            "standard transform graph shape is unsupported: id={id}"
-        ))
-    })?;
+    let shape = standard::standard_node(id)
+        .map(|node| node.shape)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported).with_detail(format!(
+                "standard transform graph shape is unsupported: id={id}"
+            ))
+        })?;
     Ok(shape)
 }
 
-pub(super) fn validate_node_output_count(node: &NodePlan, shape: StandardNodeShape) -> Result<()> {
+pub(super) fn validate_node_output_count(node: &NodePlan, shape: NodeShape) -> Result<()> {
     if node.regen_distances.len() < shape.min_outputs {
         return Err(
             Error::new(ErrorKind::InvalidGraph).with_detail("node has too few output streams")
@@ -300,116 +302,4 @@ pub(super) fn validate_node_output_count(node: &NodePlan, shape: StandardNodeSha
         );
     }
     Ok(())
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct StandardNodeShape {
-    pub(super) static_inputs: usize,
-    pub(super) allows_variable_inputs: bool,
-    pub(super) min_outputs: usize,
-    pub(super) max_outputs: Option<usize>,
-}
-
-pub(super) const fn fixed_shape(static_inputs: usize, outputs: usize) -> StandardNodeShape {
-    StandardNodeShape {
-        static_inputs,
-        allows_variable_inputs: false,
-        min_outputs: outputs,
-        max_outputs: Some(outputs),
-    }
-}
-
-pub(super) const fn standard_node_shape(id: u32) -> Option<StandardNodeShape> {
-    match id {
-        standard::DELTA_INT_ID
-        | standard::TRANSPOSE_ID
-        | standard::DIVIDE_BY_ID
-        | standard::ZIGZAG_ID
-        | standard::CONVERT_STRUCT_TO_NUM_LE_ID
-        | standard::CONVERT_NUM_TO_STRUCT_LE_ID
-        | standard::CONVERT_SERIAL_TO_NUM_LE_ID
-        | standard::CONVERT_NUM_TO_SERIAL_LE_ID
-        | standard::CONVERT_STRING_TO_SERIAL_ID
-        | standard::CONVERT_SERIAL_TO_STRUCT_ID
-        | standard::CONVERT_STRUCT_TO_SERIAL_ID
-        | standard::CONVERT_STRUCT_TO_NUM_BE_ID
-        | standard::CONVERT_SERIAL_TO_NUM_BE_ID
-        | standard::FSE_DEPRECATED_ID
-        | standard::HUFFMAN_DEPRECATED_ID
-        | standard::HUFFMAN_FIXED_DEPRECATED_ID
-        | standard::ROLZ_DEPRECATED_ID
-        | standard::FASTLZ_DEPRECATED_ID
-        | standard::ZSTD_ID
-        | standard::ZSTD_FIXED_ID
-        | standard::BITPACK_SERIAL_ID
-        | standard::BITPACK_INT_ID
-        | standard::BITUNPACK_ID
-        | standard::RANGE_PACK_ID
-        | standard::CONSTANT_SERIAL_ID
-        | standard::CONSTANT_FIXED_ID
-        | standard::PARSE_INT_ID
-        | standard::FSE_NCOUNT_ID
-        | standard::LZ4_ID => Some(fixed_shape(1, 1)),
-        standard::FLATPACK_ID
-        | standard::FLOAT_DECONSTRUCT_ID
-        | standard::FSE_V2_ID
-        | standard::HUFFMAN_V2_ID
-        | standard::HUFFMAN_STRUCT_V2_ID
-        | standard::MERGE_SORTED_ID
-        | standard::QUANTIZE_OFFSETS_ID
-        | standard::QUANTIZE_LENGTHS_ID
-        | standard::PARTITION_ID
-        | standard::TOKENIZE_FIXED_ID
-        | standard::TOKENIZE_NUMERIC_ID
-        | standard::TOKENIZE_STRING_ID
-        | standard::PREFIX_ID
-        | standard::SENTINEL_ID
-        | standard::TRANSPOSE_SPLIT2_ID
-        | standard::PIVCO_HUFFMAN_ID
-        | standard::SPARSE_NUM_ID
-        | standard::SEPARATE_STRING_COMPONENTS_ID => Some(fixed_shape(2, 1)),
-        standard::MUX_LENGTHS_ID => Some(fixed_shape(2, 2)),
-        standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => Some(fixed_shape(4, 1)),
-        standard::FIELD_LZ_ID => Some(fixed_shape(5, 1)),
-        standard::TRANSPOSE_SPLIT8_ID => Some(fixed_shape(8, 1)),
-        standard::DISPATCH_STRING_ID => Some(StandardNodeShape {
-            static_inputs: 1,
-            allows_variable_inputs: true,
-            min_outputs: 1,
-            max_outputs: Some(1),
-        }),
-        standard::SPLITN_ID
-        | standard::SPLITN_STRUCT_ID
-        | standard::SPLITN_NUM_ID
-        | standard::SPLIT_BY_STRUCT_ID
-        | standard::TRANSPOSE_SPLIT_ID
-        | standard::BIT_SPLIT_ID => Some(StandardNodeShape {
-            static_inputs: 0,
-            allows_variable_inputs: true,
-            min_outputs: 1,
-            max_outputs: Some(1),
-        }),
-        standard::CONCAT_SERIAL_ID
-        | standard::CONCAT_NUM_ID
-        | standard::CONCAT_STRUCT_ID
-        | standard::CONCAT_STRING_ID => Some(StandardNodeShape {
-            static_inputs: 2,
-            allows_variable_inputs: false,
-            min_outputs: 1,
-            max_outputs: None,
-        }),
-        standard::DEDUP_NUM_ID | standard::INTERLEAVE_STRING_ID => Some(StandardNodeShape {
-            static_inputs: 1,
-            allows_variable_inputs: false,
-            min_outputs: 1,
-            max_outputs: None,
-        }),
-        standard::DISPATCH_N_BY_TAG_ID => Some(StandardNodeShape {
-            static_inputs: 2,
-            allows_variable_inputs: true,
-            min_outputs: 1,
-            max_outputs: Some(1),
-        }),
-        _ => None,
-    }
 }

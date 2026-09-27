@@ -55,13 +55,16 @@ pub(super) fn build_chunk_execution_plan(
         let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
         })?;
-        let input_count = if standard_id == standard::SPARSE_NUM_ID {
-            2usize
-                .checked_add(variable_inputs)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?
-        } else {
-            standard_node_input_count(standard_id, variable_inputs)?
-        };
+        let static_inputs = standard::standard_node(standard_id)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Unsupported)
+                    .with_detail("standard transform graph execution is not implemented yet")
+            })?
+            .shape
+            .static_inputs;
+        let input_count = static_inputs
+            .checked_add(variable_inputs)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         let input_end = stream_cursor
             .checked_add(input_count)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -108,80 +111,4 @@ pub(super) fn build_chunk_execution_plan(
         nodes,
         regen_targets,
     })
-}
-
-pub(super) fn standard_node_input_count(standard_id: u32, variable_inputs: usize) -> Result<usize> {
-    let static_inputs: usize = match standard_id {
-        standard::SPLITN_ID
-        | standard::SPLITN_STRUCT_ID
-        | standard::SPLITN_NUM_ID
-        | standard::SPLIT_BY_STRUCT_ID
-        | standard::TRANSPOSE_SPLIT_ID
-        | standard::BIT_SPLIT_ID => 0,
-        standard::CONCAT_SERIAL_ID
-        | standard::CONCAT_NUM_ID
-        | standard::CONCAT_STRUCT_ID
-        | standard::CONCAT_STRING_ID
-        | standard::DISPATCH_N_BY_TAG_ID
-        | standard::FLOAT_DECONSTRUCT_ID
-        | standard::FLATPACK_ID
-        | standard::SENTINEL_ID
-        | standard::SEPARATE_STRING_COMPONENTS_ID
-        | standard::FSE_V2_ID
-        | standard::HUFFMAN_V2_ID
-        | standard::HUFFMAN_STRUCT_V2_ID
-        | standard::MERGE_SORTED_ID
-        | standard::QUANTIZE_OFFSETS_ID
-        | standard::QUANTIZE_LENGTHS_ID
-        | standard::PARTITION_ID
-        | standard::TOKENIZE_FIXED_ID
-        | standard::TOKENIZE_NUMERIC_ID
-        | standard::TOKENIZE_STRING_ID
-        | standard::PREFIX_ID
-        | standard::TRANSPOSE_SPLIT2_ID
-        | standard::PIVCO_HUFFMAN_ID
-        | standard::MUX_LENGTHS_ID => 2,
-        standard::TRANSPOSE_SPLIT4_ID | standard::LZ_ID => 4,
-        standard::FIELD_LZ_ID => 5,
-        standard::TRANSPOSE_SPLIT8_ID => 8,
-        standard::DISPATCH_STRING_ID
-        | standard::FSE_DEPRECATED_ID
-        | standard::HUFFMAN_DEPRECATED_ID
-        | standard::HUFFMAN_FIXED_DEPRECATED_ID
-        | standard::ROLZ_DEPRECATED_ID
-        | standard::FASTLZ_DEPRECATED_ID
-        | standard::LZ4_ID
-        | standard::ZSTD_ID
-        | standard::ZSTD_FIXED_ID
-        | standard::BITPACK_SERIAL_ID
-        | standard::BITPACK_INT_ID
-        | standard::CONSTANT_SERIAL_ID
-        | standard::CONSTANT_FIXED_ID
-        | standard::CONVERT_STRUCT_TO_NUM_LE_ID
-        | standard::CONVERT_NUM_TO_STRUCT_LE_ID
-        | standard::CONVERT_SERIAL_TO_NUM_LE_ID
-        | standard::CONVERT_NUM_TO_SERIAL_LE_ID
-        | standard::CONVERT_STRUCT_TO_NUM_BE_ID
-        | standard::CONVERT_SERIAL_TO_NUM_BE_ID
-        | standard::CONVERT_STRING_TO_SERIAL_ID
-        | standard::CONVERT_SERIAL_TO_STRUCT_ID
-        | standard::CONVERT_STRUCT_TO_SERIAL_ID
-        | standard::ZIGZAG_ID
-        | standard::TRANSPOSE_ID
-        | standard::DEDUP_NUM_ID
-        | standard::DELTA_INT_ID
-        | standard::DIVIDE_BY_ID
-        | standard::INTERLEAVE_STRING_ID
-        | standard::PARSE_INT_ID
-        | standard::BITUNPACK_ID
-        | standard::RANGE_PACK_ID
-        | standard::FSE_NCOUNT_ID => 1,
-        _ => {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("standard transform graph execution is not implemented yet"));
-        }
-    };
-    static_inputs
-        .checked_add(variable_inputs)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }

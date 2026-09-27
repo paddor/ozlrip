@@ -20,22 +20,18 @@ use super::streams::{
 };
 use super::string_nodes::{
     decode_concat_string_node, decode_interleave_string_node, decode_prefix_node,
-    decode_separate_string_components_node, decode_string_to_serial_node,
-    decode_tokenize_string_node,
+    decode_separate_string_components_node, decode_tokenize_string_node,
 };
 use super::{
     DecodeScratch, QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitpack_int_chunk,
-    decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
-    decode_byte_preserving_conversion_chunk, decode_constant_fixed_chunk,
+    decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk, decode_constant_fixed_chunk,
     decode_constant_serial_chunk, decode_delta_node, decode_dispatch_n_by_tag_node,
     decode_dispatch_string_node, decode_divide_by_node, decode_fastlz_deprecated_node,
     decode_field_lz_node, decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
     decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
-    decode_huffman_struct_v2_node, decode_huffman_v2_node, decode_lz_node,
-    decode_num_to_struct_le_chunk, decode_numeric_to_serial_le_chunk, decode_partition_node,
+    decode_huffman_struct_v2_node, decode_huffman_v2_node, decode_lz_node, decode_partition_node,
     decode_quantize_node, decode_range_pack_serial8_chunk, decode_rolz_deprecated_node,
-    decode_serial_to_num_be_chunk, decode_serial_to_numeric_le_chunk,
-    decode_serial_to_struct_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
+    decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
     decode_zstd_chunk, parse_int, pivco_huffman,
 };
 
@@ -304,11 +300,6 @@ pub(super) fn execute_standard_node(
         standard::SEPARATE_STRING_COMPONENTS_ID => one_typed(
             decode_separate_string_components_node(inputs, header, ctx.limits),
         ),
-        standard::CONVERT_STRING_TO_SERIAL_ID => one_serial(decode_string_to_serial_node(
-            single_stream(inputs)?,
-            header,
-            ctx.limits,
-        )),
         standard::DISPATCH_STRING_ID => one_typed(decode_dispatch_string_node(
             inputs,
             variable_inputs,
@@ -393,33 +384,12 @@ pub(super) fn execute_standard_node(
             ctx.limits,
             ctx.scratch,
         )),
-        standard::CONVERT_SERIAL_TO_STRUCT_ID => one_typed(
-            decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, ctx.limits),
-        ),
-        standard::CONVERT_STRUCT_TO_SERIAL_ID => one_typed(decode_serial_to_struct_chunk(
-            single_stream(inputs)?,
-            header,
-            ctx.limits,
-        )),
-        standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => one_typed(
-            decode_num_to_struct_le_chunk(single_stream(inputs)?, header, ctx.limits),
-        ),
         standard::CONVERT_STRUCT_TO_NUM_BE_ID => one_typed(decode_struct_to_num_be_chunk(
             single_stream(inputs)?,
             header,
             ctx.limits,
         )),
         standard::CONVERT_SERIAL_TO_NUM_BE_ID => one_typed(decode_serial_to_num_be_chunk(
-            single_stream(inputs)?,
-            header,
-            ctx.limits,
-        )),
-        standard::CONVERT_SERIAL_TO_NUM_LE_ID => one_serial(decode_numeric_to_serial_le_chunk(
-            single_stream(inputs)?,
-            header,
-            ctx.limits,
-        )),
-        standard::CONVERT_NUM_TO_SERIAL_LE_ID => one_typed(decode_serial_to_numeric_le_chunk(
             single_stream(inputs)?,
             header,
             ctx.limits,
@@ -503,6 +473,8 @@ pub(super) fn execute_standard_node(
         standard::TOKENIZE_STRING_ID => {
             one_typed(decode_tokenize_string_node(inputs, header, ctx.limits))
         }
+        // Byte-preserving conversions never get here: `execute_node` moves
+        // their input to the output slot.
         _ => Err(Error::new(ErrorKind::Unsupported)
             .with_detail("standard transform graph execution is not implemented yet")),
     }

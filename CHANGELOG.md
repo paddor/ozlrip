@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- An `Unsupported` error for a transform outside its format version range
+  names the transform and the version.
 - Update `zrip-decode` to 0.8.10. It caps a zstd frame's output at its
   declared content size and reserves that size up front, which the zstd node
   used to do itself.
