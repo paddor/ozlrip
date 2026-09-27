@@ -23,7 +23,9 @@ let decoded = ozlrip::decode_with_options(frame, ozlrip::Options::from(limits))?
 For reusable allocation state, create `ozlrip::Decoder` and call
 `Decoder::decode` or `Decoder::decode_into`. Use `Decoder::with_options` when
 the default decoder options are not the right fit. Load dictionary bundles with
-`Decoder::load_dictionary_bundle` before dictionary-backed decode.
+`Decoder::load_dictionary_bundle` before dictionary-backed decode. A `Decoder`
+keeps up to 64 MiB of intermediate buffers between calls;
+`Decoder::shrink_to_fit` frees them.
 
 ## Current Scope
 

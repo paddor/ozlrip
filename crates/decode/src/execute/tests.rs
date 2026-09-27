@@ -3292,7 +3292,9 @@ fn decodes_constant_fixed_chunk() {
         string_lengths: None,
     };
 
-    let output = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap();
+    let output =
+        decode_constant_fixed_chunk(input, &header, Limits::default(), &mut DecodeScratch::new())
+            .unwrap();
 
     assert_eq!(output.element_width, 2);
     assert_eq!(output.bytes, [0xaa, 0xbb, 0xaa, 0xbb, 0xaa, 0xbb]);
@@ -3309,7 +3311,9 @@ fn rejects_constant_fixed_partial_input() {
         string_lengths: None,
     };
 
-    let err = decode_constant_fixed_chunk(input, &header, Limits::default()).unwrap_err();
+    let err =
+        decode_constant_fixed_chunk(input, &header, Limits::default(), &mut DecodeScratch::new())
+            .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Malformed);
 }
@@ -3327,7 +3331,8 @@ fn rejects_constant_fixed_output_limit() {
     limits.max_decoded_bytes = 5;
     limits.max_buffer_bytes = 5;
 
-    let err = decode_constant_fixed_chunk(input, &header, limits).unwrap_err();
+    let err =
+        decode_constant_fixed_chunk(input, &header, limits, &mut DecodeScratch::new()).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }
@@ -4420,6 +4425,31 @@ fn decodes_v10_zstd_fixed_serial_chunk() {
 
     assert_eq!(written, expected.len());
     assert_eq!(output, expected);
+}
+
+/// The zstd node caps its output at the zstd frame's content size. Output
+/// past that size is a malformed frame, as when zrip checks the size itself.
+#[cfg(feature = "zstd")]
+#[test]
+fn rejects_zstd_node_output_past_its_content_size() {
+    let compressible = b"zstd content longer than its header says ".repeat(4);
+    let incompressible = (0u8..200).map(|i| i.wrapping_mul(97) ^ 0x5a).collect();
+    for payload in [compressible, incompressible] {
+        let mut stored = zstd_stored_stream(&payload);
+        // Single segment with a one-byte content size after the descriptor.
+        assert_eq!(stored[1] & 0xe0, 0x20);
+        assert_eq!(usize::from(stored[2]), payload.len());
+        stored[2] -= 1;
+        // The fixed-zstd node never decodes straight into the output.
+        let input = zstd_fixed_serial_frame(&stored, payload.len());
+        let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+        let mut output = vec![1, 2];
+
+        let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(output, [1, 2]);
+    }
 }
 
 #[cfg(feature = "zstd")]

@@ -105,31 +105,34 @@ pub(super) fn decode_constant_serial_chunk(
     stored: &[u8],
     header: &[u8],
     limits: Limits,
-) -> Result<Vec<u8>> {
+    scratch: &mut DecodeScratch,
+) -> Result<OwnedStream> {
     let input = StreamInput {
         bytes: stored,
         element_width: 1,
         string_lengths: None,
     };
-    Ok(decode_constant_typed_chunk(input, header, limits, "constant_serial")?.bytes)
+    decode_constant_typed_chunk(input, header, limits, scratch, "constant_serial")
 }
 
 pub(super) fn decode_constant_fixed_chunk(
     stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     if stored.string_lengths.is_some() {
         return Err(Error::new(ErrorKind::InvalidType)
             .with_detail("constant_fixed input must not be a string stream"));
     }
-    decode_constant_typed_chunk(stored, header, limits, "constant_fixed")
+    decode_constant_typed_chunk(stored, header, limits, scratch, "constant_fixed")
 }
 
 fn decode_constant_typed_chunk(
     stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
     name: &'static str,
 ) -> Result<OwnedStream> {
     if stored.element_width == 0 {
@@ -162,12 +165,9 @@ fn decode_constant_typed_chunk(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
     }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("constant allocation failed")
-    })?;
+    let mut output = scratch.take_byte_buffer(output_len, "constant allocation failed")?;
     repeat_constant_element(stored.bytes, output_len, &mut output);
-    Ok(OwnedStream::typed(output, stored.element_width))
+    Ok(OwnedStream::pooled(output, stored.element_width))
 }
 
 fn repeat_constant_element(element: &[u8], output_len: usize, output: &mut Vec<u8>) {

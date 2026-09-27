@@ -365,12 +365,10 @@ pub(super) fn execute_standard_node(
             ctx.limits,
         )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),
-        standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_serial(decode_zstd_chunk(
-            single_input(inputs)?,
-            header,
-            dict_index,
-            ctx,
-        )),
+        standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_typed(
+            decode_zstd_chunk(single_input(inputs)?, header, dict_index, ctx)
+                .map(|bytes| OwnedStream::pooled(bytes, 1)),
+        ),
         standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
             single_input(inputs)?,
             header,
@@ -383,15 +381,17 @@ pub(super) fn execute_standard_node(
             ctx.limits,
             ctx.scratch,
         )),
-        standard::CONSTANT_SERIAL_ID => one_serial(decode_constant_serial_chunk(
+        standard::CONSTANT_SERIAL_ID => one_typed(decode_constant_serial_chunk(
             single_input(inputs)?,
             header,
             ctx.limits,
+            ctx.scratch,
         )),
         standard::CONSTANT_FIXED_ID => one_typed(decode_constant_fixed_chunk(
             single_stream(inputs)?,
             header,
             ctx.limits,
+            ctx.scratch,
         )),
         standard::CONVERT_SERIAL_TO_STRUCT_ID => one_typed(
             decode_byte_preserving_conversion_chunk(single_stream(inputs)?, header, ctx.limits),

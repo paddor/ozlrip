@@ -323,6 +323,33 @@ fn reusable_decoder_rejects_mutated_frame_buffer() {
     assert_eq!(dst, [7, 8, 9]);
 }
 
+/// `shrink_to_fit` frees the reused buffers and zstd state, and later
+/// decodes are unchanged.
+#[cfg(feature = "zstd")]
+#[test]
+fn decoder_decodes_the_same_after_shrink_to_fit() {
+    use ozlrip_test_support::{Chunk, FrameBuilder, Node, ZSTD_TRANSFORM_ID};
+
+    let payload = b"zstd node payload, ".repeat(16);
+    let compressed = zrip::compress(&payload, 1).unwrap();
+    let mut stored = Vec::new();
+    ozlrip_test_support::push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&compressed[4..]);
+    let frame = FrameBuilder::new(21)
+        .serial_output(payload.len())
+        .chunk(
+            Chunk::new()
+                .node(Node::new(ZSTD_TRANSFORM_ID))
+                .stored_stream(stored),
+        )
+        .build();
+    let mut decoder = ozlrip::Decoder::new();
+
+    assert_eq!(decoder.decode(&frame).unwrap(), payload);
+    decoder.shrink_to_fit();
+    assert_eq!(decoder.decode(&frame).unwrap(), payload);
+}
+
 #[test]
 fn inspect_reports_stored_serial_metadata() {
     let frame = stored_serial_frame(&[7, 8, 9]);

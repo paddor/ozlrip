@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- zstd nodes size their output from the zstd frame's content size, as
+  upstream does. They reserved 128 KiB per block, and an output with a
+  content size doubled its buffer on the last block. One-shot `decode` of
+  `u16-zigzag-sample` takes 9.3 µs instead of 25 µs.
+- Intermediate buffers stay in the `Decoder`'s scratch pool: zstd and
+  constant node outputs, the streams a direct-append tail reads, and chunk
+  outputs after they are appended. The pool hands out the smallest buffer
+  that fits and keeps at most 64 buffers and 64 MiB. In a portable build,
+  `csv-timeseries-30m` decodes 51%, `sao-fixed-28m` 50%,
+  `sddl2-sao-silesia-28m` 35%, `tbl-supplier-pipe` 85%, and
+  `parquet-nested-sample` 111% faster.
+- Add `Decoder::shrink_to_fit`, which frees the pooled buffers and zstd
+  state.
 - Transpose-split nodes pick the best SIMD level at runtime (with `std`, not
   `paranoid`), so portable builds vectorize them. `le-u32-delta-16m` decodes
   49% and `le-u64-timeseries-32m` 33% faster in a portable build, matching a

@@ -35,6 +35,9 @@ impl From<Limits> for Options {
 }
 
 /// Reusable OpenZL decoder with scratch buffers and codec state.
+///
+/// Between decodes it keeps up to 64 MiB of intermediate buffers for reuse;
+/// [`Decoder::shrink_to_fit`] frees them.
 pub struct Decoder {
     options: Options,
     scratch: execute::DecodeScratch,
@@ -78,6 +81,16 @@ impl Decoder {
     /// Clears all loaded dictionary bundles.
     pub fn clear_dictionary_bundles(&mut self) {
         self.dict_store.clear();
+    }
+
+    /// Frees the buffers and codec state kept for reuse between decodes.
+    /// Loaded dictionary bundles stay loaded.
+    pub fn shrink_to_fit(&mut self) {
+        self.scratch.clear();
+        #[cfg(feature = "zstd")]
+        {
+            self.zstd = zrip_decode::context::DecompressContext::new();
+        }
     }
 
     /// Decodes one OpenZL frame and appends the decoded bytes to `dst`.

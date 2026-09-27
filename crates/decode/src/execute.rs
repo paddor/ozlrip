@@ -228,7 +228,9 @@ fn append_decoded_chunk(
             }
             return Ok(());
         }
-        return append_slice(dst, &bytes, budget);
+        let appended = append_slice(dst, &bytes, budget);
+        scratch.recycle_byte_buffer(bytes);
+        return appended;
     }
     append_slice(dst, decoded.as_slice(), budget)
 }
@@ -448,6 +450,11 @@ fn decode_transform_chunk_appending(
                     transform_headers,
                 )?,
                 DirectAppendKind::SplitByStructToSplitN => {}
+            }
+            for slot in streams {
+                if let StreamSlot::Owned(stream) = slot {
+                    ctx.scratch.recycle_owned_stream(stream);
+                }
             }
             return Ok(dst.len() - output_start);
         }

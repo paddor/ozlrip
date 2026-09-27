@@ -227,15 +227,32 @@ fn decode_zstd_magicless_with_context(
     zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<Vec<u8>> {
     if !magicless.is_empty() {
-        let mut output = scratch.take_byte_buffer(0, "zstd allocation failed")?;
+        // Size the output from the frame header, as upstream does. zrip
+        // reserves a whole block past the output unless `max_output` is
+        // tighter, and its block writer wants 64 bytes of slack at the end.
+        // Reserve no more up front than zrip itself would.
+        let content_size =
+            zstd_content_size(magicless).filter(|&size| size <= limits.max_decoded_bytes);
+        let capacity = content_size.map_or(0, |size| {
+            let upfront = usize::try_from(zrip_core::frame::MAX_WINDOW_SIZE).unwrap_or(usize::MAX);
+            size.min(upfront) + ZSTD_OUTPUT_SLACK
+        });
+        let mut output = scratch.take_byte_buffer(capacity, "zstd allocation failed")?;
         let written = match zstd.decompress_after_magic_into(
             magicless,
             &mut output,
-            limits.max_decoded_bytes,
+            content_size.unwrap_or(limits.max_decoded_bytes),
         ) {
             Ok(written) => written,
             Err(err) => {
                 scratch.recycle_byte_buffer(output);
+                // Running out of room below the limit means the frame
+                // overran its own content size.
+                if content_size.is_some() && err == zrip_core::DecompressError::OutputTooSmall {
+                    return Err(map_zstd_error(
+                        &zrip_core::DecompressError::FrameSizeMismatch,
+                    ));
+                }
                 return Err(map_zstd_error(&err));
             }
         };
@@ -258,6 +275,16 @@ fn decode_zstd_magicless_with_context(
         );
     }
     Ok(output)
+}
+
+/// Spare bytes zrip's block writer keeps past the end of its output.
+#[cfg(feature = "zstd")]
+const ZSTD_OUTPUT_SLACK: usize = 64;
+
+#[cfg(feature = "zstd")]
+fn zstd_content_size(magicless: &[u8]) -> Option<usize> {
+    let header = zrip_core::frame::header::parse_frame_header_after_magic(magicless, 0).ok()?;
+    usize::try_from(header.frame_content_size?).ok()
 }
 
 /// Maps an error from zstd output capped at the frame's remaining declared
