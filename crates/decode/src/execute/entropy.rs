@@ -172,7 +172,7 @@ struct LegacyEntropyPayload {
     decoded_elements: usize,
 }
 
-const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
+pub(super) const LEGACY_ENTROPY_MAX_DEPTH: usize = 64;
 
 fn decode_legacy_entropy_payload(
     source: &[u8],
@@ -293,7 +293,7 @@ fn validate_legacy_entropy_width(element_width: usize, transform_name: &str) -> 
     Ok(())
 }
 
-fn read_legacy_entropy_header(
+pub(super) fn read_legacy_entropy_header(
     source: &[u8],
     offset: &mut usize,
     transform_name: &str,
@@ -309,7 +309,7 @@ fn read_legacy_entropy_header(
     Ok((header & 0x07, decoded_elements))
 }
 
-fn read_legacy_entropy_size(
+pub(super) fn read_legacy_entropy_size(
     header: u8,
     source: &[u8],
     offset: &mut usize,
@@ -594,6 +594,33 @@ fn decode_legacy_entropy_bit(
     }
 
     let output_len = checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
+    let bytes = unpack_legacy_bits(
+        source,
+        offset,
+        decoded_elements,
+        element_width,
+        num_bits,
+        output_len,
+        transform_name,
+    )?;
+    Ok(LegacyEntropyPayload {
+        bytes,
+        decoded_elements,
+    })
+}
+
+/// Unpacks `decoded_elements` little-endian values of `num_bits` bits each
+/// from `source` at `offset` into `output_len` bytes of `element_width`-byte
+/// elements. Callers check the widths and the output size.
+pub(super) fn unpack_legacy_bits(
+    source: &[u8],
+    offset: &mut usize,
+    decoded_elements: usize,
+    element_width: usize,
+    num_bits: usize,
+    output_len: usize,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
     let encoded_bits = decoded_elements
         .checked_mul(num_bits)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -616,10 +643,7 @@ fn decode_legacy_entropy_bit(
     })?;
     if num_bits == 0 {
         bytes.resize(output_len, 0);
-        return Ok(LegacyEntropyPayload {
-            bytes,
-            decoded_elements,
-        });
+        return Ok(bytes);
     }
 
     let mask = if num_bits == 64 {
@@ -671,10 +695,7 @@ fn decode_legacy_entropy_bit(
             _ => unreachable!("validated element width"),
         }
     }
-    Ok(LegacyEntropyPayload {
-        bytes,
-        decoded_elements,
-    })
+    Ok(bytes)
 }
 
 fn require_legacy_serial_input(source: StreamInput<'_>, transform_name: &str) -> Result<()> {
