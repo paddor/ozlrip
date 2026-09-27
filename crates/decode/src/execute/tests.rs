@@ -1502,7 +1502,7 @@ fn decodes_splitn_num_node() {
     let mut scratch = DecodeScratch::new();
     let mut dict_store = DictionaryStore::new();
     #[cfg(feature = "zstd")]
-    let mut zstd = zrip_decode::context::DecompressContext::new();
+    let mut zstd = None;
     let mut ctx = StandardNodeContext {
         format_version: 21,
         limits: Limits::default(),

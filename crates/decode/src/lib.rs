@@ -42,8 +42,9 @@ pub struct Decoder {
     options: Options,
     scratch: execute::DecodeScratch,
     dict_store: DictionaryStore,
+    /// Created on the first zstd frame or node.
     #[cfg(feature = "zstd")]
-    zstd: zrip_decode::context::DecompressContext,
+    zstd: Option<zrip_decode::context::DecompressContext>,
 }
 
 impl Decoder {
@@ -59,7 +60,7 @@ impl Decoder {
             scratch: execute::DecodeScratch::new(),
             dict_store: DictionaryStore::new(),
             #[cfg(feature = "zstd")]
-            zstd: zrip_decode::context::DecompressContext::new(),
+            zstd: None,
         }
     }
 
@@ -89,7 +90,7 @@ impl Decoder {
         self.scratch.clear();
         #[cfg(feature = "zstd")]
         {
-            self.zstd = zrip_decode::context::DecompressContext::new();
+            self.zstd = None;
         }
     }
 
@@ -105,7 +106,7 @@ impl Decoder {
                 frame,
                 dst,
                 self.options.limits,
-                &mut self.zstd,
+                execute::zstd_context(&mut self.zstd),
             );
         }
         let plan = parse::parse_frame_plan(input, self.options.limits)?;
@@ -179,12 +180,12 @@ pub fn decode_into_with_options(
 
 /// Parses and validates frame metadata using [`Options::default`].
 pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
-    Decoder::default().inspect(input)
+    inspect_with_options(input, Options::default())
 }
 
 /// Parses and validates frame metadata using explicit options.
 pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo> {
-    Decoder::with_options(options).inspect(input)
+    parse::inspect_frame(input, options.limits)
 }
 
 #[cfg(all(test, feature = "zstd"))]

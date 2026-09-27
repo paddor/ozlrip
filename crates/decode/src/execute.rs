@@ -84,7 +84,7 @@ use streams::{
     recycle_consumed_owned_streams,
 };
 #[cfg(feature = "zstd")]
-pub(crate) use zstd::decode_single_zstd_frame_with_context;
+pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
 use zstd::{decode_zstd_chunk, decode_zstd_chunk_to_output, try_decode_single_zstd_into_dst};
 
 #[cfg(test)]
@@ -102,7 +102,7 @@ pub(crate) fn decode_plan(
     limits: Limits,
 ) -> Result<usize> {
     #[cfg(feature = "zstd")]
-    let mut zstd = zrip_decode::context::DecompressContext::new();
+    let mut zstd = None;
     let mut dict_store = DictionaryStore::new();
     let mut scratch = DecodeScratch::new();
     let mut runtime = DecodeRuntime::new(

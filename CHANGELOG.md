@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `Decoder::new` no longer allocates: the zstd context is created for the
+  first zstd frame or node, and `inspect` no longer builds a decoder.
+  One-shot `decode` of a small stored frame takes 0.38 µs instead of 1.2 µs.
 - zstd nodes size their output from the zstd frame's content size, as
   upstream does. They reserved 128 KiB per block, and an output with a
   content size doubled its buffer on the last block. One-shot `decode` of

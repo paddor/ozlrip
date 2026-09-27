@@ -17,6 +17,14 @@ use super::verify_decoded_checksum;
 #[cfg(feature = "zstd")]
 use super::{DecodeScratch, read_var_u64};
 
+/// The zstd context in `slot`, created on first use.
+#[cfg(feature = "zstd")]
+pub(crate) fn zstd_context(
+    slot: &mut Option<zrip_decode::context::DecompressContext>,
+) -> &mut zrip_decode::context::DecompressContext {
+    slot.get_or_insert_with(zrip_decode::context::DecompressContext::new)
+}
+
 #[cfg(feature = "zstd")]
 pub(crate) fn decode_single_zstd_frame_with_context(
     input: &[u8],
@@ -68,7 +76,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
-    zstd: &mut zrip_decode::context::DecompressContext,
+    zstd: &mut Option<zrip_decode::context::DecompressContext>,
 ) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] || plan.chunks.len() != 1 {
         return Ok(None);
@@ -104,13 +112,14 @@ pub(super) fn try_decode_single_zstd_into_dst(
         .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
     let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
     let start = dst.len();
-    let written = match zstd.decompress_after_magic_into(magicless, dst, budget.remaining()) {
-        Ok(written) => written,
-        Err(err) => {
-            dst.truncate(start);
-            return Err(map_budget_zstd_error(&err));
-        }
-    };
+    let written =
+        match zstd_context(zstd).decompress_after_magic_into(magicless, dst, budget.remaining()) {
+            Ok(written) => written,
+            Err(err) => {
+                dst.truncate(start);
+                return Err(map_budget_zstd_error(&err));
+            }
+        };
     if let Err(err) = budget.consume(written).and_then(|()| budget.finish()) {
         dst.truncate(start);
         return Err(err);
@@ -166,7 +175,7 @@ pub(super) fn decode_zstd_chunk(
         let dict_zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
         return decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, dict_zstd);
     }
-    decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, ctx.zstd)
+    decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, zstd_context(ctx.zstd))
 }
 
 #[cfg(feature = "zstd")]
@@ -199,8 +208,7 @@ pub(super) fn decode_zstd_chunk_to_output(
         let zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
         zstd.decompress_after_magic_into(magicless, dst, max_output)
     } else {
-        ctx.zstd
-            .decompress_after_magic_into(magicless, dst, max_output)
+        zstd_context(ctx.zstd).decompress_after_magic_into(magicless, dst, max_output)
     };
     let written = match written {
         Ok(written) => written,

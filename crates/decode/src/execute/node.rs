@@ -252,7 +252,7 @@ pub(super) struct StandardNodeContext<'a> {
     #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
     pub(super) dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
-    pub(super) zstd: &'a mut zrip_decode::context::DecompressContext,
+    pub(super) zstd: &'a mut Option<zrip_decode::context::DecompressContext>,
 }
 
 pub(super) fn execute_standard_node(
