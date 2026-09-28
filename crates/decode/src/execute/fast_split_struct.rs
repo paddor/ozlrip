@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "paranoid"))]
-use super::layout_nodes::split_by_struct_output_len;
+use super::split_struct::split_by_struct_output_len;
 use super::streams::StreamInput;
 
 #[cfg(not(feature = "paranoid"))]

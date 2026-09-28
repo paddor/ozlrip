@@ -39,6 +39,7 @@ mod pivco_huffman;
 mod plan;
 mod runtime;
 mod sparse_num;
+mod split_struct;
 mod streams;
 mod string_nodes;
 mod zstd;
