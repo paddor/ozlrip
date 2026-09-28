@@ -165,25 +165,7 @@ impl Tree {
         buckets: &[Vec<Leaf>],
         table_log: usize,
     ) -> Result<()> {
-        self.rank_to_symbol
-            .try_reserve_exact(MAX_SYMBOLS)
-            .map_err(|_| {
-                Error::new(ErrorKind::AllocationFailed)
-                    .with_detail("pivco_huffman tree allocation failed")
-            })?;
-        self.rank_to_flat_depth
-            .try_reserve_exact(MAX_SYMBOLS)
-            .map_err(|_| {
-                Error::new(ErrorKind::AllocationFailed)
-                    .with_detail("pivco_huffman tree allocation failed")
-            })?;
-        self.rank_to_codeword
-            .try_reserve_exact(MAX_SYMBOLS)
-            .map_err(|_| {
-                Error::new(ErrorKind::AllocationFailed)
-                    .with_detail("pivco_huffman tree allocation failed")
-            })?;
-
+        self.reserve_rank_tables()?;
         let mut codeword = 0u32;
         for level in 0..self.num_levels {
             let weight = table_log + 1 - level;
@@ -191,40 +173,7 @@ impl Tree {
                 Error::new(ErrorKind::Malformed).with_detail("pivco_huffman weight is invalid")
             })?;
             for leaf in leaves {
-                let flat_depth = flat_depth(leaf.symbols.len())?;
-                let total_bits = level.checked_add(flat_depth).ok_or_else(|| {
-                    Error::new(ErrorKind::IntegerOverflow)
-                        .with_detail("pivco_huffman codeword length overflowed")
-                })?;
-                if total_bits > 16 {
-                    return Err(Error::new(ErrorKind::Malformed)
-                        .with_detail("pivco_huffman codeword is too wide"));
-                }
-                for (flat_index, &symbol) in leaf.symbols.iter().enumerate() {
-                    let flat_index = u32::try_from(flat_index)
-                        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
-                    let bits = (codeword
-                        .checked_shl(u32::try_from(flat_depth).map_err(|_| {
-                            Error::new(ErrorKind::IntegerOverflow)
-                                .with_detail("pivco_huffman flat depth overflowed")
-                        })?)
-                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?)
-                    .checked_add(flat_index)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                    let code = if total_bits == 0 {
-                        0
-                    } else {
-                        u16::try_from(bits << (16 - total_bits))
-                            .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?
-                    };
-                    self.rank_to_symbol.push(symbol);
-                    self.rank_to_flat_depth
-                        .push(u8::try_from(flat_depth).map_err(|_| {
-                            Error::new(ErrorKind::IntegerOverflow)
-                                .with_detail("pivco_huffman flat depth is too large")
-                        })?);
-                    self.rank_to_codeword.push(code);
-                }
+                self.push_leaf(leaf, level, codeword)?;
                 codeword = codeword
                     .checked_add(1)
                     .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -247,6 +196,64 @@ impl Tree {
                 .with_detail("pivco_huffman weights do not form a complete tree"));
         }
         self.num_ranks = self.rank_to_symbol.len();
+        Ok(())
+    }
+
+    fn reserve_rank_tables(&mut self) -> Result<()> {
+        let failed = |_| {
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("pivco_huffman tree allocation failed")
+        };
+        self.rank_to_symbol
+            .try_reserve_exact(MAX_SYMBOLS)
+            .map_err(failed)?;
+        self.rank_to_flat_depth
+            .try_reserve_exact(MAX_SYMBOLS)
+            .map_err(failed)?;
+        self.rank_to_codeword
+            .try_reserve_exact(MAX_SYMBOLS)
+            .map_err(failed)?;
+        Ok(())
+    }
+
+    /// Ranks the symbols of one leaf at `level`, under the prefix
+    /// `codeword`.
+    fn push_leaf(&mut self, leaf: &Leaf, level: usize, codeword: u32) -> Result<()> {
+        let flat_depth = flat_depth(leaf.symbols.len())?;
+        let total_bits = level.checked_add(flat_depth).ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow)
+                .with_detail("pivco_huffman codeword length overflowed")
+        })?;
+        if total_bits > 16 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("pivco_huffman codeword is too wide")
+            );
+        }
+        for (flat_index, &symbol) in leaf.symbols.iter().enumerate() {
+            let flat_index =
+                u32::try_from(flat_index).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+            let bits = (codeword
+                .checked_shl(u32::try_from(flat_depth).map_err(|_| {
+                    Error::new(ErrorKind::IntegerOverflow)
+                        .with_detail("pivco_huffman flat depth overflowed")
+                })?)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?)
+            .checked_add(flat_index)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let code = if total_bits == 0 {
+                0
+            } else {
+                u16::try_from(bits << (16 - total_bits))
+                    .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?
+            };
+            self.rank_to_symbol.push(symbol);
+            self.rank_to_flat_depth
+                .push(u8::try_from(flat_depth).map_err(|_| {
+                    Error::new(ErrorKind::IntegerOverflow)
+                        .with_detail("pivco_huffman flat depth is too large")
+                })?);
+            self.rank_to_codeword.push(code);
+        }
         Ok(())
     }
 

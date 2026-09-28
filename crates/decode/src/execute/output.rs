@@ -42,6 +42,17 @@ pub(super) fn alloc_output(len: usize, limits: Limits, detail: &'static str) -> 
     Ok(output)
 }
 
+/// A zero-filled buffer of `len` bytes, for outputs whose size the caller
+/// already checked. `detail` describes a failed allocation.
+pub(super) fn zeroed_output(len: usize, detail: &'static str) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| Error::new(ErrorKind::AllocationFailed).with_detail(detail))?;
+    output.resize(len, 0);
+    Ok(output)
+}
+
 /// Tracks one frame output against the size its header declares.
 ///
 /// Built before anything is reserved or written, so a tiny frame that

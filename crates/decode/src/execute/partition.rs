@@ -296,17 +296,6 @@ pub(super) fn decode_partition_node(
 
     let bases = partition_bases(&params)?;
     let bits = partition_bits(&params)?;
-    #[cfg(not(feature = "paranoid"))]
-    if element_width == 4 {
-        return fast_partition::decode_u32_node(
-            buckets.bytes,
-            offsets.bytes,
-            &bases,
-            &bits,
-            output_len,
-        );
-    }
-    #[cfg(feature = "paranoid")]
     if element_width == 4 {
         return fast_partition::decode_u32_node(
             buckets.bytes,
@@ -342,13 +331,7 @@ pub(super) fn decode_partition_node(
         }
         push_numeric_element(&mut output, element_width, value);
     }
-
-    Ok(OwnedStream {
-        bytes: output,
-        element_width,
-        string_lengths: None,
-        recyclable: false,
-    })
+    Ok(OwnedStream::typed(output, element_width))
 }
 
 fn parse_partition_header(header: &[u8]) -> Result<(PartitionParams, usize)> {

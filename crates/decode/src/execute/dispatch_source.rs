@@ -23,6 +23,30 @@ pub(super) fn remaining_string_bytes(source: &DispatchStringSource<'_>) -> Resul
         })
 }
 
+/// Whether `source` holds exactly `count` more strings, and its remaining
+/// bytes are exactly those strings.
+#[cfg(not(feature = "paranoid"))]
+pub(super) fn whole_strings_remaining(
+    source: &DispatchStringSource<'_>,
+    count: usize,
+) -> Result<bool> {
+    Ok(
+        source.lengths.len().saturating_sub(source.position) == count
+            && source.bytes.len().saturating_sub(source.byte_position)
+                == remaining_string_bytes(source)?,
+    )
+}
+
+/// Whether `source` holds exactly `count` more strings of one byte each.
+#[cfg(not(feature = "paranoid"))]
+pub(super) fn one_byte_strings_remaining(source: &DispatchStringSource<'_>, count: usize) -> bool {
+    source.lengths.len().saturating_sub(source.position) == count
+        && source.lengths[source.position..]
+            .iter()
+            .all(|&length| length == 1)
+        && source.bytes.len().saturating_sub(source.byte_position) == count
+}
+
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn fixed_length_source_remaining(
     source: &DispatchStringSource<'_>,
