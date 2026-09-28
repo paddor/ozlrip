@@ -40,15 +40,7 @@ pub(crate) fn decode_outputs_with_context(
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<()> {
     let info = &plan.info;
-    let count = info.outputs;
-    outputs.truncate(count);
-    outputs.resize_with(count, DecodedOutput::default);
-    for (output, &value_type) in outputs.iter_mut().zip(&info.output_types) {
-        output.value_type = Some(value_type);
-        output.width = 0;
-        output.bytes.clear();
-        output.lengths.clear();
-    }
+    reset_outputs(outputs, info.outputs, &info.output_types);
 
     // A single serial output takes the direct-append decode path.
     if info.output_types.as_slice() == [FrameValueType::Serial] {
@@ -65,52 +57,7 @@ pub(crate) fn decode_outputs_with_context(
         return Ok(());
     }
 
-    let declared_total = info.decoded_bytes.ok_or_else(|| {
-        Error::new(ErrorKind::Unsupported)
-            .with_detail("unknown OpenZL output sizes are unsupported")
-    })?;
-    check_output_len(declared_total, limits)?;
-    let mut budgets = Vec::new();
-    budgets.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::AllocationFailed).with_detail("output budget allocation failed")
-    })?;
-    // String lengths are decoded output too, so the expansion ratio covers
-    // them together with the content of every output.
-    let mut expanded = declared_total;
-    for (index, output) in outputs.iter().enumerate() {
-        let bytes = OutputBudget::part(declared_output_size(plan, index)?, limits)?;
-        let lengths = match info.output_elements.get(index).copied().flatten() {
-            Some(elements) if output.value_type == Some(FrameValueType::String) => {
-                let elements = usize::try_from(elements).map_err(|_| {
-                    Error::new(ErrorKind::LimitExceeded).with_detail("string count is too large")
-                })?;
-                let length_bytes = elements.checked_mul(4).ok_or_else(|| {
-                    Error::new(ErrorKind::IntegerOverflow).with_detail("string count overflows")
-                })?;
-                expanded = expanded.checked_add(length_bytes).ok_or_else(|| {
-                    Error::new(ErrorKind::IntegerOverflow)
-                        .with_detail("decoded output size overflows")
-                })?;
-                Some(OutputBudget::part(length_bytes, limits)?)
-            }
-            _ => None,
-        };
-        budgets.push((bytes, lengths));
-    }
-    check_expansion(expanded, input.len(), limits)?;
-    for (output, (bytes, lengths)) in outputs.iter_mut().zip(&mut budgets) {
-        bytes.reserve(&mut output.bytes)?;
-        if let Some(lengths) = lengths {
-            output
-                .lengths
-                .try_reserve_exact(lengths.remaining() / 4)
-                .map_err(|_| {
-                    Error::new(ErrorKind::AllocationFailed)
-                        .with_detail("string length allocation failed")
-                })?;
-        }
-    }
-
+    let mut budgets = plan_output_budgets(plan, outputs, input.len(), limits)?;
     for chunk in &plan.chunks {
         let execution = build_chunk_execution_plan(chunk)?;
         let streams = run_chunk(
@@ -122,28 +69,168 @@ pub(crate) fn decode_outputs_with_context(
             info.dictionary_bundle_id.as_deref(),
             runtime,
         )?;
-        let mut hasher = (verify_content && chunk.decoded_checksum.is_some()).then(Xxh3::new);
-        for (index, (output, budget)) in outputs.iter_mut().zip(&mut budgets).enumerate() {
-            let slot = streams
-                .len()
-                .checked_sub(index + 1)
-                .and_then(|slot| streams.get(slot).map(|stream| (slot, stream)));
-            let Some((slot, stream)) = slot else {
-                return Err(Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("chunk has fewer streams than frame outputs"));
-            };
-            let chunk_output = ChunkOutput::new(stream, stream_type(&execution, slot))?;
-            append_chunk_output(output, budget, &chunk_output, limits)?;
-            if let Some(hasher) = &mut hasher {
-                hasher.update(chunk_output.bytes);
-                if info.format_version >= 15
-                    && let Some(lengths) = chunk_output.lengths
-                {
-                    hash_lengths(hasher, lengths);
-                }
+        let mut hasher =
+            ChunkHasher::new(verify_content, chunk.decoded_checksum, info.format_version);
+        append_chunk_outputs(
+            outputs,
+            &mut budgets,
+            &streams,
+            &execution,
+            limits,
+            &mut hasher,
+        )?;
+        hasher.finish()?;
+        runtime.scratch.recycle_stream_slots(streams);
+    }
+    budgets.iter().try_for_each(OutputBudgets::finish)
+}
+
+/// Resizes `outputs` to `count` empty entries typed by `types`, keeping the
+/// allocations of existing entries.
+fn reset_outputs(outputs: &mut Vec<DecodedOutput>, count: usize, types: &[FrameValueType]) {
+    outputs.truncate(count);
+    outputs.resize_with(count, DecodedOutput::default);
+    for (output, &value_type) in outputs.iter_mut().zip(types) {
+        output.value_type = Some(value_type);
+        output.width = 0;
+        output.bytes.clear();
+        output.lengths.clear();
+    }
+}
+
+/// The declared content size of one output, and its string lengths.
+struct OutputBudgets {
+    bytes: OutputBudget,
+    lengths: Option<OutputBudget>,
+}
+
+impl OutputBudgets {
+    fn finish(&self) -> Result<()> {
+        self.bytes.finish()?;
+        self.lengths.as_ref().map_or(Ok(()), OutputBudget::finish)
+    }
+}
+
+/// One budget per output, checked against the limits and one expansion
+/// ratio for the whole frame, then reserved in `outputs`.
+fn plan_output_budgets(
+    plan: &FramePlan,
+    outputs: &mut [DecodedOutput],
+    encoded_size: usize,
+    limits: Limits,
+) -> Result<Vec<OutputBudgets>> {
+    let info = &plan.info;
+    let declared_total = info.decoded_bytes.ok_or_else(|| {
+        Error::new(ErrorKind::Unsupported)
+            .with_detail("unknown OpenZL output sizes are unsupported")
+    })?;
+    check_output_len(declared_total, limits)?;
+    let mut budgets = Vec::new();
+    budgets.try_reserve_exact(outputs.len()).map_err(|_| {
+        Error::new(ErrorKind::AllocationFailed).with_detail("output budget allocation failed")
+    })?;
+    // String lengths are decoded output too, so the expansion ratio covers
+    // them together with the content of every output.
+    let mut expanded = declared_total;
+    for (index, output) in outputs.iter().enumerate() {
+        let bytes = OutputBudget::part(declared_output_size(plan, index)?, limits)?;
+        let lengths = match info.output_elements.get(index).copied().flatten() {
+            Some(elements) if output.value_type == Some(FrameValueType::String) => {
+                let length_bytes = string_length_bytes(elements)?;
+                expanded = expanded.checked_add(length_bytes).ok_or_else(|| {
+                    Error::new(ErrorKind::IntegerOverflow)
+                        .with_detail("decoded output size overflows")
+                })?;
+                Some(OutputBudget::part(length_bytes, limits)?)
             }
+            _ => None,
+        };
+        budgets.push(OutputBudgets { bytes, lengths });
+    }
+    check_expansion(expanded, encoded_size, limits)?;
+    for (output, budget) in outputs.iter_mut().zip(&mut budgets) {
+        budget.bytes.reserve(&mut output.bytes)?;
+        if let Some(lengths) = &budget.lengths {
+            output
+                .lengths
+                .try_reserve_exact(lengths.remaining() / 4)
+                .map_err(|_| {
+                    Error::new(ErrorKind::AllocationFailed)
+                        .with_detail("string length allocation failed")
+                })?;
         }
-        if let (Some(hasher), Some(expected)) = (hasher, chunk.decoded_checksum) {
+    }
+    Ok(budgets)
+}
+
+/// Bytes that `elements` 32-bit string lengths take.
+fn string_length_bytes(elements: u64) -> Result<usize> {
+    let elements = usize::try_from(elements).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("string count is too large")
+    })?;
+    elements
+        .checked_mul(4)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow).with_detail("string count overflows"))
+}
+
+/// Appends a chunk's final streams to their outputs: output `k` is stream
+/// `streams - k - 1`.
+fn append_chunk_outputs(
+    outputs: &mut [DecodedOutput],
+    budgets: &mut [OutputBudgets],
+    streams: &[StreamSlot<'_>],
+    execution: &ChunkExecutionPlan,
+    limits: Limits,
+    hasher: &mut ChunkHasher,
+) -> Result<()> {
+    for (index, (output, budget)) in outputs.iter_mut().zip(budgets).enumerate() {
+        let slot = streams
+            .len()
+            .checked_sub(index + 1)
+            .and_then(|slot| streams.get(slot).map(|stream| (slot, stream)));
+        let Some((slot, stream)) = slot else {
+            return Err(Error::new(ErrorKind::InvalidGraph)
+                .with_detail("chunk has fewer streams than frame outputs"));
+        };
+        let chunk_output = ChunkOutput::new(stream, stream_type(execution, slot))?;
+        append_chunk_output(output, budget, &chunk_output, limits)?;
+        hasher.update(&chunk_output);
+    }
+    Ok(())
+}
+
+/// The content checksum of one chunk, hashed over its outputs in order,
+/// when the chunk has one and verification is on.
+struct ChunkHasher {
+    hasher: Option<Xxh3>,
+    expected: Option<u32>,
+    /// String lengths are hashed from format v15 on.
+    hash_lengths: bool,
+}
+
+impl ChunkHasher {
+    fn new(verify: bool, expected: Option<u32>, format_version: u32) -> Self {
+        Self {
+            hasher: (verify && expected.is_some()).then(Xxh3::new),
+            expected,
+            hash_lengths: format_version >= 15,
+        }
+    }
+
+    fn update(&mut self, output: &ChunkOutput<'_>) {
+        let Some(hasher) = &mut self.hasher else {
+            return;
+        };
+        hasher.update(output.bytes);
+        if self.hash_lengths
+            && let Some(lengths) = output.lengths
+        {
+            hash_lengths(hasher, lengths);
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        if let (Some(hasher), Some(expected)) = (self.hasher, self.expected) {
             #[expect(clippy::cast_possible_truncation, reason = "the low 32 bits")]
             let actual = hasher.digest() as u32;
             if actual != expected {
@@ -151,20 +238,8 @@ pub(crate) fn decode_outputs_with_context(
                     .with_detail("OpenZL decoded checksum mismatch"));
             }
         }
-        for stream in streams {
-            if let StreamSlot::Owned(stream) = stream {
-                runtime.scratch.recycle_owned_stream(stream);
-            }
-        }
+        Ok(())
     }
-
-    for (bytes, lengths) in &budgets {
-        bytes.finish()?;
-        if let Some(lengths) = lengths {
-            lengths.finish()?;
-        }
-    }
-    Ok(())
 }
 
 /// A chunk's contribution to one output.
@@ -190,7 +265,7 @@ impl<'a> ChunkOutput<'a> {
 /// Checks a chunk's output against the frame header and appends it.
 fn append_chunk_output(
     output: &mut DecodedOutput,
-    (bytes_budget, lengths_budget): &mut (OutputBudget, Option<OutputBudget>),
+    budgets: &mut OutputBudgets,
     chunk: &ChunkOutput<'_>,
     limits: Limits,
 ) -> Result<()> {
@@ -223,7 +298,7 @@ fn append_chunk_output(
         );
     }
 
-    bytes_budget.consume(chunk.bytes.len())?;
+    budgets.bytes.consume(chunk.bytes.len())?;
     output.bytes.extend_from_slice(chunk.bytes);
 
     match (chunk.value_type, chunk.lengths) {
@@ -231,7 +306,7 @@ fn append_chunk_output(
             let length_bytes = lengths.len().checked_mul(4).ok_or_else(|| {
                 Error::new(ErrorKind::IntegerOverflow).with_detail("string count overflows")
             })?;
-            match lengths_budget {
+            match &mut budgets.lengths {
                 Some(budget) => budget.consume(length_bytes)?,
                 None => check_output_len((output.lengths.len() + lengths.len()) * 4, limits)?,
             }

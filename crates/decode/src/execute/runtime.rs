@@ -4,7 +4,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::dict::DictionaryStore;
 
-use super::streams::OwnedStream;
+use super::streams::{OwnedStream, StreamSlot};
 
 /// Most buffers the scratch pool keeps.
 const MAX_POOLED_BUFFERS: usize = 64;
@@ -64,6 +64,15 @@ impl DecodeScratch {
         }
     }
 
+    /// Recycles the owned streams among a chunk's stream slots.
+    pub(super) fn recycle_stream_slots(&mut self, streams: Vec<StreamSlot<'_>>) {
+        for slot in streams {
+            if let StreamSlot::Owned(stream) = slot {
+                self.recycle_owned_stream(stream);
+            }
+        }
+    }
+
     /// Keeps `buffer` for reuse, or frees it when the pool is full.
     pub(super) fn recycle_byte_buffer(&mut self, mut buffer: Vec<u8>) {
         let capacity = buffer.capacity();
@@ -85,6 +94,25 @@ pub(crate) struct DecodeRuntime<'a> {
     pub(super) dict_store: &'a mut DictionaryStore,
     #[cfg(feature = "zstd")]
     pub(super) zstd: &'a mut Option<zrip_decode::context::DecompressContext>,
+}
+
+impl<'a> StandardNodeContext<'a> {
+    pub(super) fn new(
+        format_version: u32,
+        limits: Limits,
+        dictionary_bundle_id: Option<&'a [u8]>,
+        runtime: &'a mut DecodeRuntime<'_>,
+    ) -> Self {
+        Self {
+            format_version,
+            limits,
+            scratch: &mut *runtime.scratch,
+            dictionary_bundle_id,
+            dict_store: &mut *runtime.dict_store,
+            #[cfg(feature = "zstd")]
+            zstd: &mut *runtime.zstd,
+        }
+    }
 }
 
 impl<'a> DecodeRuntime<'a> {

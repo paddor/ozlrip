@@ -1,5 +1,6 @@
 use alloc::{format, vec::Vec};
 
+use crate::parse::NodePlan;
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Result};
 use smallvec::SmallVec;
@@ -65,48 +66,12 @@ pub(super) fn build_chunk_execution_plan(
             return Err(Error::new(ErrorKind::Unsupported)
                 .with_detail("only zstd dictionary-backed transforms are implemented"));
         }
-        let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
-        })?;
-        let static_inputs = standard::standard_node(standard_id)
-            .ok_or_else(|| {
-                Error::new(ErrorKind::Unsupported)
-                    .with_detail("standard transform graph execution is not implemented yet")
-            })?
-            .shape
-            .static_inputs;
-        let input_count = static_inputs
-            .checked_add(variable_inputs)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let input_count = node_input_count(node, standard_id)?;
         let input_end = stream_cursor
             .checked_add(input_count)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let mut output_targets = SmallVec::<[usize; 2]>::new();
-        output_targets
-            .try_reserve_exact(node.regen_distances().len())
-            .map_err(|_| {
-                Error::new(ErrorKind::AllocationFailed)
-                    .with_detail("node output target allocation failed")
-            })?;
-        for &distance in node.regen_distances() {
-            let distance = usize::try_from(distance).map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded).with_detail("regen distance is too large")
-            })?;
-            let output_target = input_end
-                .checked_add(distance)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            let target = regen_targets.get_mut(output_target).ok_or_else(|| {
-                Error::new(ErrorKind::InvalidGraph).with_detail(format!(
-                    "regen stream distance is out of bounds: id={standard_id} input_end={input_end} distance={distance} target={output_target} streams={total_streams}"
-                ))
-            })?;
-            if *target {
-                return Err(Error::new(ErrorKind::InvalidGraph)
-                    .with_detail("duplicate regen stream distance"));
-            }
-            *target = true;
-            output_targets.push(output_target);
-        }
+        let output_targets =
+            resolve_output_targets(node, standard_id, input_end, &mut regen_targets)?;
         nodes.push(NodeExecutionPlan {
             standard_id,
             input_start: stream_cursor,
@@ -124,4 +89,60 @@ pub(super) fn build_chunk_execution_plan(
         nodes,
         regen_targets,
     })
+}
+
+/// Number of streams a node reads: its static inputs plus its variable
+/// ones.
+fn node_input_count(node: &NodePlan, standard_id: u32) -> Result<usize> {
+    let variable_inputs = usize::try_from(node.variable_outputs()).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("node input count is too large")
+    })?;
+    let static_inputs = standard::standard_node(standard_id)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported)
+                .with_detail("standard transform graph execution is not implemented yet")
+        })?
+        .shape
+        .static_inputs;
+    static_inputs
+        .checked_add(variable_inputs)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+}
+
+/// The stream slots a node's outputs fill, marked in `regen_targets`.
+fn resolve_output_targets(
+    node: &NodePlan,
+    standard_id: u32,
+    input_end: usize,
+    regen_targets: &mut [bool],
+) -> Result<SmallVec<[usize; 2]>> {
+    let total_streams = regen_targets.len();
+    let mut output_targets = SmallVec::<[usize; 2]>::new();
+    output_targets
+        .try_reserve_exact(node.regen_distances().len())
+        .map_err(|_| {
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("node output target allocation failed")
+        })?;
+    for &distance in node.regen_distances() {
+        let distance = usize::try_from(distance).map_err(|_| {
+            Error::new(ErrorKind::LimitExceeded).with_detail("regen distance is too large")
+        })?;
+        let output_target = input_end
+            .checked_add(distance)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let target = regen_targets.get_mut(output_target).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail(format!(
+                "regen stream distance is out of bounds: id={standard_id} input_end={input_end} distance={distance} target={output_target} streams={total_streams}"
+            ))
+        })?;
+        if *target {
+            return Err(
+                Error::new(ErrorKind::InvalidGraph).with_detail("duplicate regen stream distance")
+            );
+        }
+        *target = true;
+        output_targets.push(output_target);
+    }
+    Ok(output_targets)
 }

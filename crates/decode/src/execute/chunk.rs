@@ -73,15 +73,7 @@ pub(super) fn run_chunk<'a>(
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let mut live = LiveBytes::new(limits);
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
-    let mut ctx = StandardNodeContext {
-        format_version,
-        limits,
-        scratch: &mut *runtime.scratch,
-        dictionary_bundle_id,
-        dict_store: &mut *runtime.dict_store,
-        #[cfg(feature = "zstd")]
-        zstd: &mut *runtime.zstd,
-    };
+    let mut ctx = StandardNodeContext::new(format_version, limits, dictionary_bundle_id, runtime);
 
     for node in &plan.nodes {
         let header = node.header(transform_headers)?;
@@ -178,92 +170,112 @@ pub(super) fn decode_transform_chunk_appending(
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let mut live = LiveBytes::new(limits);
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
-    let mut ctx = StandardNodeContext {
-        format_version,
-        limits,
-        scratch: &mut *runtime.scratch,
-        dictionary_bundle_id,
-        dict_store: &mut *runtime.dict_store,
-        #[cfg(feature = "zstd")]
-        zstd: &mut *runtime.zstd,
-    };
+    let mut ctx = StandardNodeContext::new(format_version, limits, dictionary_bundle_id, runtime);
 
-    for (node_index, node) in plan.nodes.iter().enumerate() {
+    let prefix = &plan.nodes[..append_tail.start.min(plan.nodes.len())];
+    for node in prefix {
         let header = node.header(transform_headers)?;
-        if node_index == append_tail.start {
-            let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
-            let output_start = dst.len();
-            let element_width = match append_tail.kind {
-                DirectAppendKind::Lz => {
-                    decode_lz_node_to_output(&inputs, header, limits, dst, output_start)?;
-                    1
-                }
-                DirectAppendKind::FieldLz => {
-                    decode_field_lz_node_to_output(&inputs, header, limits, dst, output_start)?
-                }
-                DirectAppendKind::Zstd => {
-                    decode_zstd_chunk_to_output(
-                        single_input(&inputs)?,
-                        header,
-                        node.dict_index,
-                        &mut ctx,
-                        max_output,
-                        dst,
-                    )?;
-                    1
-                }
-                DirectAppendKind::DispatchStringToSerial => {
-                    decode_dispatch_string_node_to_serial_output(
-                        &inputs,
-                        node.variable_inputs,
-                        header,
-                        format_version,
-                        limits,
-                        dst,
-                    )?;
-                    1
-                }
-                DirectAppendKind::SplitByStructToSplitN => {
-                    append_split_by_struct_to_final_splitn(
-                        &streams,
-                        &inputs,
-                        node,
-                        &plan.nodes[node_index + 1..],
-                        transform_headers,
-                        limits,
-                        dst,
-                    )?;
-                    1
-                }
-            };
-            drop(inputs);
-            match append_tail.kind {
-                DirectAppendKind::Lz | DirectAppendKind::FieldLz | DirectAppendKind::Zstd => {
-                    validate_direct_append_tail(
-                        &plan.nodes[node_index + 1..],
-                        transform_headers,
-                        element_width,
-                        &dst[output_start..],
-                        limits,
-                    )?;
-                }
-                DirectAppendKind::DispatchStringToSerial => validate_string_to_serial_tail(
-                    &plan.nodes[node_index + 1..],
-                    transform_headers,
-                )?,
-                DirectAppendKind::SplitByStructToSplitN => {}
-            }
-            for slot in streams {
-                if let StreamSlot::Owned(stream) = slot {
-                    ctx.scratch.recycle_owned_stream(stream);
-                }
-            }
-            return Ok(dst.len() - output_start);
-        }
         execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
     }
+    let Some((node, after)) = plan
+        .nodes
+        .get(append_tail.start..)
+        .and_then(<[_]>::split_first)
+    else {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed")
+        );
+    };
+    let tail = AppendTail {
+        kind: append_tail.kind,
+        node,
+        header: node.header(transform_headers)?,
+        after,
+        transform_headers,
+    };
+    let output_start = dst.len();
+    let element_width = tail.decode(&streams, &mut ctx, max_output, dst)?;
+    tail.validate(element_width, &dst[output_start..], limits)?;
+    ctx.scratch.recycle_stream_slots(streams);
+    Ok(dst.len() - output_start)
+}
 
-    Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
+/// The node that appends to the caller's output, and the conversions after
+/// it.
+struct AppendTail<'a> {
+    kind: DirectAppendKind,
+    node: &'a NodeExecutionPlan,
+    header: &'a [u8],
+    after: &'a [NodeExecutionPlan],
+    transform_headers: &'a [u8],
+}
+
+impl AppendTail<'_> {
+    /// Decodes the tail node onto `dst` and returns its element width.
+    fn decode(
+        &self,
+        streams: &[StreamSlot<'_>],
+        ctx: &mut StandardNodeContext<'_>,
+        max_output: usize,
+        dst: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let (node, header, limits) = (self.node, self.header, ctx.limits);
+        let inputs = collect_node_inputs(streams, node.input_start, node.input_count)?;
+        let output_start = dst.len();
+        match self.kind {
+            DirectAppendKind::Lz => {
+                decode_lz_node_to_output(&inputs, header, limits, dst, output_start)?;
+            }
+            DirectAppendKind::FieldLz => {
+                return decode_field_lz_node_to_output(&inputs, header, limits, dst, output_start);
+            }
+            DirectAppendKind::Zstd => {
+                let input = single_input(&inputs)?;
+                decode_zstd_chunk_to_output(input, header, node.dict_index, ctx, max_output, dst)?;
+            }
+            DirectAppendKind::DispatchStringToSerial => {
+                decode_dispatch_string_node_to_serial_output(
+                    &inputs,
+                    node.variable_inputs,
+                    header,
+                    ctx.format_version,
+                    limits,
+                    dst,
+                )?;
+            }
+            DirectAppendKind::SplitByStructToSplitN => {
+                append_split_by_struct_to_final_splitn(
+                    streams,
+                    &inputs,
+                    node,
+                    self.after,
+                    self.transform_headers,
+                    limits,
+                    dst,
+                )?;
+            }
+        }
+        Ok(1)
+    }
+
+    /// Checks the nodes after the tail against what the tail appended.
+    fn validate(&self, element_width: usize, appended: &[u8], limits: Limits) -> Result<()> {
+        match self.kind {
+            DirectAppendKind::Lz | DirectAppendKind::FieldLz | DirectAppendKind::Zstd => {
+                validate_direct_append_tail(
+                    self.after,
+                    self.transform_headers,
+                    element_width,
+                    appended,
+                    limits,
+                )
+            }
+            DirectAppendKind::DispatchStringToSerial => {
+                validate_string_to_serial_tail(self.after, self.transform_headers)
+            }
+            DirectAppendKind::SplitByStructToSplitN => Ok(()),
+        }
+    }
 }
 
 fn try_execute_single_input_splitn_node(
