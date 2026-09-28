@@ -4,6 +4,8 @@ use super::*;
 use super::{layout_nodes::*, streams::*, string_nodes::*};
 use crate::parse::parse_frame_plan;
 use alloc::{format, vec};
+use ozlrip_test_support::standard_transform_serial_frame;
+#[cfg(feature = "zstd")]
 use ozlrip_test_support::{Chunk, FrameBuilder, Node};
 use ozlrip_test_support::{bits_needed, magic, push_bitpacked_u32, push_var_u64};
 
@@ -38,23 +40,6 @@ fn lz4_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
     input.extend_from_slice(stored);
     input.push(0);
     input
-}
-
-fn standard_transform_serial_frame(
-    version: u32,
-    transform_id: u8,
-    stored: &[u8],
-    decoded_len: usize,
-    transform_header: &[u8],
-) -> Vec<u8> {
-    FrameBuilder::new(version)
-        .serial_output(decoded_len)
-        .chunk(
-            Chunk::new()
-                .node(Node::new(u32::from(transform_id)).header(transform_header))
-                .stored_stream(stored),
-        )
-        .build()
 }
 
 struct StandardGraphNode<'a> {
@@ -4641,7 +4626,7 @@ fn decodes_v14_fse_deprecated_raw_frame() {
     let payload = legacy_entropy_raw_payload(expected, 1);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        standard::FSE_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[],
@@ -4661,7 +4646,7 @@ fn decodes_v14_fse_deprecated_bit_frame() {
     let payload = legacy_entropy_bit_payload(&[0, 1, 2, 3, 4, 5], 3);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        standard::FSE_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[],
@@ -4684,7 +4669,7 @@ fn decodes_v14_fse_deprecated_fse_frame() {
     let payload = legacy_entropy_fse_payload(&expected, 4);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        standard::FSE_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[4],
@@ -4703,7 +4688,7 @@ fn rejects_fse_deprecated_invalid_state_count_without_mutating_destination() {
     let payload = legacy_entropy_raw_payload(b"state", 1);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::FSE_DEPRECATED_ID).unwrap(),
+        standard::FSE_DEPRECATED_ID,
         &payload,
         5,
         &[3],
@@ -4723,7 +4708,7 @@ fn decodes_v14_huffman_deprecated_constant_frame() {
     let payload = legacy_entropy_constant_payload(b"Z", expected.len());
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[],
@@ -4747,7 +4732,7 @@ fn decodes_v14_huffman_deprecated_multi_frame() {
     ]);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[],
@@ -4807,7 +4792,7 @@ fn decodes_v14_huffman_fixed_deprecated_raw_frame() {
     let payload = legacy_entropy_raw_payload(&expected, 2);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_FIXED_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_FIXED_DEPRECATED_ID,
         &payload,
         expected.len(),
         &[0, 2],
@@ -4825,7 +4810,7 @@ fn decodes_v14_huffman_fixed_deprecated_raw_frame() {
 fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_DEPRECATED_ID,
         &[0],
         2,
         &[],
@@ -4844,7 +4829,7 @@ fn rejects_deprecated_entropy_full_width_bit_mode_without_mutating_destination()
     let payload = legacy_entropy_bit_payload(&[0], 8);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_DEPRECATED_ID,
         &payload,
         1,
         &[],
@@ -4863,7 +4848,7 @@ fn rejects_deprecated_entropy_empty_multi_block_without_mutating_destination() {
     let payload = legacy_entropy_multi_payload(&[legacy_entropy_raw_payload(&[], 1)]);
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
-        u8::try_from(standard::HUFFMAN_DEPRECATED_ID).unwrap(),
+        standard::HUFFMAN_DEPRECATED_ID,
         &payload,
         0,
         &[],
@@ -4899,7 +4884,7 @@ fn decodes_v12_empty_fastlz_deprecated_frame() {
     let stored = empty_fastlz_deprecated_stream();
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         0,
         &[],
@@ -4919,7 +4904,7 @@ fn decodes_v12_fastlz_deprecated_raw_literals_frame() {
     let stored = fastlz_deprecated_literal_only_stream(expected);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -4940,7 +4925,7 @@ fn decodes_v12_fastlz_deprecated_constant_literals_frame() {
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -4962,7 +4947,7 @@ fn decodes_v12_fastlz_deprecated_bit_literals_frame() {
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -4986,7 +4971,7 @@ fn decodes_v12_fastlz_deprecated_fse_literals_frame() {
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5010,7 +4995,7 @@ fn decodes_v12_fastlz_deprecated_multi_literals_frame() {
     let stored = fastlz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5037,7 +5022,7 @@ fn decodes_v12_fastlz_deprecated_raw_sequence_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         33,
         &[],
@@ -5063,7 +5048,7 @@ fn decodes_v12_fastlz_deprecated_bit_token_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         33,
         &[],
@@ -5099,7 +5084,7 @@ fn decodes_v12_empty_rolz_deprecated_frame() {
     let stored = empty_rolz_deprecated_stream();
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         0,
         &[],
@@ -5119,7 +5104,7 @@ fn decodes_v12_rolz_deprecated_raw_literals_frame() {
     let stored = rolz_deprecated_literal_only_stream(expected);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5140,7 +5125,7 @@ fn decodes_v12_rolz_deprecated_constant_literals_frame() {
     let stored = rolz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5164,7 +5149,7 @@ fn decodes_v12_rolz_deprecated_fse_literals_frame() {
     let stored = rolz_deprecated_literal_entropy_stream(expected.len(), &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5198,7 +5183,7 @@ fn decodes_v12_rolz_deprecated_o1_literals_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         expected.len(),
         &[],
@@ -5231,7 +5216,7 @@ fn decodes_v12_rolz_deprecated_o1_rep0_sequence_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         7,
         &[],
@@ -5256,7 +5241,7 @@ fn rejects_rolz_deprecated_o1_unknown_context_without_mutating_destination() {
         rolz_deprecated_stream_with_literal_order(3, 3, 1, &literal_payload, &[], &[], &[], &[]);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         3,
         &[],
@@ -5284,7 +5269,7 @@ fn decodes_v12_rolz_deprecated_raw_lz_sequence_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         41,
         &[],
@@ -5314,7 +5299,7 @@ fn decodes_v12_rolz_deprecated_bit_match_type_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         41,
         &[],
@@ -5346,7 +5331,7 @@ fn decodes_v12_rolz_deprecated_multi_match_type_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         41,
         &[],
@@ -5374,7 +5359,7 @@ fn decodes_v12_rolz_deprecated_rep0_sequence_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         7,
         &[],
@@ -5402,7 +5387,7 @@ fn rolz_deprecated_rep0_frame(delta: usize) -> Vec<u8> {
     );
     standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         7,
         &[],
@@ -5516,7 +5501,7 @@ fn rejects_rolz_deprecated_zero_rep_offset_without_mutating_destination() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         7,
         &[],
@@ -5543,7 +5528,7 @@ fn decodes_v12_rolz_deprecated_rolz_sequence_frame() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::ROLZ_DEPRECATED_ID).unwrap(),
+        standard::ROLZ_DEPRECATED_ID,
         &stored,
         8,
         &[],
@@ -5569,7 +5554,7 @@ fn rejects_fastlz_deprecated_short_offset_without_mutating_destination() {
     );
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         33,
         &[],
@@ -5589,7 +5574,7 @@ fn rejects_fastlz_deprecated_full_width_bit_literals_without_mutating_destinatio
     let stored = fastlz_deprecated_literal_entropy_stream(1, &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         1,
         &[],
@@ -5609,7 +5594,7 @@ fn rejects_fastlz_deprecated_empty_multi_block_without_mutating_destination() {
     let stored = fastlz_deprecated_literal_entropy_stream(0, &literal_entropy);
     let input = standard_transform_serial_frame(
         LEGACY_LZ_LAST_VERSION,
-        u8::try_from(standard::FASTLZ_DEPRECATED_ID).unwrap(),
+        standard::FASTLZ_DEPRECATED_ID,
         &stored,
         0,
         &[],

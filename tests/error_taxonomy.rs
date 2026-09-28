@@ -1,5 +1,7 @@
 use ozlrip::{ErrorKind, Limits, Options};
-use ozlrip_test_support::{magic, push_bitpacked_u32, push_var_u64};
+use ozlrip_test_support::{
+    magic, push_bitpacked_u32, push_var_u64, standard_transform_serial_frame,
+};
 
 const MANIFEST: &str = include_str!("fixtures/error-taxonomy.tsv");
 const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
@@ -43,47 +45,6 @@ fn custom_transform_frame() -> Vec<u8> {
     input.push(1);
     input.push(1);
     input
-}
-
-fn standard_transform_serial_frame(
-    version: u32,
-    transform_id: u8,
-    stored: &[u8],
-    decoded_len: usize,
-    transform_header: &[u8],
-) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&magic(version));
-    input.push(0);
-    input.push(1);
-    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
-    append_standard_transform_chunk(&mut input, transform_id, stored, transform_header);
-    input.push(0);
-    input
-}
-
-fn append_standard_transform_chunk(
-    input: &mut Vec<u8>,
-    transform_id: u8,
-    stored: &[u8],
-    transform_header: &[u8],
-) {
-    input.push(2);
-    input.push(1);
-    input.push(0);
-    input.push(transform_id);
-    if transform_header.is_empty() {
-        input.push(0);
-    } else {
-        input.push(1);
-        push_var_u64(input, u64::try_from(transform_header.len() - 1).unwrap());
-    }
-    input.push(0);
-    input.push(0);
-    input.push(0);
-    push_var_u64(input, u64::try_from(stored.len()).unwrap());
-    input.extend_from_slice(transform_header);
-    input.extend_from_slice(stored);
 }
 
 fn dictionary_bundle(codec_id: u32, custom: bool) -> Vec<u8> {
@@ -402,13 +363,7 @@ fn error_case(name: &str) -> ErrorCase {
             let mut header = Vec::new();
             push_var_u64(&mut header, u64::try_from(decoded_len).unwrap());
             decode_case(
-                standard_transform_serial_frame(
-                    23,
-                    u8::try_from(LZ4_ID).unwrap(),
-                    &[0, 0, 0],
-                    decoded_len,
-                    &header,
-                ),
+                standard_transform_serial_frame(23, LZ4_ID, &[0, 0, 0], decoded_len, &header),
                 Options::default(),
             )
         }

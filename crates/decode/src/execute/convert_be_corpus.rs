@@ -4,7 +4,7 @@ use super::{
 use crate::parse::parse_frame_plan;
 use alloc::vec::Vec;
 use ozlrip_core::{ErrorKind, Limits};
-use ozlrip_test_support::{magic, push_var_u64};
+use ozlrip_test_support::standard_transform_serial_frame;
 
 fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
     StreamInput {
@@ -12,40 +12,6 @@ fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
         element_width,
         string_lengths: None,
     }
-}
-
-fn standard_transform_serial_frame(
-    transform_id: u8,
-    stored: &[u8],
-    decoded_len: usize,
-    transform_header: &[u8],
-) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&magic(21));
-    input.push(0);
-    input.push(1);
-    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
-    input.push(2);
-    input.push(1);
-    input.push(0);
-    input.push(transform_id);
-    if transform_header.is_empty() {
-        input.push(0);
-    } else {
-        input.push(1);
-        push_var_u64(
-            &mut input,
-            u64::try_from(transform_header.len() - 1).unwrap(),
-        );
-    }
-    input.push(0);
-    input.push(0);
-    input.push(0);
-    push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
-    input.extend_from_slice(transform_header);
-    input.extend_from_slice(stored);
-    input.push(0);
-    input
 }
 
 #[test]
@@ -86,7 +52,7 @@ fn convert_serial_to_num_be_uses_header_width() {
 
 #[test]
 fn convert_serial_to_num_be_decodes_v21_frame() {
-    let input = standard_transform_serial_frame(14, &[0x12, 0x34, 0x56, 0x78], 4, &[2]);
+    let input = standard_transform_serial_frame(21, 14, &[0x12, 0x34, 0x56, 0x78], 4, &[2]);
     let plan = parse_frame_plan(&input, Limits::default()).unwrap();
     let mut output = Vec::new();
 

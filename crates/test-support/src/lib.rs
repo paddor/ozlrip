@@ -525,6 +525,25 @@ pub fn zstd_fat_bundle(bundle_id: [u8; 32], dict_id: [u8; 32], raw_dict: &[u8]) 
     bundle
 }
 
+/// A single-chunk frame with one standard transform, with `header`, over
+/// one stored stream, declaring `decoded_len` serial output bytes.
+pub fn standard_transform_serial_frame(
+    version: u32,
+    transform_id: u32,
+    stored: &[u8],
+    decoded_len: usize,
+    header: &[u8],
+) -> Vec<u8> {
+    FrameBuilder::new(version)
+        .serial_output(decoded_len)
+        .chunk(
+            Chunk::new()
+                .node(Node::new(transform_id).header(header))
+                .stored_stream(stored),
+        )
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
