@@ -1,12 +1,12 @@
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-#[cfg(feature = "checksum")]
-use super::chunk::verify_compressed_checksum;
-use super::chunk::{read_count, read_transform_count, standard_transform_id_bits};
-#[cfg(feature = "checksum")]
-use super::header::verify_header_checksum;
-use super::header::{FrameFlags, format_version_from_magic, runtime_input_limit};
+use super::chunk::{
+    read_count, read_transform_count, standard_transform_id_bits, verify_compressed_checksum,
+};
+use super::header::{
+    FrameFlags, format_version_from_magic, runtime_input_limit, verify_header_checksum,
+};
 use super::reader::{
     Reader, bits_needed, check_format_limit, check_limit, read_single_low_bits_u32,
 };
@@ -15,6 +15,7 @@ use super::{ByteRange, CHUNK_VERSION_MIN};
 pub(crate) fn parse_single_zstd_frame(
     input: &[u8],
     limits: Limits,
+    verify_compressed: bool,
 ) -> Result<Option<SingleZstdFrame>> {
     check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
 
@@ -60,10 +61,9 @@ pub(crate) fn parse_single_zstd_frame(
     if flags.has_encoded_checksum() {
         let checksum_offset = reader.offset();
         let expected = reader.read_byte()?;
-        #[cfg(not(feature = "checksum"))]
-        let _ = (checksum_offset, expected);
-        #[cfg(feature = "checksum")]
-        verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
+        if verify_compressed {
+            verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
+        }
     }
 
     if reader.peek_byte()? == 0 {
@@ -131,10 +131,14 @@ pub(crate) fn parse_single_zstd_frame(
     if flags.has_encoded_checksum() {
         let checksum_offset = reader.offset();
         let encoded_checksum = Some(reader.read_u32_le()?);
-        #[cfg(not(feature = "checksum"))]
-        let _ = (chunk_start, checksum_offset, encoded_checksum);
-        #[cfg(feature = "checksum")]
-        verify_compressed_checksum(reader.bytes, chunk_start, checksum_offset, encoded_checksum)?;
+        if verify_compressed {
+            verify_compressed_checksum(
+                reader.bytes,
+                chunk_start,
+                checksum_offset,
+                encoded_checksum,
+            )?;
+        }
     }
     if reader.read_byte()? != 0 || !reader.is_empty() {
         return Ok(None);

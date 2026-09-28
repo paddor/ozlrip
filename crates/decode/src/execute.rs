@@ -70,7 +70,6 @@ use numeric_nodes::{
     decode_delta_node, decode_divide_by_node, decode_range_pack_serial8_chunk,
     decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
 };
-#[cfg(feature = "checksum")]
 use output::verify_decoded_checksum;
 use output::{DecodedChunk, OutputBudget};
 use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
@@ -110,14 +109,17 @@ pub(crate) fn decode_plan(
         #[cfg(feature = "zstd")]
         &mut zstd,
     );
-    decode_plan_with_context(input, plan, dst, limits, &mut runtime)
+    decode_plan_with_context(input, plan, dst, limits, true, &mut runtime)
 }
 
+/// Decodes a parsed frame into `dst`. `verify_content` checks each chunk's
+/// decoded content checksum.
 pub(crate) fn decode_plan_with_context(
     input: &[u8],
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    verify_content: bool,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     if let Some(written) = try_decode_single_zstd_into_dst(
@@ -125,6 +127,7 @@ pub(crate) fn decode_plan_with_context(
         plan,
         dst,
         limits,
+        verify_content,
         #[cfg(feature = "zstd")]
         runtime.zstd,
     )? {
@@ -135,7 +138,7 @@ pub(crate) fn decode_plan_with_context(
             .with_detail("only single serial stored-output frames are implemented"));
     }
     let start_len = dst.len();
-    let result = decode_serial_chunks(input, plan, dst, limits, runtime);
+    let result = decode_serial_chunks(input, plan, dst, limits, verify_content, runtime);
     if result.is_err() {
         dst.truncate(start_len);
     }
@@ -150,6 +153,7 @@ fn decode_serial_chunks(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    verify_content: bool,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<usize> {
     let start_len = dst.len();
@@ -200,10 +204,9 @@ fn decode_serial_chunks(
         // Charge the chunk before checking it, so an overrun is reported as
         // such instead of as a later chunk's checksum failure.
         budget.consume(decoded.len())?;
-        #[cfg(not(feature = "checksum"))]
-        let _ = chunk.decoded_checksum;
-        #[cfg(feature = "checksum")]
-        verify_decoded_checksum(decoded, chunk.decoded_checksum)?;
+        if verify_content {
+            verify_decoded_checksum(decoded, chunk.decoded_checksum)?;
+        }
     }
     budget.finish()?;
     Ok(dst.len() - start_len)

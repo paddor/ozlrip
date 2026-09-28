@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Add `Options::verify_content_checksum` and
+  `Options::verify_compressed_checksum`, upstream's two checksum decode
+  parameters. Both default to `true`. The compressed option also covers the
+  one-byte frame header checksum.
+- Breaking: remove the `checksum` feature. Checksum verification is always
+  compiled, and the options above turn it off at run time.
 - A node whose header or input stream ends early returns `Malformed`.
   Some deprecated entropy and LZ nodes, `pivco_huffman`, and varints inside
   node headers returned `Truncated`, which now only means the frame bytes

@@ -19,7 +19,6 @@ fn stored_chunks_with_checksums_decode() {
     assert_eq!(ozlrip::decode(&frame).unwrap(), b"abcdef");
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn corrupted_content_checksum_is_rejected() {
     let mut frame = FrameBuilder::new(21)

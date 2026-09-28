@@ -64,7 +64,6 @@ fn unreservable_declared_size_is_an_allocation_failure() {
 
 /// A chunk that overruns the declared size fails right away, not after later
 /// chunks have been decoded and checked.
-#[cfg(feature = "checksum")]
 #[test]
 fn stored_chunk_overrunning_declared_size_fails_before_later_chunks() {
     let frame = FrameBuilder::new(21)
@@ -100,7 +99,7 @@ fn zstd_chunk(decoded: &[u8]) -> Chunk {
 
 /// A zstd chunk that decodes directly into the caller's buffer may not write
 /// past the declared size.
-#[cfg(all(feature = "zstd", feature = "checksum"))]
+#[cfg(feature = "zstd")]
 #[test]
 fn zstd_chunk_overrunning_declared_size_fails_before_later_chunks() {
     let payload = b"zstd payload that is longer than declared ".repeat(100);

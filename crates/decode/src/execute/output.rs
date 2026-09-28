@@ -138,7 +138,6 @@ pub(super) fn size_mismatch() -> Error {
     Error::new(ErrorKind::Malformed).with_detail("stored output size does not match frame header")
 }
 
-#[cfg(feature = "checksum")]
 pub(super) fn verify_decoded_checksum(output: &[u8], expected: Option<u32>) -> Result<()> {
     if let Some(expected) = expected {
         let actual = (xxhash_rust::xxh3::xxh3_64(output) & 0xffff_ffff) as u32;

@@ -559,7 +559,7 @@ fn read_upstream_sample(relative_path: &str) -> Vec<u8> {
 }
 
 fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {
-    let mut decoder = ozlrip::Decoder::with_options(ozlrip::Options::from(bench_limits()));
+    let mut decoder = ozlrip::Decoder::with_options(bench_options());
     let mut dst = Vec::new();
     let stats = bench_loop(target, || {
         dst.clear();
@@ -573,16 +573,19 @@ fn bench_ozlrip(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResul
 
 fn decode_ozlrip_with_bench_limits(frame: &[u8]) -> Result<Vec<u8>, ozlrip::Error> {
     let mut output = Vec::new();
-    ozlrip::decode_into_with_options(frame, &mut output, ozlrip::Options::from(bench_limits()))?;
+    ozlrip::decode_into_with_options(frame, &mut output, bench_options())?;
     Ok(output)
 }
 
-fn bench_limits() -> ozlrip::Limits {
-    {
-        let mut limits = ozlrip::Limits::strict();
-        limits.max_expansion_ratio = 1_000_000;
-        limits
+fn bench_options() -> ozlrip::Options {
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_expansion_ratio = 1_000_000;
+    let mut options = ozlrip::Options::from(limits);
+    if cfg!(feature = "no-checksum") {
+        options.verify_content_checksum = false;
+        options.verify_compressed_checksum = false;
     }
+    options
 }
 
 fn bench_reference_decoder(case: &BenchCase, target: Duration, zli_rev: &str) -> BenchResult {

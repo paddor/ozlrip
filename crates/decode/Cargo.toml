@@ -25,7 +25,6 @@ std = [
 alloc = ["ozlrip-core/alloc"]
 zstd = ["alloc", "dep:zrip-decode"]
 lz4 = ["alloc", "dep:lz4rip-decode"]
-checksum = ["dep:xxhash-rust"]
 paranoid = [
   "ozlrip-core/paranoid",
   "zrip-core/paranoid",
@@ -40,7 +39,7 @@ zrip-core = { version = "0.11.0", default-features = false, features = ["alloc"]
 zrip-decode = { version = "0.8.10", default-features = false, features = ["alloc"], optional = true }
 lz4rip-decode = { version = "0.10.4", default-features = false, optional = true }
 smallvec = { version = "1.15", default-features = false, features = ["const_generics"] }
-xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"], optional = true }
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 
 [dev-dependencies]
 ozlrip-test-support = { path = "../test-support" }

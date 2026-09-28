@@ -53,8 +53,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-none
-      - run: cargo build --no-default-features --features alloc,zstd,lz4,checksum --target x86_64-unknown-none
-      - run: cargo build --no-default-features --features alloc,zstd,lz4,checksum,paranoid --target x86_64-unknown-none
+      - run: cargo build --no-default-features --features alloc,zstd,lz4 --target x86_64-unknown-none
+      - run: cargo build --no-default-features --features alloc,zstd,lz4,paranoid --target x86_64-unknown-none
 
   i686:
     runs-on: ubuntu-latest

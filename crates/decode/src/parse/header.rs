@@ -301,7 +301,6 @@ pub(super) fn read_comment(reader: &mut Reader<'_>) -> Result<Vec<u8>> {
     Ok(reader.read_slice(len)?.to_vec())
 }
 
-#[cfg(feature = "checksum")]
 pub(super) fn verify_header_checksum(bytes: &[u8], expected: u8, offset: usize) -> Result<()> {
     let actual = (xxhash_rust::xxh3::xxh3_64(bytes) & 0xff) as u8;
     if actual != expected {

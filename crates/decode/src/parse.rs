@@ -16,7 +16,6 @@ mod validate;
 use chunk::read_chunks;
 #[cfg(feature = "zstd")]
 pub(crate) use fast_zstd::{SingleZstdFrame, parse_single_zstd_frame};
-#[cfg(feature = "checksum")]
 use header::verify_header_checksum;
 use header::{
     FrameFlags, format_version_from_magic, read_bundle_id, read_comment, read_output_header,
@@ -41,11 +40,29 @@ const COMMENT_VERSION_MIN: u32 = 22;
 const MATERIALIZED_DICT_VERSION_MIN: u32 = 25;
 const MAX_HEADER_COMMENT_BYTES: u64 = 10_000;
 
-pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
-    Ok(parse_frame_plan(input, limits)?.info.into_public_info())
+pub(crate) fn inspect_frame(
+    input: &[u8],
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<FrameInfo> {
+    Ok(parse_frame(input, limits, verify_compressed)?
+        .info
+        .into_public_info())
 }
 
+/// `parse_frame` with checksum verification, for tests.
+#[cfg(test)]
 pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan> {
+    parse_frame(input, limits, true)
+}
+
+/// Parses and validates a frame. `verify_compressed` checks the header
+/// checksum and each chunk's compressed checksum.
+pub(crate) fn parse_frame(
+    input: &[u8],
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<FramePlan> {
     check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
 
     let mut reader = Reader::new(input);
@@ -80,10 +97,9 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
     if format_version >= CHUNK_VERSION_MIN && flags.has_encoded_checksum() {
         let checksum_offset = reader.offset();
         let expected = reader.read_byte()?;
-        #[cfg(not(feature = "checksum"))]
-        let _ = (checksum_offset, expected);
-        #[cfg(feature = "checksum")]
-        verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
+        if verify_compressed {
+            verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
+        }
     }
 
     let header_bytes = reader.offset();
@@ -93,6 +109,7 @@ pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan
         flags,
         dictionary_bundle_id.is_some(),
         limits,
+        verify_compressed,
     )?;
     if !reader.is_empty() {
         return Err(Error::at(ErrorKind::Malformed, reader.offset())

@@ -25,12 +25,11 @@ include = [
 ]
 
 [features]
-default = ["std", "alloc", "zstd", "lz4", "checksum"]
+default = ["std", "alloc", "zstd", "lz4"]
 std = ["alloc", "ozlrip-core/std", "ozlrip-decode/std"]
 alloc = ["ozlrip-core/alloc", "ozlrip-decode/alloc"]
 zstd = ["ozlrip-decode/zstd"]
 lz4 = ["ozlrip-decode/lz4"]
-checksum = ["ozlrip-decode/checksum"]
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
 
 [dependencies]

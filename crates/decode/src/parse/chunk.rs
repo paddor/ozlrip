@@ -23,6 +23,7 @@ pub(super) fn read_chunks(
     mut flags: FrameFlags,
     has_bundle_id: bool,
     limits: Limits,
+    verify_compressed: bool,
 ) -> Result<ChunkScan> {
     let mut summary = ChunkSummary::default();
     let mut chunks = ChunkPlans::new();
@@ -87,15 +88,14 @@ pub(super) fn read_chunks(
             } else {
                 0
             };
-            #[cfg(not(feature = "checksum"))]
-            let _ = (checksum_start, checksum_offset);
-            #[cfg(feature = "checksum")]
-            verify_compressed_checksum(
-                reader.bytes,
-                checksum_start,
-                checksum_offset,
-                chunk.encoded_checksum,
-            )?;
+            if verify_compressed {
+                verify_compressed_checksum(
+                    reader.bytes,
+                    checksum_start,
+                    checksum_offset,
+                    chunk.encoded_checksum,
+                )?;
+            }
         }
         chunks.push(chunk);
     }
@@ -640,7 +640,6 @@ pub(super) fn runtime_stream_limit(format_version: u32) -> usize {
     }
 }
 
-#[cfg(feature = "checksum")]
 pub(super) fn verify_compressed_checksum(
     input: &[u8],
     start: usize,

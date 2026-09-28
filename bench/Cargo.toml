@@ -9,7 +9,7 @@ build = "build.rs"
 
 [features]
 default = ["ozlrip/default"]
-no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
+no-checksum = ["ozlrip/default"]
 paranoid = ["ozlrip/default", "ozlrip/paranoid"]
 
 [dependencies]

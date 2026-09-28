@@ -28,7 +28,6 @@ fn decodes_and_reports_pre_v21_checksums() {
     }
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn rejects_corrupted_pre_v21_checksums() {
     for version in LEGACY_VERSIONS {

@@ -191,7 +191,6 @@ fn parse_error_kind(value: &str) -> ErrorKind {
 fn feature_enabled(value: &str) -> bool {
     match value {
         "none" => true,
-        "checksum" => cfg!(feature = "checksum"),
         "lz4" => cfg!(feature = "lz4"),
         _ => panic!("bad error taxonomy feature: {value}"),
     }
@@ -580,22 +579,11 @@ fn bad_decoded_checksum_frame() -> Vec<u8> {
 }
 
 fn push_header_checksum(input: &mut Vec<u8>) {
-    #[cfg(feature = "checksum")]
     input.push((xxhash_rust::xxh3::xxh3_64(input) & 0xff) as u8);
-    #[cfg(not(feature = "checksum"))]
-    input.push(0);
 }
 
 fn compressed_checksum(bytes: &[u8]) -> u32 {
-    #[cfg(feature = "checksum")]
-    {
-        (xxhash_rust::xxh3::xxh3_64(bytes) & 0xffff_ffff) as u32
-    }
-    #[cfg(not(feature = "checksum"))]
-    {
-        let _ = bytes;
-        0
-    }
+    (xxhash_rust::xxh3::xxh3_64(bytes) & 0xffff_ffff) as u32
 }
 
 /// A v20 frame, whose checksum flags live in the chunk header.

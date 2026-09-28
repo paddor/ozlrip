@@ -12,7 +12,7 @@ use crate::{parse::SingleZstdFrame, standard};
 use super::StandardNodeContext;
 #[cfg(feature = "zstd")]
 use super::output::{OutputBudget, size_mismatch};
-#[cfg(feature = "checksum")]
+#[cfg(feature = "zstd")]
 use super::verify_decoded_checksum;
 #[cfg(feature = "zstd")]
 use super::{DecodeScratch, read_var_u64};
@@ -31,6 +31,7 @@ pub(crate) fn decode_single_zstd_frame_with_context(
     frame: SingleZstdFrame,
     dst: &mut Vec<u8>,
     limits: Limits,
+    verify_content: bool,
     zstd: &mut zrip_decode::context::DecompressContext,
 ) -> Result<usize> {
     let stored = frame.stored.as_slice(input)?;
@@ -60,13 +61,12 @@ pub(crate) fn decode_single_zstd_frame_with_context(
         dst.truncate(start);
         return Err(err);
     }
-    #[cfg(feature = "checksum")]
-    if let Err(err) = verify_decoded_checksum(&dst[start..], frame.decoded_checksum) {
+    if verify_content
+        && let Err(err) = verify_decoded_checksum(&dst[start..], frame.decoded_checksum)
+    {
         dst.truncate(start);
         return Err(err);
     }
-    #[cfg(not(feature = "checksum"))]
-    let _ = frame.decoded_checksum;
     Ok(written)
 }
 
@@ -76,6 +76,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     plan: &FramePlan,
     dst: &mut Vec<u8>,
     limits: Limits,
+    verify_content: bool,
     zstd: &mut Option<zrip_decode::context::DecompressContext>,
 ) -> Result<Option<usize>> {
     if plan.info.output_types.as_slice() != [FrameValueType::Serial] || plan.chunks.len() != 1 {
@@ -124,13 +125,12 @@ pub(super) fn try_decode_single_zstd_into_dst(
         dst.truncate(start);
         return Err(err);
     }
-    #[cfg(feature = "checksum")]
-    if let Err(err) = verify_decoded_checksum(&dst[start..], chunk.decoded_checksum) {
+    if verify_content
+        && let Err(err) = verify_decoded_checksum(&dst[start..], chunk.decoded_checksum)
+    {
         dst.truncate(start);
         return Err(err);
     }
-    #[cfg(not(feature = "checksum"))]
-    let _ = chunk.decoded_checksum;
     Ok(Some(written))
 }
 
@@ -144,6 +144,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     _plan: &FramePlan,
     _dst: &mut Vec<u8>,
     _limits: Limits,
+    _verify_content: bool,
 ) -> Result<Option<usize>> {
     Ok(None)
 }

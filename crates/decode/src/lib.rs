@@ -21,17 +21,35 @@ use dict::DictionaryStore;
 ///
 /// Start from [`Options::default`] (or `Options::from(limits)`) and change
 /// fields as needed. New options may be added in minor releases.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Options {
     /// Defensive parser, graph, allocation, and expansion limits.
     pub limits: Limits,
+    /// Verify each chunk's checksum of its decoded content, when the frame
+    /// carries one. Upstream's `ZL_DParam_checkContentChecksum`.
+    pub verify_content_checksum: bool,
+    /// Verify the frame header checksum and each chunk's checksum of its
+    /// compressed bytes, when the frame carries them. Upstream's
+    /// `ZL_DParam_checkCompressedChecksum`.
+    pub verify_compressed_checksum: bool,
+}
+
+impl Default for Options {
+    /// [`Limits::default`], with both checksums verified.
+    fn default() -> Self {
+        Self::from(Limits::default())
+    }
 }
 
 impl From<Limits> for Options {
     /// Default options with the given limits.
     fn from(limits: Limits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            verify_content_checksum: true,
+            verify_compressed_checksum: true,
+        }
     }
 }
 
@@ -100,24 +118,37 @@ impl Decoder {
     /// Returns the number of bytes appended. On error, `dst` is restored to its
     /// original length.
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
+        let options = self.options;
         #[cfg(feature = "zstd")]
-        if let Some(frame) = parse::parse_single_zstd_frame(input, self.options.limits)? {
+        if let Some(frame) = parse::parse_single_zstd_frame(
+            input,
+            options.limits,
+            options.verify_compressed_checksum,
+        )? {
             return execute::decode_single_zstd_frame_with_context(
                 input,
                 frame,
                 dst,
-                self.options.limits,
+                options.limits,
+                options.verify_content_checksum,
                 execute::zstd_context(&mut self.zstd),
             );
         }
-        let plan = parse::parse_frame_plan(input, self.options.limits)?;
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
         let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
             &mut self.dict_store,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         );
-        execute::decode_plan_with_context(input, &plan, dst, self.options.limits, &mut runtime)
+        execute::decode_plan_with_context(
+            input,
+            &plan,
+            dst,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+        )
     }
 
     /// Decodes one OpenZL frame into a new `Vec`.
@@ -129,7 +160,11 @@ impl Decoder {
 
     /// Parses and validates frame metadata without executing decode nodes.
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {
-        parse::inspect_frame(input, self.options.limits)
+        parse::inspect_frame(
+            input,
+            self.options.limits,
+            self.options.verify_compressed_checksum,
+        )
     }
 }
 
@@ -186,7 +221,7 @@ pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
 
 /// Parses and validates frame metadata using explicit options.
 pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo> {
-    parse::inspect_frame(input, options.limits)
+    parse::inspect_frame(input, options.limits, options.verify_compressed_checksum)
 }
 
 #[cfg(all(test, feature = "zstd"))]

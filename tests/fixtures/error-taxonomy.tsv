@@ -31,11 +31,11 @@ invalid-graph-node-input	invalid_graph	inspect	InvalidGraph	none
 generated-duplicate-regen-distance	invalid_graph	inspect	InvalidGraph	none
 invalid-output-type	invalid_type	inspect	InvalidType	none
 stored-stream-size-overflow	overflow	inspect	IntegerOverflow	none
-bad-header-checksum	checksum	inspect	ChecksumMismatch	checksum
-bad-encoded-checksum	checksum	inspect	ChecksumMismatch	checksum
-bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
-legacy-bad-encoded-checksum	checksum	inspect	ChecksumMismatch	checksum
-legacy-bad-decoded-checksum	checksum	decode	ChecksumMismatch	checksum
+bad-header-checksum	checksum	inspect	ChecksumMismatch	none
+bad-encoded-checksum	checksum	inspect	ChecksumMismatch	none
+bad-decoded-checksum	checksum	decode	ChecksumMismatch	none
+legacy-bad-encoded-checksum	checksum	inspect	ChecksumMismatch	none
+legacy-bad-decoded-checksum	checksum	decode	ChecksumMismatch	none
 legacy-truncated-checksum	truncated	inspect	Truncated	none
 legacy-trailing-bytes	malformed	inspect	Malformed	none
 header-only-frame	truncated	inspect	Truncated	none

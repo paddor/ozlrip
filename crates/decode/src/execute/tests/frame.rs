@@ -156,7 +156,6 @@ fn enforces_expansion_ratio_without_mutating_destination() {
     assert_eq!(output, [1, 2]);
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn verifies_decoded_checksum() {
     let mut input = Vec::new();
@@ -180,7 +179,6 @@ fn verifies_decoded_checksum() {
     assert_eq!(output, [7, 8, 9]);
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn rejects_decoded_checksum_mismatch_without_mutating_destination() {
     let mut input = Vec::new();
@@ -203,7 +201,6 @@ fn rejects_decoded_checksum_mismatch_without_mutating_destination() {
     assert_eq!(output, [1, 2]);
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn verifies_compressed_checksum() {
     let mut input = Vec::new();
@@ -230,7 +227,6 @@ fn verifies_compressed_checksum() {
     assert_eq!(output, [7, 8, 9]);
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn rejects_compressed_checksum_mismatch() {
     let mut input = Vec::new();
@@ -252,7 +248,6 @@ fn rejects_compressed_checksum_mismatch() {
     assert_eq!(err.kind(), ErrorKind::ChecksumMismatch);
 }
 
-#[cfg(feature = "checksum")]
 #[test]
 fn rejects_compressed_checksum_before_decoded_checksum() {
     let mut input = Vec::new();
