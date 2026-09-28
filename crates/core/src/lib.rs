@@ -125,8 +125,8 @@ impl fmt::Display for ErrorKind {
 
 /// Defensive bounds for parsing and decoding untrusted frames.
 ///
-/// Start from [`Limits::strict`], [`Limits::paranoid`] or
-/// [`Limits::default`] and change fields as needed:
+/// Start from [`Limits::strict`] or [`Limits::default`] and change fields as
+/// needed:
 ///
 /// ```
 /// let mut limits = ozlrip_core::Limits::strict();
@@ -191,26 +191,6 @@ impl Limits {
             max_dictionary_bytes: 64 * 1024 * 1024,
             max_expansion_ratio: 256,
             expansion_ratio_exempt_bytes: 1024 * 1024,
-        }
-    }
-
-    /// Tighter bounds for hostile input: 16 MiB frames and outputs.
-    pub const fn paranoid() -> Self {
-        Self {
-            max_frame_bytes: 16 * 1024 * 1024,
-            max_decoded_bytes: 16 * 1024 * 1024,
-            max_chunks: 4096,
-            max_nodes: 16_384,
-            max_streams: 32_768,
-            max_transform_header_bytes: 4 * 1024 * 1024,
-            max_stored_stream_bytes: 16 * 1024 * 1024,
-            max_buffer_bytes: 16 * 1024 * 1024,
-            max_live_bytes: 128 * 1024 * 1024,
-            max_graph_depth: 256,
-            max_dictionaries: 64,
-            max_dictionary_bytes: 16 * 1024 * 1024,
-            max_expansion_ratio: 64,
-            expansion_ratio_exempt_bytes: 256 * 1024,
         }
     }
 }

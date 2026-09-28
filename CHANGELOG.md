@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+- Breaking: remove `Limits::paranoid()`. The `paranoid` feature forbids
+  unsafe code and does not change limits; a preset with the same name
+  suggested otherwise. Start from `Limits::strict()` and lower the fields
+  you need.
 - Add `Limits::expansion_ratio_exempt_bytes`: decoded outputs up to this
-  size skip `max_expansion_ratio` (1 MiB strict, 256 KiB paranoid). Very
+  size skip `max_expansion_ratio` (1 MiB by default). Very
   compressible data compresses past the default ratio of 256, so frames
   that upstream writes for 24 KB of constant numbers or 320 KB of repeated
   text failed with `LimitExceeded`.
@@ -106,8 +110,8 @@
 - Faster interleaved FSE decoding (`fse_v2` and the deprecated FSE paths):
   one bit-reader refill per four state updates. `era5-le-i32-sample` decodes
   14% faster in a portable build.
-- Add `Limits::max_dictionaries` (1024 strict, 64 paranoid) and
-  `Limits::max_dictionary_bytes` (64 MiB strict, 16 MiB paranoid). They bound
+- Add `Limits::max_dictionaries` (1024 by default) and
+  `Limits::max_dictionary_bytes` (64 MiB by default). They bound
   all dictionary bundles a `Decoder` holds and are checked from a bundle's
   header, before its dictionaries are parsed. A bundle could declare 65,535
   dictionaries.
@@ -151,7 +155,7 @@
 - lz4 block errors include the codec's error message in their detail.
 - Breaking: remove the no-op `checksum` feature from `ozlrip-core`.
 - Add `Limits::max_live_bytes`: the most bytes all intermediate streams of
-  one chunk may hold at once (512 MiB strict, 128 MiB paranoid). Before, only
+  one chunk may hold at once (512 MiB by default). Before, only
   each stream was bounded, so a hostile chunk could hold many buffers of
   `max_buffer_bytes` each. The largest observed need is about 3.5 times the
   chunk output, for a wide CSV sample.
@@ -183,11 +187,11 @@
   Huffman after v14).
 - Breaking: `Limits`, `Options`, `FrameInfo`, `ErrorKind`, and
   `FrameValueType` are `#[non_exhaustive]`. Build `Limits` from
-  `Limits::strict()`, `Limits::paranoid()`, or `Limits::default()` and set
+  `Limits::strict()` or `Limits::default()` and set
   fields; build `Options` from `Options::default()` or the new
   `Options::from(limits)`.
 - Breaking: `Limits::default()` is always `Limits::strict()`. The `paranoid`
-  feature no longer changes it; call `Limits::paranoid()` explicitly.
+  feature no longer changes it.
 - Breaking: rename `FrameInfo::inputs` to `FrameInfo::outputs`.
 - Breaking: remove `Decoder::load_fat_bundle`; use
   `Decoder::load_dictionary_bundle`.

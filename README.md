@@ -28,7 +28,7 @@ let header = ozlrip::inspect_header(prefix)?; // needs only the header bytes
 let size = ozlrip::frame_size(buffer)?; // the frame at the start of `buffer`
 
 // Limits for untrusted input, and checksum switches.
-let mut limits = ozlrip::Limits::paranoid();
+let mut limits = ozlrip::Limits::strict();
 limits.max_decoded_bytes = 1 << 20;
 let mut options = ozlrip::Options::from(limits);
 options.verify_content_checksum = false;
@@ -67,8 +67,7 @@ constructor or `Default` and set fields, and give `match` a wildcard arm.
 - `no_std`: build with `--no-default-features --features alloc`, plus
   `zstd` and `lz4` as needed. `std` adds SIMD dispatch in the codecs.
 - `paranoid`: forbids unsafe code in `ozlrip` and in the `zrip` and `lz4rip`
-  code it calls, and takes the safe paths. It does not change the limits;
-  use `Limits::paranoid` for tighter ones.
+  code it calls, and takes the safe paths. It does not change the limits.
 - Outputs: `decode`, `decode_into`, and `Decoder::decode_chunks` take frames
   with one serial output and return `Unsupported` for others.
   `decode_outputs` takes any frame and returns each output with its type.
