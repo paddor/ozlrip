@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::info::FrameValueType;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::reader::{Reader, check_limit, checked_add, checked_mul};
+use super::reader::{Reader, check_format_limit, check_limit, checked_add, checked_mul};
 use super::{
     CHUNK_VERSION_MIN, COMMENT_VERSION_MIN, MAGIC_BASE, MATERIALIZED_DICT_VERSION_MIN,
     MAX_FORMAT_VERSION, MAX_HEADER_COMMENT_BYTES, MIN_FORMAT_VERSION, OutputSizeValues,
@@ -51,12 +51,12 @@ pub(super) fn read_output_header(
     limits: Limits,
 ) -> Result<OutputHeader> {
     let outputs = read_output_count(reader, format_version)?;
-    check_limit(
+    check_format_limit(
         outputs,
         runtime_input_limit(format_version),
-        ErrorKind::Malformed,
+        "frame outputs",
     )?;
-    check_limit(outputs, limits.max_streams, ErrorKind::LimitExceeded)?;
+    check_limit(outputs, limits.max_streams, "max_streams")?;
     if outputs == 0 {
         return Err(Error::at(ErrorKind::Malformed, reader.offset())
             .with_detail("OpenZL frames with zero outputs are unsupported"));
@@ -231,13 +231,9 @@ pub(super) fn read_output_sizes(
             let size = u64::from(reader.read_u32_le()?);
             let size_usize = usize::try_from(size)
                 .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-            check_limit(
-                size_usize,
-                limits.max_buffer_bytes,
-                ErrorKind::LimitExceeded,
-            )?;
+            check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
             total = checked_add(total, size_usize)?;
-            check_limit(total, limits.max_decoded_bytes, ErrorKind::LimitExceeded)?;
+            check_limit(total, limits.max_decoded_bytes, "max_decoded_bytes")?;
             sizes.push(Some(size));
             elements.push(match value_type {
                 FrameValueType::Serial => Some(size),
@@ -269,13 +265,9 @@ pub(super) fn read_output_sizes(
             .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
         let size_usize = usize::try_from(size)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-        check_limit(
-            size_usize,
-            limits.max_buffer_bytes,
-            ErrorKind::LimitExceeded,
-        )?;
+        check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
         total = checked_add(total, size_usize)?;
-        check_limit(total, limits.max_decoded_bytes, ErrorKind::LimitExceeded)?;
+        check_limit(total, limits.max_decoded_bytes, "max_decoded_bytes")?;
         sizes.push(Some(size));
     }
 

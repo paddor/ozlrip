@@ -7,18 +7,16 @@ use super::chunk::{read_count, read_transform_count, standard_transform_id_bits}
 #[cfg(feature = "checksum")]
 use super::header::verify_header_checksum;
 use super::header::{FrameFlags, format_version_from_magic, runtime_input_limit};
-use super::reader::{Reader, bits_needed, check_limit, read_single_low_bits_u32};
+use super::reader::{
+    Reader, bits_needed, check_format_limit, check_limit, read_single_low_bits_u32,
+};
 use super::{ByteRange, CHUNK_VERSION_MIN};
 
 pub(crate) fn parse_single_zstd_frame(
     input: &[u8],
     limits: Limits,
 ) -> Result<Option<SingleZstdFrame>> {
-    check_limit(
-        input.len(),
-        limits.max_frame_bytes,
-        ErrorKind::LimitExceeded,
-    )?;
+    check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
 
     let mut reader = Reader::new(input);
     let magic = reader.read_u32_le()?;
@@ -37,12 +35,12 @@ pub(crate) fn parse_single_zstd_frame(
     if outputs != 1 || ((output_token >> 4) & 3) != 0 {
         return Ok(None);
     }
-    check_limit(
+    check_format_limit(
         outputs,
         runtime_input_limit(format_version),
-        ErrorKind::Malformed,
+        "frame outputs",
     )?;
-    check_limit(outputs, limits.max_streams, ErrorKind::LimitExceeded)?;
+    check_limit(outputs, limits.max_streams, "max_streams")?;
     let first_size = reader.peek_byte()?;
     let decoded_bytes = if first_size == 0 {
         return Err(Error::at(ErrorKind::Unsupported, reader.offset())
@@ -54,16 +52,8 @@ pub(crate) fn parse_single_zstd_frame(
             .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
         let size_usize = usize::try_from(size)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-        check_limit(
-            size_usize,
-            limits.max_buffer_bytes,
-            ErrorKind::LimitExceeded,
-        )?;
-        check_limit(
-            size_usize,
-            limits.max_decoded_bytes,
-            ErrorKind::LimitExceeded,
-        )?;
+        check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
+        check_limit(size_usize, limits.max_decoded_bytes, "max_decoded_bytes")?;
         Some(size_usize)
     };
 
@@ -87,10 +77,10 @@ pub(crate) fn parse_single_zstd_frame(
     if transforms != 1 || stored_streams != 1 {
         return Ok(None);
     }
-    check_limit(transforms, limits.max_nodes, ErrorKind::LimitExceeded)?;
-    check_limit(stored_streams, limits.max_streams, ErrorKind::LimitExceeded)?;
-    check_limit(1, limits.max_chunks, ErrorKind::LimitExceeded)?;
-    check_limit(1, limits.max_graph_depth, ErrorKind::LimitExceeded)?;
+    check_limit(transforms, limits.max_nodes, "max_nodes")?;
+    check_limit(stored_streams, limits.max_streams, "max_streams")?;
+    check_limit(1, limits.max_chunks, "max_chunks")?;
+    check_limit(1, limits.max_graph_depth, "max_graph_depth")?;
 
     if read_single_low_bits_u32(&mut reader, 1)? != 0 {
         return Ok(None);
@@ -119,12 +109,12 @@ pub(crate) fn parse_single_zstd_frame(
     check_limit(
         stored_stream_size,
         limits.max_buffer_bytes,
-        ErrorKind::LimitExceeded,
+        "max_buffer_bytes",
     )?;
     check_limit(
         stored_stream_size,
         limits.max_stored_stream_bytes,
-        ErrorKind::LimitExceeded,
+        "max_stored_stream_bytes",
     )?;
     let payload_start = reader.offset();
     let stored = ByteRange {

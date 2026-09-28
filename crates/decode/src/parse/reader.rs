@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Result};
 use smallvec::SmallVec;
@@ -103,11 +103,30 @@ pub(super) fn bits_needed(max_value: usize) -> usize {
     }
 }
 
-pub(super) fn check_limit(value: usize, limit: usize, kind: ErrorKind) -> Result<()> {
+/// Fails with `LimitExceeded` when `value` exceeds `limit`, the `Limits`
+/// field called `name`.
+#[inline]
+pub(super) fn check_limit(value: usize, limit: usize, name: &'static str) -> Result<()> {
     if value > limit {
-        return Err(Error::new(kind).with_detail("configured limit exceeded"));
+        return Err(limit_error(ErrorKind::LimitExceeded, value, limit, name));
     }
     Ok(())
+}
+
+/// Fails with `Malformed` when `value` exceeds `limit`, a bound the OpenZL
+/// format sets on `name`.
+#[inline]
+pub(super) fn check_format_limit(value: usize, limit: usize, name: &'static str) -> Result<()> {
+    if value > limit {
+        return Err(limit_error(ErrorKind::Malformed, value, limit, name));
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn limit_error(kind: ErrorKind, value: usize, limit: usize, name: &str) -> Error {
+    Error::new(kind).with_detail(format!("{name} exceeds its limit: {value} > {limit}"))
 }
 
 pub(super) fn checked_add(lhs: usize, rhs: usize) -> Result<usize> {

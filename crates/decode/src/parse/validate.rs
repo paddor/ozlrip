@@ -88,11 +88,7 @@ pub(super) fn validate_chunk_plan(
             .max()
             .unwrap_or(0);
         let output_depth = checked_add(input_depth, 1)?;
-        check_limit(
-            output_depth,
-            limits.max_graph_depth,
-            ErrorKind::LimitExceeded,
-        )?;
+        check_limit(output_depth, limits.max_graph_depth, "max_graph_depth")?;
         validate_node_output_count(node, shape)?;
         if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
             return Err(Error::new(ErrorKind::Unsupported)
@@ -200,7 +196,7 @@ pub(super) fn validate_single_node_chunk_plan(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("node input range reaches final output streams"));
     }
-    check_limit(1, limits.max_graph_depth, ErrorKind::LimitExceeded)?;
+    check_limit(1, limits.max_graph_depth, "max_graph_depth")?;
     validate_node_output_count(node, shape)?;
     if node.dict_index.is_some() && node.transform_type == TransformType::Custom {
         return Err(Error::new(ErrorKind::Unsupported)

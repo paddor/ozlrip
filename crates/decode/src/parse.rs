@@ -46,11 +46,7 @@ pub(crate) fn inspect_frame(input: &[u8], limits: Limits) -> Result<FrameInfo> {
 }
 
 pub(crate) fn parse_frame_plan(input: &[u8], limits: Limits) -> Result<FramePlan> {
-    check_limit(
-        input.len(),
-        limits.max_frame_bytes,
-        ErrorKind::LimitExceeded,
-    )?;
+    check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
 
     let mut reader = Reader::new(input);
     let magic = reader.read_u32_le()?;

@@ -6,8 +6,8 @@ use smallvec::{SmallVec, smallvec};
 
 use super::header::{FrameFlags, runtime_input_limit};
 use super::reader::{
-    Reader, bits_needed, check_limit, checked_add, read_bitpacked_single_u32, read_bitpacked_u32,
-    read_bitpacked_u32_inline, sum_u32_as_usize, sum_usize,
+    Reader, bits_needed, check_format_limit, check_limit, checked_add, read_bitpacked_single_u32,
+    read_bitpacked_u32, read_bitpacked_u32_inline, sum_u32_as_usize, sum_usize,
 };
 use super::{
     ByteRange, ByteRanges, CHUNK_VERSION_MIN, ChunkPlan, ChunkPlans, MATERIALIZED_DICT_VERSION_MIN,
@@ -48,25 +48,17 @@ pub(super) fn read_chunks(
         let mut chunk =
             read_chunk_header(reader, format_version, &mut flags, has_bundle_id, limits)?;
         summary.chunks = checked_add(summary.chunks, 1)?;
-        check_limit(summary.chunks, limits.max_chunks, ErrorKind::LimitExceeded)?;
+        check_limit(summary.chunks, limits.max_chunks, "max_chunks")?;
         summary.transforms = checked_add(summary.transforms, chunk.transforms())?;
-        check_limit(
-            summary.transforms,
-            limits.max_nodes,
-            ErrorKind::LimitExceeded,
-        )?;
+        check_limit(summary.transforms, limits.max_nodes, "max_nodes")?;
         summary.stored_streams = checked_add(summary.stored_streams, chunk.stored_streams())?;
-        check_limit(
-            summary.stored_streams,
-            limits.max_streams,
-            ErrorKind::LimitExceeded,
-        )?;
+        check_limit(summary.stored_streams, limits.max_streams, "max_streams")?;
         summary.regenerated_streams =
             checked_add(summary.regenerated_streams, chunk.regenerated_streams())?;
         check_limit(
             summary.regenerated_streams,
             limits.max_streams,
-            ErrorKind::LimitExceeded,
+            "max_streams",
         )?;
         let payload_start = reader.offset();
         chunk.set_payload_start(payload_start)?;
@@ -74,12 +66,12 @@ pub(super) fn read_chunks(
         check_limit(
             chunk.transform_header_bytes,
             limits.max_transform_header_bytes,
-            ErrorKind::LimitExceeded,
+            "max_transform_header_bytes",
         )?;
         check_limit(
             chunk.stored_stream_bytes,
             limits.max_stored_stream_bytes,
-            ErrorKind::LimitExceeded,
+            "max_stored_stream_bytes",
         )?;
         let _ = reader.read_slice(payload_bytes)?;
 
@@ -120,18 +112,18 @@ pub(super) fn read_chunk_header(
     let stored_streams_u64 = read_count(reader, format_version)?;
     let stored_streams = usize::try_from(stored_streams_u64)
         .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-    check_limit(
+    check_format_limit(
         transforms,
         runtime_node_limit(format_version),
-        ErrorKind::Malformed,
+        "transforms per chunk",
     )?;
-    check_limit(
+    check_format_limit(
         stored_streams,
         runtime_stream_limit(format_version),
-        ErrorKind::Malformed,
+        "streams per chunk",
     )?;
-    check_limit(transforms, limits.max_nodes, ErrorKind::LimitExceeded)?;
-    check_limit(stored_streams, limits.max_streams, ErrorKind::LimitExceeded)?;
+    check_limit(transforms, limits.max_nodes, "max_nodes")?;
+    check_limit(stored_streams, limits.max_streams, "max_streams")?;
 
     if (4..CHUNK_VERSION_MIN).contains(&format_version) {
         *flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
@@ -161,10 +153,10 @@ pub(super) fn read_chunk_header(
     };
 
     let regenerated_streams = sum_usize(&regen_counts)?;
-    check_limit(
+    check_format_limit(
         regenerated_streams,
         runtime_stream_limit(format_version),
-        ErrorKind::Malformed,
+        "streams per chunk",
     )?;
     let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
     let regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
@@ -232,10 +224,10 @@ pub(super) fn read_single_transform_chunk_header(
         None
     };
 
-    check_limit(
+    check_format_limit(
         regen_count,
         runtime_stream_limit(format_version),
-        ErrorKind::Malformed,
+        "streams per chunk",
     )?;
     let distance_bits = bits_needed(checked_add(regen_count, stored_streams)?);
     let regen_distances = read_bitpacked_u32_inline::<1>(reader, regen_count, distance_bits)?;
@@ -305,10 +297,10 @@ pub(super) fn read_one_regen_count(reader: &mut Reader<'_>, format_version: u32)
     }
     let count =
         usize::try_from(count).map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-    check_limit(
+    check_format_limit(
         count,
         runtime_node_input_limit(format_version),
-        ErrorKind::Malformed,
+        "variable inputs per transform",
     )?;
     Ok(count)
 }
@@ -538,10 +530,10 @@ pub(super) fn read_regen_counts(
         }
         let count = usize::try_from(*count)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-        check_limit(
+        check_format_limit(
             count,
             runtime_node_input_limit(format_version),
-            ErrorKind::Malformed,
+            "variable inputs per transform",
         )?;
         out.push(count);
     }
@@ -610,7 +602,7 @@ pub(super) fn read_stored_stream_sizes(
         let size = reader.read_var_u64()?;
         let size = usize::try_from(size)
             .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-        check_limit(size, limits.max_buffer_bytes, ErrorKind::LimitExceeded)?;
+        check_limit(size, limits.max_buffer_bytes, "max_buffer_bytes")?;
         sizes.push(size);
     }
     Ok(sizes)

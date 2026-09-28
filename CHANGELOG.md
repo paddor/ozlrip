@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `LimitExceeded` errors from frame parsing name the `Limits` field and
+  show the value and the bound, for example
+  `max_frame_bytes exceeds its limit: 42 > 41`.
 - Add `ErrorKind::AllocationFailed`. A buffer that fits the configured
   limits but cannot be allocated returns it instead of `LimitExceeded`.
 - An `Unsupported` error for a transform outside its format version range

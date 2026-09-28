@@ -20,6 +20,23 @@ fn declared_size_above_expansion_ratio_fails_before_reserving() {
     assert_eq!(dst.capacity(), 0);
 }
 
+/// A frame over a configured limit names that limit in the error detail.
+#[test]
+fn limit_errors_name_the_limit() {
+    let frame = FrameBuilder::new(21)
+        .serial_output(3)
+        .chunk(Chunk::stored(*b"abc"))
+        .build();
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_frame_bytes = frame.len() - 1;
+
+    let err = ozlrip::decode_with_options(&frame, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    let detail = err.detail().unwrap();
+    assert!(detail.starts_with("max_frame_bytes exceeds its limit"), "{detail}");
+}
+
 /// With every limit raised, a declared size above `isize::MAX` passes the
 /// checks, and reserving it fails as an allocation failure, not a limit.
 #[cfg(target_pointer_width = "64")]
