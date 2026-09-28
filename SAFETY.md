@@ -80,5 +80,11 @@ Primary defenses:
 - Return typed `Unsupported` errors for unknown codecs, custom transforms,
   custom dictionary materializers, and non-zstd dictionary materializers
 
-Regression tests should cover OpenZL memory-safety history recorded in
-`info/openzl/VULNS.md`.
+Upstream OpenZL has fixed decoder memory-safety bugs of the kinds these
+defenses target, for example a Field-LZ over-copy
+([facebook/openzl#544](https://github.com/facebook/openzl/pull/544)), LZ
+length and offset overflows
+([facebook/openzl#779](https://github.com/facebook/openzl/pull/779)), and a
+stack buffer overflow in `decode4`
+([facebook/openzl#632](https://github.com/facebook/openzl/pull/632)). No CVE
+or GitHub security advisory for OpenZL was published as of 2026-07.
