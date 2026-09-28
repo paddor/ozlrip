@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::numeric::push_numeric_element;
 use super::output::check_output_len;
 
@@ -120,11 +121,7 @@ pub(super) fn decode_quantize_node(
     limits: Limits,
     params: &QuantizeParams,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("quantize headers are unsupported")
-        );
-    }
+    require_empty_header(header, "quantize headers are unsupported")?;
     let [codes, extra_bits] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("quantize input count does not match node shape"));

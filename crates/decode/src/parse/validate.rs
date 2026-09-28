@@ -3,8 +3,9 @@ use alloc::{format, vec::Vec};
 use crate::standard::{self, NodeShape};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::reader::{check_limit, checked_add, sum_usize};
+use super::reader::{check_limit, sum_usize};
 use super::{ChunkPlan, FramePlan, NodePlan, TransformType};
+use crate::arith::checked_add;
 
 pub(super) fn validate_frame_plan(plan: &FramePlan, limits: Limits) -> Result<()> {
     if plan.info.chunks != plan.chunks.len() {

@@ -13,6 +13,7 @@ mod header;
 mod reader;
 mod validate;
 
+use crate::arith::checked_add;
 use chunk::read_chunks;
 #[cfg(feature = "zstd")]
 pub(crate) use fast_zstd::{SingleZstdFrame, parse_single_zstd_frame};
@@ -21,7 +22,7 @@ use header::{
     FrameFlags, format_version_from_magic, read_bundle_id, read_comment, read_output_header,
     read_output_sizes,
 };
-use reader::{Reader, check_limit, checked_add};
+use reader::{Reader, check_limit};
 use validate::validate_frame_plan;
 
 type ChunkPlans = SmallVec<[ChunkPlan; 1]>;

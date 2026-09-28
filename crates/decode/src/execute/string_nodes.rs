@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::fast_lengths;
+use super::header::require_empty_header;
 use super::layout_nodes::{concat_output_count, read_concat_size};
 use super::numeric::{
     checked_sum_u32, numeric_element_count, read_usize_numeric_element,
@@ -17,10 +18,7 @@ pub(super) fn decode_concat_string_node(
     expected_outputs: usize,
     limits: Limits,
 ) -> Result<Vec<OwnedStream>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("concat transform headers are unsupported"));
-    }
+    require_empty_header(header, "concat transform headers are unsupported")?;
     let [sizes, concatenated] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("concat input count does not match node shape"));
@@ -76,12 +74,7 @@ pub(super) fn decode_concat_string_node(
                     .with_detail("concat length allocation failed")
             })?;
         lengths.extend_from_slice(output_lengths);
-        outputs.push(OwnedStream {
-            bytes: output,
-            element_width: 1,
-            string_lengths: Some(lengths),
-            recyclable: false,
-        });
+        outputs.push(OwnedStream::strings(output, lengths));
         consumed_elements = next_elements;
         consumed_bytes = next_bytes;
     }
@@ -160,12 +153,7 @@ pub(super) fn decode_interleave_string_node(
             Error::new(ErrorKind::AllocationFailed)
                 .with_detail("interleave length allocation failed")
         })?;
-        outputs.push(OwnedStream {
-            bytes,
-            element_width: 1,
-            string_lengths: Some(lengths),
-            recyclable: false,
-        });
+        outputs.push(OwnedStream::strings(bytes, lengths));
     }
 
     let mut src_offset = 0usize;
@@ -197,10 +185,7 @@ pub(super) fn decode_separate_string_components_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("separate_string_components headers are unsupported"));
-    }
+    require_empty_header(header, "separate_string_components headers are unsupported")?;
     let [content, field_sizes] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("separate_string_components input count does not match node shape"));
@@ -228,12 +213,7 @@ pub(super) fn decode_separate_string_components_node(
         Error::new(ErrorKind::AllocationFailed).with_detail("string component allocation failed")
     })?;
     output.extend_from_slice(content.bytes);
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 1,
-        string_lengths: Some(string_lengths),
-        recyclable: false,
-    })
+    Ok(OwnedStream::strings(output, string_lengths))
 }
 
 pub(super) fn decode_string_component_lengths(
@@ -297,11 +277,7 @@ pub(super) fn decode_prefix_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("prefix headers are unsupported")
-        );
-    }
+    require_empty_header(header, "prefix headers are unsupported")?;
     let [suffixes, match_sizes] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("prefix input count does not match node shape"));
@@ -382,12 +358,7 @@ pub(super) fn decode_prefix_node(
     }
     debug_assert_eq!(previous_start + previous_len, output.len());
     debug_assert_eq!(output.len(), output_len);
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 1,
-        string_lengths: Some(output_lengths),
-        recyclable: false,
-    })
+    Ok(OwnedStream::strings(output, output_lengths))
 }
 
 pub(super) fn decode_tokenize_string_node(
@@ -395,10 +366,7 @@ pub(super) fn decode_tokenize_string_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("tokenize_string headers are unsupported"));
-    }
+    require_empty_header(header, "tokenize_string headers are unsupported")?;
     let [alphabet, indices] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("tokenize_string input count does not match node shape"));
@@ -421,12 +389,7 @@ pub(super) fn decode_tokenize_string_node(
     let output_elements = numeric_element_count(indices.bytes, indices.element_width)?;
     if alphabet_size == 0 {
         if output_elements == 0 {
-            return Ok(OwnedStream {
-                bytes: Vec::new(),
-                element_width: 1,
-                string_lengths: Some(Vec::new()),
-                recyclable: false,
-            });
+            return Ok(OwnedStream::strings(Vec::new(), Vec::new()));
         }
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("tokenize_string alphabet is empty")
@@ -490,10 +453,5 @@ pub(super) fn decode_tokenize_string_node(
         lengths.push(len);
     }
 
-    Ok(OwnedStream {
-        bytes,
-        element_width: 1,
-        string_lengths: Some(lengths),
-        recyclable: false,
-    })
+    Ok(OwnedStream::strings(bytes, lengths))
 }

@@ -7,6 +7,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::standard;
 
+use super::header::require_empty_header;
 use super::numeric::{checked_sum_u32, read_var_u64};
 use super::output::check_output_len;
 use super::streams::StreamInput;
@@ -33,10 +34,7 @@ pub(super) fn byte_preserving_conversion_output_width(
 ) -> Result<Option<usize>> {
     let output_width = match standard_id {
         standard::CONVERT_SERIAL_TO_STRUCT_ID => {
-            if !header.is_empty() {
-                return Err(Error::new(ErrorKind::Unsupported)
-                    .with_detail("conversion headers are unsupported"));
-            }
+            require_empty_header(header, "conversion headers are unsupported")?;
             input.element_width
         }
         standard::CONVERT_STRUCT_TO_SERIAL_ID => {
@@ -48,17 +46,11 @@ pub(super) fn byte_preserving_conversion_output_width(
             element_width
         }
         standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
-            if !header.is_empty() {
-                return Err(Error::new(ErrorKind::Unsupported)
-                    .with_detail("convert_num_to_struct_le headers are unsupported"));
-            }
+            require_empty_header(header, "convert_num_to_struct_le headers are unsupported")?;
             input.element_width
         }
         standard::CONVERT_STRING_TO_SERIAL_ID => {
-            if !header.is_empty() {
-                return Err(Error::new(ErrorKind::Unsupported)
-                    .with_detail("convert_string_to_serial headers are unsupported"));
-            }
+            require_empty_header(header, "convert_string_to_serial headers are unsupported")?;
             if input.element_width != 1 {
                 return Err(Error::new(ErrorKind::InvalidType)
                     .with_detail("convert_string_to_serial input must be byte strings"));
@@ -74,10 +66,7 @@ pub(super) fn byte_preserving_conversion_output_width(
             1
         }
         standard::CONVERT_SERIAL_TO_NUM_LE_ID => {
-            if !header.is_empty() {
-                return Err(Error::new(ErrorKind::Unsupported)
-                    .with_detail("convert_serial_to_num_le headers are unsupported"));
-            }
+            require_empty_header(header, "convert_serial_to_num_le headers are unsupported")?;
             1
         }
         standard::CONVERT_NUM_TO_SERIAL_LE_ID => {

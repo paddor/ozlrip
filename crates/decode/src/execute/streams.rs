@@ -236,6 +236,15 @@ impl OwnedStream {
         }
     }
 
+    pub(super) fn strings(bytes: Vec<u8>, lengths: Vec<u32>) -> Self {
+        Self {
+            bytes,
+            element_width: 1,
+            string_lengths: Some(lengths),
+            recyclable: false,
+        }
+    }
+
     pub(super) fn typed(bytes: Vec<u8>, element_width: usize) -> Self {
         Self {
             bytes,

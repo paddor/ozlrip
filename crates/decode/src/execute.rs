@@ -26,6 +26,7 @@ mod fast_split_struct;
 mod fast_tokenize;
 mod fast_transpose;
 mod fast_zigzag;
+mod header;
 mod layout_nodes;
 mod lz4;
 mod lz_nodes;

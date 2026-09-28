@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::output::{alloc_output, check_output_len};
 
 use super::dispatch_source::DispatchStringSource;
@@ -28,10 +29,7 @@ pub(super) fn decode_dispatch_string_node(
     format_version: u32,
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("dispatch_string headers are unsupported"));
-    }
+    require_empty_header(header, "dispatch_string headers are unsupported")?;
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
     if inputs.len()
@@ -125,12 +123,7 @@ pub(super) fn decode_dispatch_string_node(
                 .with_detail("dispatch_string did not consume every source string"));
         }
     }
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 1,
-        string_lengths: Some(output_lengths),
-        recyclable: false,
-    })
+    Ok(OwnedStream::strings(output, output_lengths))
 }
 
 #[expect(
@@ -201,10 +194,7 @@ pub(super) fn decode_dispatch_string_to_serial(
 ) -> Result<()> {
     #[cfg(feature = "paranoid")]
     let _ = allow_fast;
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("dispatch_string headers are unsupported"));
-    }
+    require_empty_header(header, "dispatch_string headers are unsupported")?;
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
     if inputs.len()
@@ -839,10 +829,7 @@ pub(super) fn decode_dispatch_n_by_tag_node(
     format_version: u32,
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("dispatchN_byTag headers are unsupported"));
-    }
+    require_empty_header(header, "dispatchN_byTag headers are unsupported")?;
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
     if inputs.len()

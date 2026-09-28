@@ -22,6 +22,19 @@ pub(super) struct NodeExecutionPlan {
     pub(super) header_size: usize,
 }
 
+impl NodeExecutionPlan {
+    /// This node's header within the chunk's transform headers.
+    pub(super) fn header<'a>(&self, headers: &'a [u8]) -> Result<&'a [u8]> {
+        let end = self
+            .header_start
+            .checked_add(self.header_size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        headers.get(self.header_start..end).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidGraph).with_detail("node header is out of bounds")
+        })
+    }
+}
+
 pub(super) fn build_chunk_execution_plan(
     chunk: &crate::parse::ChunkPlan,
 ) -> Result<ChunkExecutionPlan> {

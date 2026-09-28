@@ -2,6 +2,7 @@ use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::output::{alloc_output, check_output_len};
 use zrip_core::{
     bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
@@ -22,11 +23,7 @@ pub(super) fn decode_fse_ncount_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("fse_ncount headers are unsupported")
-        );
-    }
+    require_empty_header(header, "fse_ncount headers are unsupported")?;
     if source.element_width != 1 {
         return Err(
             Error::new(ErrorKind::InvalidType).with_detail("fse_ncount input must be serial")
@@ -87,10 +84,7 @@ pub(super) fn decode_huffman_deprecated_node(
     limits: Limits,
 ) -> Result<Vec<u8>> {
     require_legacy_serial_input(source, "huffman_deprecated")?;
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("huffman_deprecated headers are unsupported"));
-    }
+    require_empty_header(header, "huffman_deprecated headers are unsupported")?;
     decode_legacy_entropy_payload(source.bytes, 1, 2, limits, "huffman_deprecated")
         .map(|payload| payload.bytes)
 }

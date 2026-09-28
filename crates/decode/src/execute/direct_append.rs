@@ -4,8 +4,8 @@ use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::conversion::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
+use super::header::require_empty_header;
 use super::layout_nodes::append_split_by_struct_output;
-use super::node::node_header;
 use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::split_struct::split_by_struct_output_len;
@@ -132,7 +132,7 @@ pub(super) fn validate_direct_append_tail(
     limits: Limits,
 ) -> Result<()> {
     for node in tail {
-        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        let header = node.header(transform_headers)?;
         let input = StreamInput {
             bytes,
             element_width,
@@ -167,11 +167,8 @@ pub(super) fn validate_string_to_serial_tail(
             .with_detail("direct string append tail is malformed"));
     }
     // Same error as the general conversion path.
-    let header = node_header(transform_headers, node.header_start, node.header_size)?;
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_string_to_serial headers are unsupported"));
-    }
+    let header = node.header(transform_headers)?;
+    require_empty_header(header, "convert_string_to_serial headers are unsupported")?;
     Ok(())
 }
 
@@ -188,7 +185,7 @@ pub(super) fn append_split_by_struct_to_final_splitn(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("direct split_by_struct tail is malformed"));
     };
-    let splitn_header = node_header(transform_headers, splitn.header_start, splitn.header_size)?;
+    let splitn_header = splitn.header(transform_headers)?;
     if !splitn_header.is_empty() {
         return Err(
             Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")

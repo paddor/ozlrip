@@ -15,8 +15,9 @@ use super::direct_append::{
     direct_append_tail, validate_direct_append_tail, validate_string_to_serial_tail,
 };
 use super::dispatch::decode_dispatch_string_node_to_serial_output;
+use super::header::require_empty_header;
 use super::lz_nodes::{decode_field_lz_node_to_output, decode_lz_node_to_output};
-use super::node::{execute_standard_node, node_header, one_typed, single_input, single_stream};
+use super::node::{execute_standard_node, one_typed, single_input, single_stream};
 use super::numeric_nodes::decode_dedup_num_node;
 use super::output::{DecodedChunk, check_output_len};
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
@@ -83,7 +84,7 @@ pub(super) fn run_chunk<'a>(
     };
 
     for node in &plan.nodes {
-        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        let header = node.header(transform_headers)?;
         execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
     }
     Ok(streams)
@@ -188,7 +189,7 @@ pub(super) fn decode_transform_chunk_appending(
     };
 
     for (node_index, node) in plan.nodes.iter().enumerate() {
-        let header = node_header(transform_headers, node.header_start, node.header_size)?;
+        let header = node.header(transform_headers)?;
         if node_index == append_tail.start {
             let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
             let output_start = dst.len();
@@ -279,11 +280,7 @@ fn try_execute_single_input_splitn_node(
     {
         return Ok(false);
     }
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
-        );
-    }
+    require_empty_header(header, "splitn headers are unsupported")?;
 
     let input = single_execution_input(streams, node.input_start)?;
     if input.element_width == 0 {

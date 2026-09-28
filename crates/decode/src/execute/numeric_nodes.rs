@@ -2,6 +2,7 @@ use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::numeric::{max_numeric_value, push_numeric_element, read_element};
 use super::output::{alloc_output, check_output_len};
 
@@ -186,10 +187,7 @@ pub(super) fn decode_struct_to_num_be_chunk(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("convert_struct_to_num_be headers are unsupported"));
-    }
+    require_empty_header(header, "convert_struct_to_num_be headers are unsupported")?;
     decode_big_endian_numeric_conversion(stored, stored.element_width, limits)
 }
 
@@ -238,10 +236,7 @@ pub(super) fn decode_zigzag_numeric_chunk(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("zigzag transform headers are unsupported"));
-    }
+    require_empty_header(header, "zigzag transform headers are unsupported")?;
     validate_numeric_stream_width(stored.element_width, "zigzag")?;
     if !stored.bytes.len().is_multiple_of(stored.element_width) {
         return Err(
@@ -272,10 +267,7 @@ pub(super) fn decode_delta_node(
     validate_numeric_stream_width(stored.element_width, "delta input")?;
     numeric_element_count(stored.bytes, stored.element_width)?;
     let (first, deltas) = if format_version < DELTA_HEADER_VERSION_MIN {
-        if !header.is_empty() {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("delta headers before format v13 are unsupported"));
-        }
+        require_empty_header(header, "delta headers before format v13 are unsupported")?;
         stored
             .bytes
             .split_at_checked(stored.element_width)
@@ -341,11 +333,7 @@ pub(super) fn decode_dedup_num_node(
     output_count: usize,
     limits: Limits,
 ) -> Result<Vec<OwnedStream>> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("dedup_num headers are unsupported")
-        );
-    }
+    require_empty_header(header, "dedup_num headers are unsupported")?;
     if output_count == 0 {
         return Err(
             Error::new(ErrorKind::InvalidGraph).with_detail("dedup_num output count is zero")

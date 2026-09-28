@@ -3,6 +3,8 @@ use alloc::{format, vec::Vec};
 use ozlrip_core::{Error, ErrorKind, Result};
 use smallvec::SmallVec;
 
+use crate::arith::{checked_add, checked_mul};
+
 pub(super) fn read_bitpacked_u32(
     reader: &mut Reader<'_>,
     count: usize,
@@ -127,16 +129,6 @@ pub(super) fn check_format_limit(value: usize, limit: usize, name: &'static str)
 #[inline(never)]
 fn limit_error(kind: ErrorKind, value: usize, limit: usize, name: &str) -> Error {
     Error::new(kind).with_detail(format!("{name} exceeds its limit: {value} > {limit}"))
-}
-
-pub(super) fn checked_add(lhs: usize, rhs: usize) -> Result<usize> {
-    lhs.checked_add(rhs)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-}
-
-pub(super) fn checked_mul(lhs: usize, rhs: usize) -> Result<usize> {
-    lhs.checked_mul(rhs)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
 pub(super) fn sum_u32_as_usize(values: &[u32]) -> Result<usize> {

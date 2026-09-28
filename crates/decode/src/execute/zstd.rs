@@ -10,6 +10,8 @@ use crate::parse::FramePlan;
 use crate::{parse::SingleZstdFrame, standard};
 
 #[cfg(feature = "zstd")]
+use super::header::require_empty_header;
+#[cfg(feature = "zstd")]
 use super::output::{OutputBudget, size_mismatch, verify_decoded_checksum};
 #[cfg(feature = "zstd")]
 use super::{numeric::read_var_u64, runtime::DecodeScratch};
@@ -155,10 +157,7 @@ pub(super) fn decode_zstd_chunk(
     fixed: bool,
     ctx: &mut StandardNodeContext<'_>,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("zstd transform headers are unsupported"));
-    }
+    require_empty_header(header, "zstd transform headers are unsupported")?;
     let mut offset = 0usize;
     let element_width = read_var_u64(stored, &mut offset)?;
     if element_width == 0 {
@@ -203,10 +202,7 @@ pub(super) fn decode_zstd_chunk_to_output(
     max_output: usize,
     dst: &mut Vec<u8>,
 ) -> Result<()> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("zstd transform headers are unsupported"));
-    }
+    require_empty_header(header, "zstd transform headers are unsupported")?;
     let mut offset = 0usize;
     let element_width = read_var_u64(stored, &mut offset)?;
     if element_width == 0 || element_width != 1 {

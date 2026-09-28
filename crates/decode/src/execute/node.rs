@@ -42,15 +42,6 @@ use super::{
     zstd::decode_zstd_chunk,
 };
 
-pub(super) fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[u8]> {
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    headers.get(start..end).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidGraph).with_detail("node header is out of bounds")
-    })
-}
-
 pub(super) fn execute_standard_node(
     standard_id: u32,
     inputs: &[StreamInput<'_>],

@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+mod arith;
 mod dict;
 mod execute;
 mod info;

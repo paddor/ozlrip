@@ -2,6 +2,7 @@ use alloc::{boxed::Box, format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::output::check_output_len;
 use zrip_core::{
     bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
@@ -866,10 +867,7 @@ pub(super) fn decode_fastlz_deprecated_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("fastlz_deprecated headers are unsupported"));
-    }
+    require_empty_header(header, "fastlz_deprecated headers are unsupported")?;
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "fastlz_deprecated")?;
     let payload = parse_fastlz_deprecated_payload(payload, limits)?;
@@ -881,10 +879,7 @@ pub(super) fn decode_rolz_deprecated_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("rolz_deprecated headers are unsupported"));
-    }
+    require_empty_header(header, "rolz_deprecated headers are unsupported")?;
     let (decoded_size, payload) =
         parse_deprecated_lz_stored_stream(source, limits, "rolz_deprecated")?;
     let payload = parse_rolz_deprecated_payload(payload, limits)?;

@@ -3,6 +3,7 @@ use alloc::{vec, vec::Vec};
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::numeric::{
     max_numeric_value, numeric_element_count, read_numeric_element, read_u32_element,
     read_usize_numeric_element, read_var_u64, validate_numeric_stream_width, write_numeric_element,
@@ -19,10 +20,7 @@ pub(super) fn decode_concat_node(
     expected_outputs: usize,
     limits: Limits,
 ) -> Result<Vec<OwnedStream>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("concat transform headers are unsupported"));
-    }
+    require_empty_header(header, "concat transform headers are unsupported")?;
     let [sizes, concatenated] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("concat input count does not match node shape"));
@@ -141,10 +139,7 @@ pub(super) fn decode_transpose_node(
     limits: Limits,
     scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transpose transform headers are unsupported"));
-    }
+    require_empty_header(header, "transpose transform headers are unsupported")?;
     let source_width = source.element_width;
     if source_width == 0 || !source.bytes.len().is_multiple_of(source_width) {
         return Err(Error::new(ErrorKind::Malformed)
@@ -177,10 +172,7 @@ pub(super) fn decode_transpose_split_node(
     limits: Limits,
     scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("transpose_split transform headers are unsupported"));
-    }
+    require_empty_header(header, "transpose_split transform headers are unsupported")?;
     if variable_inputs != 0
         && usize::try_from(variable_inputs).is_ok_and(|count| count != inputs.len())
     {
@@ -213,10 +205,7 @@ pub(super) fn decode_flatpack_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("flatpack transform headers are unsupported"));
-    }
+    require_empty_header(header, "flatpack transform headers are unsupported")?;
     let [alphabet, packed] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("flatpack input count does not match node shape"));
@@ -303,10 +292,10 @@ pub(super) fn parse_float_deconstruct_header(
     format_version: u32,
 ) -> Result<FloatDeconstructType> {
     if format_version < 5 {
-        if !header.is_empty() {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .with_detail("float_deconstruct headers before format v5 are unsupported"));
-        }
+        require_empty_header(
+            header,
+            "float_deconstruct headers before format v5 are unsupported",
+        )?;
         return Ok(FloatDeconstructType::Float32);
     }
 
@@ -657,11 +646,7 @@ pub(super) fn decode_splitn_typed_node(
             recyclable: false,
         });
     }
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
-        );
-    }
+    require_empty_header(header, "splitn headers are unsupported")?;
     let element_width = inputs[0].element_width;
     if element_width == 0 {
         return Err(Error::new(ErrorKind::InvalidType).with_detail("splitn element width is zero"));
@@ -719,10 +704,7 @@ pub(super) fn decode_split_by_struct_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("split_by_struct headers are unsupported"));
-    }
+    require_empty_header(header, "split_by_struct headers are unsupported")?;
     let input_count = usize::try_from(variable_inputs).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("too many split_by_struct inputs")
     })?;
@@ -1093,10 +1075,7 @@ pub(super) fn decode_tokenize_fixed_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("tokenize_fixed headers are unsupported"));
-    }
+    require_empty_header(header, "tokenize_fixed headers are unsupported")?;
     let [alphabet, indices] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("tokenize_fixed input count does not match node shape"));

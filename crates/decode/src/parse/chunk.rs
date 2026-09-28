@@ -5,8 +5,10 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use smallvec::{SmallVec, smallvec};
 
 use super::header::{FrameFlags, runtime_input_limit};
+use crate::arith::checked_add;
+
 use super::reader::{
-    Reader, bits_needed, check_format_limit, check_limit, checked_add, read_bitpacked_single_u32,
+    Reader, bits_needed, check_format_limit, check_limit, read_bitpacked_single_u32,
     read_bitpacked_u32, read_bitpacked_u32_inline, sum_u32_as_usize, sum_usize,
 };
 use super::{

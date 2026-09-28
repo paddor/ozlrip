@@ -2,6 +2,7 @@ use alloc::{string::ToString, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::header::require_empty_header;
 use super::output::check_output_len;
 use super::{
     numeric::numeric_element_count,
@@ -13,11 +14,7 @@ pub(super) fn decode_node(
     header: &[u8],
     limits: Limits,
 ) -> Result<OwnedStream> {
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("parse_int headers are unsupported")
-        );
-    }
+    require_empty_header(header, "parse_int headers are unsupported")?;
     if input.element_width != 8 {
         return Err(Error::new(ErrorKind::InvalidType)
             .with_detail("parse_int input must be width-8 numeric values"));
@@ -50,10 +47,5 @@ pub(super) fn decode_node(
         output.extend_from_slice(text.as_bytes());
     }
 
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 1,
-        string_lengths: Some(lengths),
-        recyclable: false,
-    })
+    Ok(OwnedStream::strings(output, lengths))
 }

@@ -3,12 +3,13 @@ use alloc::vec::Vec;
 use crate::info::FrameValueType;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::reader::{Reader, check_format_limit, check_limit, checked_add, checked_mul};
+use super::reader::{Reader, check_format_limit, check_limit};
 use super::{
     CHUNK_VERSION_MIN, COMMENT_VERSION_MIN, MAGIC_BASE, MATERIALIZED_DICT_VERSION_MIN,
     MAX_FORMAT_VERSION, MAX_HEADER_COMMENT_BYTES, MIN_FORMAT_VERSION, OutputSizeValues,
     OutputTypes, UNIQUE_ID_BYTES,
 };
+use crate::arith::{checked_add, checked_mul};
 
 pub(super) fn format_version_from_magic(magic: u32) -> Result<u32> {
     let Some(version) = magic.checked_sub(MAGIC_BASE) else {
