@@ -5,27 +5,77 @@ Memory-safe Rust decoder for OpenZL.
 ## API
 
 ```rust
+// A frame with one serial output.
 let decoded = ozlrip::decode(frame)?;
 
 let mut dst = Vec::new();
 let written = ozlrip::decode_into(frame, &mut dst)?;
 
-let info = ozlrip::inspect(frame)?;
+// Every output of a frame, with its type.
+for output in ozlrip::decode_outputs(frame)? {
+    match output {
+        ozlrip::Output::Serial(bytes) => {}
+        ozlrip::Output::Struct { width, bytes } => {}
+        ozlrip::Output::Numeric { width, bytes } => {} // little-endian
+        ozlrip::Output::String { bytes, lengths } => {}
+        _ => {}
+    }
+}
 
+// Metadata without decoding.
+let info = ozlrip::inspect(frame)?;
+let header = ozlrip::inspect_header(prefix)?; // needs only the header bytes
+let size = ozlrip::frame_size(buffer)?; // the frame at the start of `buffer`
+
+// Limits for untrusted input, and checksum switches.
 let mut limits = ozlrip::Limits::paranoid();
 limits.max_decoded_bytes = 1 << 20;
-let decoded = ozlrip::decode_with_options(frame, ozlrip::Options::from(limits))?;
+let mut options = ozlrip::Options::from(limits);
+options.verify_content_checksum = false;
+let decoded = ozlrip::decode_with_options(frame, options)?;
 ```
 
-`Limits`, `Options`, `FrameInfo`, `ErrorKind`, and `FrameValueType` are
-`#[non_exhaustive]`: start from a constructor or `Default` and set fields.
+A `Decoder` keeps buffers, codec state, and dictionary bundles between
+frames. It keeps up to 64 MiB of intermediate buffers; `shrink_to_fit` frees
+them.
 
-For reusable allocation state, create `ozlrip::Decoder` and call
-`Decoder::decode` or `Decoder::decode_into`. Use `Decoder::with_options` when
-the default decoder options are not the right fit. Load dictionary bundles with
-`Decoder::load_dictionary_bundle` before dictionary-backed decode. A `Decoder`
-keeps up to 64 MiB of intermediate buffers between calls;
-`Decoder::shrink_to_fit` frees them.
+```rust
+let mut decoder = ozlrip::Decoder::with_options(options);
+decoder.load_dictionary_bundle(&bundle)?;
+let decoded = decoder.decode(frame)?;
+
+// Decoded memory peaks at one chunk.
+decoder.decode_chunks(frame, |chunk| {
+    sink.extend_from_slice(chunk);
+    Ok(())
+})?;
+```
+
+`Decoder::set_dictionary_provider` takes a `DictionaryProvider`, which
+supplies bundles that frames name and the decoder has not loaded, like
+upstream's `ZL_DictLoader`.
+
+`Limits`, `Options`, `FrameInfo`, `FrameHeaderInfo`, `ErrorKind`,
+`FrameValueType`, and `Output` are `#[non_exhaustive]`: start from a
+constructor or `Default` and set fields, and give `match` a wildcard arm.
+
+## Features
+
+- Default: `std`, `alloc`, `zstd`, `lz4`.
+- `zstd` and `lz4` decode those nodes with `zrip` and `lz4rip`. Without
+  them, frames that use the nodes return `Unsupported`.
+- `no_std`: build with `--no-default-features --features alloc`, plus
+  `zstd` and `lz4` as needed. `std` adds SIMD dispatch in the codecs.
+- `paranoid`: forbids unsafe code in `ozlrip` and in the `zrip` and `lz4rip`
+  code it calls, and takes the safe paths. It does not change the limits;
+  use `Limits::paranoid` for tighter ones.
+- Outputs: `decode`, `decode_into`, and `Decoder::decode_chunks` take frames
+  with one serial output and return `Unsupported` for others.
+  `decode_outputs` takes any frame and returns each output with its type.
+- Checksums: verification is always compiled in.
+  `Options::verify_content_checksum` and `Options::verify_compressed_checksum`
+  turn it off at run time, like upstream's `ZL_DParam_checkContentChecksum`
+  and `ZL_DParam_checkCompressedChecksum`.
 
 ## Current Scope
 
