@@ -295,3 +295,4 @@ mod lz;
 mod numbers;
 mod partitions;
 mod strings;
+mod typed_outputs;

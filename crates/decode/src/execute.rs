@@ -30,6 +30,7 @@ mod node;
 mod numeric;
 mod numeric_nodes;
 mod output;
+mod outputs;
 mod parse_int;
 mod partition;
 mod plan;
@@ -267,6 +268,38 @@ fn decode_transform_chunk_with_plan<'a>(
     dictionary_bundle_id: Option<&[u8]>,
     runtime: &mut DecodeRuntime<'_>,
 ) -> Result<DecodedChunk<'a>> {
+    let mut streams = run_chunk(
+        input,
+        chunk,
+        plan,
+        format_version,
+        limits,
+        dictionary_bundle_id,
+        runtime,
+    )?;
+    let final_index = streams.len().checked_sub(1).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidGraph).with_detail("transform chunk has no output stream")
+    })?;
+    match streams.swap_remove(final_index) {
+        StreamSlot::Borrowed(stream) => Ok(DecodedChunk::Borrowed(stream.bytes)),
+        StreamSlot::Owned(stream) => Ok(DecodedChunk::Owned(stream.bytes)),
+        StreamSlot::Empty => {
+            Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
+        }
+    }
+}
+
+/// Runs a chunk's nodes and returns every stream slot: the stored streams
+/// and the streams the nodes regenerated.
+fn run_chunk<'a>(
+    input: &'a [u8],
+    chunk: &crate::parse::ChunkPlan,
+    plan: &ChunkExecutionPlan,
+    format_version: u32,
+    limits: Limits,
+    dictionary_bundle_id: Option<&[u8]>,
+    runtime: &mut DecodeRuntime<'_>,
+) -> Result<Vec<StreamSlot<'a>>> {
     let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
     let mut live = LiveBytes::new(limits);
     let transform_headers = chunk.transform_header_range().as_slice(input)?;
@@ -284,17 +317,7 @@ fn decode_transform_chunk_with_plan<'a>(
         let header = node_header(transform_headers, node.header_start, node.header_size)?;
         execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
     }
-
-    let final_index = streams.len().checked_sub(1).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidGraph).with_detail("transform chunk has no output stream")
-    })?;
-    match streams.swap_remove(final_index) {
-        StreamSlot::Borrowed(stream) => Ok(DecodedChunk::Borrowed(stream.bytes)),
-        StreamSlot::Owned(stream) => Ok(DecodedChunk::Owned(stream.bytes)),
-        StreamSlot::Empty => {
-            Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
-        }
-    }
+    Ok(streams)
 }
 
 /// Executes one node: the splitn and conversion shortcuts, or a node decoder

@@ -2,6 +2,9 @@ use alloc::format;
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
+use crate::info::FrameValueType;
+use FrameValueType::{Numeric, Serial, String, Struct};
+
 pub(crate) const LZ4_ID: u32 = 62;
 pub(crate) const ZSTD_ID: u32 = 22;
 pub(crate) const ZSTD_FIXED_ID: u32 = 23;
@@ -82,7 +85,7 @@ pub(crate) struct NodeShape {
 }
 
 /// A standard transform: its ID, upstream name, the format versions that
-/// register it, and its shape.
+/// register it, its shape, and the type of the streams it regenerates.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StandardNode {
     pub(crate) id: u32,
@@ -91,6 +94,13 @@ pub(crate) struct StandardNode {
     /// Last format version that registers a deprecated node.
     pub(crate) max_version: Option<u32>,
     pub(crate) shape: NodeShape,
+    /// Type of every stream the node regenerates: the input type of its
+    /// upstream encoder, from `decoder_registry.c`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the public typed-output API comes next")
+    )]
+    pub(crate) output_type: FrameValueType,
 }
 
 const fn fixed(inputs: usize, outputs: usize) -> NodeShape {
@@ -122,13 +132,20 @@ const fn fan_out(static_inputs: usize) -> NodeShape {
     }
 }
 
-const fn node(id: u32, name: &'static str, min_version: u32, shape: NodeShape) -> StandardNode {
+const fn node(
+    id: u32,
+    name: &'static str,
+    min_version: u32,
+    shape: NodeShape,
+    output_type: FrameValueType,
+) -> StandardNode {
     StandardNode {
         id,
         name,
         min_version,
         max_version: None,
         shape,
+        output_type,
     }
 }
 
@@ -138,6 +155,7 @@ const fn deprecated(
     min_version: u32,
     max_version: u32,
     shape: NodeShape,
+    output_type: FrameValueType,
 ) -> StandardNode {
     StandardNode {
         id,
@@ -145,83 +163,108 @@ const fn deprecated(
         min_version,
         max_version: Some(max_version),
         shape,
+        output_type,
     }
 }
 
 /// Every standard transform ozlrip knows, by ID. Version ranges follow
 /// upstream `src/openzl/codecs/decoder_registry.c`.
 pub(crate) const STANDARD_NODES: [StandardNode; 66] = [
-    node(DELTA_INT_ID, "delta_int", 3, fixed(1, 1)),
-    node(TRANSPOSE_ID, "transpose", 3, fixed(1, 1)),
-    node(ZIGZAG_ID, "zigzag", 3, fixed(1, 1)),
-    node(TRANSPOSE_SPLIT_ID, "transpose_split", 11, variable(0)),
+    node(DELTA_INT_ID, "delta_int", 3, fixed(1, 1), Numeric),
+    node(TRANSPOSE_ID, "transpose", 3, fixed(1, 1), Struct),
+    node(ZIGZAG_ID, "zigzag", 3, fixed(1, 1), Numeric),
+    node(
+        TRANSPOSE_SPLIT_ID,
+        "transpose_split",
+        11,
+        variable(0),
+        Struct,
+    ),
     node(
         CONVERT_SERIAL_TO_STRUCT_ID,
         "convert_serial_to_struct",
         3,
         fixed(1, 1),
+        Serial,
     ),
     node(
         CONVERT_STRUCT_TO_SERIAL_ID,
         "convert_struct_to_serial",
         3,
         fixed(1, 1),
+        Struct,
     ),
     node(
         CONVERT_STRUCT_TO_NUM_LE_ID,
         "convert_struct_to_num_le",
         3,
         fixed(1, 1),
+        Struct,
     ),
     node(
         CONVERT_NUM_TO_STRUCT_LE_ID,
         "convert_num_to_struct_le",
         3,
         fixed(1, 1),
+        Numeric,
     ),
     node(
         CONVERT_SERIAL_TO_NUM_LE_ID,
         "convert_serial_to_num_le",
         3,
         fixed(1, 1),
+        Serial,
     ),
     node(
         CONVERT_NUM_TO_SERIAL_LE_ID,
         "convert_num_to_serial_le",
         3,
         fixed(1, 1),
+        Numeric,
     ),
     node(
         CONVERT_STRING_TO_SERIAL_ID,
         "convert_string_to_serial",
         10,
         fixed(1, 1),
+        Serial,
     ),
     node(
         SEPARATE_STRING_COMPONENTS_ID,
         "separate_string_components",
         10,
         fixed(2, 1),
+        String,
     ),
     node(
         CONVERT_STRUCT_TO_NUM_BE_ID,
         "convert_struct_to_num_be",
         21,
         fixed(1, 1),
+        Struct,
     ),
     node(
         CONVERT_SERIAL_TO_NUM_BE_ID,
         "convert_serial_to_num_be",
         21,
         fixed(1, 1),
+        Serial,
     ),
-    deprecated(FSE_DEPRECATED_ID, "fse_deprecated", 3, 14, fixed(1, 1)),
+    deprecated(
+        FSE_DEPRECATED_ID,
+        "fse_deprecated",
+        3,
+        14,
+        fixed(1, 1),
+        Serial,
+    ),
     deprecated(
         HUFFMAN_DEPRECATED_ID,
         "huffman_deprecated",
         3,
         14,
         fixed(1, 1),
+        Serial,
     ),
     deprecated(
         HUFFMAN_FIXED_DEPRECATED_ID,
@@ -229,62 +272,162 @@ pub(crate) const STANDARD_NODES: [StandardNode; 66] = [
         3,
         14,
         fixed(1, 1),
+        Struct,
     ),
-    node(SENTINEL_ID, "sentinel", 24, fixed(2, 1)),
-    node(LZ_ID, "lz", 24, fixed(4, 1)),
-    deprecated(ROLZ_DEPRECATED_ID, "rolz_deprecated", 3, 12, fixed(1, 1)),
+    node(SENTINEL_ID, "sentinel", 24, fixed(2, 1), Numeric),
+    node(LZ_ID, "lz", 24, fixed(4, 1), Serial),
+    deprecated(
+        ROLZ_DEPRECATED_ID,
+        "rolz_deprecated",
+        3,
+        12,
+        fixed(1, 1),
+        Serial,
+    ),
     deprecated(
         FASTLZ_DEPRECATED_ID,
         "fastlz_deprecated",
         3,
         12,
         fixed(1, 1),
+        Serial,
     ),
-    node(ZSTD_ID, "zstd", 3, fixed(1, 1)),
-    deprecated(ZSTD_FIXED_ID, "zstd_fixed_legacy", 3, 10, fixed(1, 1)),
-    node(FIELD_LZ_ID, "field_lz", 3, fixed(5, 1)),
-    node(QUANTIZE_OFFSETS_ID, "quantize_offsets", 3, fixed(2, 1)),
-    node(QUANTIZE_LENGTHS_ID, "quantize_lengths", 3, fixed(2, 1)),
-    node(BITPACK_SERIAL_ID, "bitpack_serial", 3, fixed(1, 1)),
-    node(BITPACK_INT_ID, "bitpack_int", 3, fixed(1, 1)),
-    node(FLATPACK_ID, "flatpack", 3, fixed(2, 1)),
-    node(TRANSPOSE_SPLIT2_ID, "transpose_split2", 3, fixed(2, 1)),
-    node(TRANSPOSE_SPLIT4_ID, "transpose_split4", 3, fixed(4, 1)),
-    node(TRANSPOSE_SPLIT8_ID, "transpose_split8", 3, fixed(8, 1)),
-    node(FLOAT_DECONSTRUCT_ID, "float_deconstruct", 4, fixed(2, 1)),
-    node(BITUNPACK_ID, "bitunpack", 6, fixed(1, 1)),
-    node(RANGE_PACK_ID, "range_pack", 8, fixed(1, 1)),
-    node(TOKENIZE_FIXED_ID, "tokenize_fixed", 8, fixed(2, 1)),
-    node(TOKENIZE_NUMERIC_ID, "tokenize_numeric", 8, fixed(2, 1)),
-    node(TOKENIZE_STRING_ID, "tokenize_string", 11, fixed(2, 1)),
-    node(SPLITN_ID, "splitn", 9, variable(0)),
-    node(SPLIT_BY_STRUCT_ID, "split_by_struct", 9, variable(0)),
-    node(DISPATCH_N_BY_TAG_ID, "dispatch_n_by_tag", 9, variable(2)),
-    node(MERGE_SORTED_ID, "merge_sorted", 9, fixed(2, 1)),
-    node(CONSTANT_SERIAL_ID, "constant_serial", 11, fixed(1, 1)),
-    node(CONSTANT_FIXED_ID, "constant_fixed", 11, fixed(1, 1)),
-    node(PREFIX_ID, "prefix", 11, fixed(2, 1)),
-    node(SPLITN_STRUCT_ID, "splitn_struct", 14, variable(0)),
-    node(SPLITN_NUM_ID, "splitn_num", 14, variable(0)),
-    node(FSE_V2_ID, "fse_v2", 15, fixed(2, 1)),
-    node(HUFFMAN_V2_ID, "huffman_v2", 15, fixed(2, 1)),
-    node(HUFFMAN_STRUCT_V2_ID, "huffman_struct_v2", 15, fixed(2, 1)),
-    node(FSE_NCOUNT_ID, "fse_ncount", 15, fixed(1, 1)),
-    node(DIVIDE_BY_ID, "divide_by", 16, fixed(1, 1)),
-    node(DISPATCH_STRING_ID, "dispatch_string", 16, variable(1)),
-    node(CONCAT_SERIAL_ID, "concat_serial", 16, fan_out(2)),
-    node(DEDUP_NUM_ID, "dedup_num", 16, fan_out(1)),
-    node(CONCAT_NUM_ID, "concat_num", 17, fan_out(2)),
-    node(CONCAT_STRUCT_ID, "concat_struct", 17, fan_out(2)),
-    node(CONCAT_STRING_ID, "concat_string", 18, fan_out(2)),
-    node(PARSE_INT_ID, "parse_int", 19, fixed(1, 1)),
-    node(INTERLEAVE_STRING_ID, "interleave_string", 20, fan_out(1)),
-    node(LZ4_ID, "lz4", 23, fixed(1, 1)),
-    node(BIT_SPLIT_ID, "bit_split", 24, variable(0)),
-    node(PARTITION_ID, "partition", 24, fixed(2, 1)),
-    node(MUX_LENGTHS_ID, "mux_lengths", 24, fixed(2, 2)),
-    node(SPARSE_NUM_ID, "sparse_num", 26, fixed(2, 1)),
-    node(PIVCO_HUFFMAN_ID, "pivco_huffman", 27, fixed(2, 1)),
+    node(ZSTD_ID, "zstd", 3, fixed(1, 1), Serial),
+    deprecated(
+        ZSTD_FIXED_ID,
+        "zstd_fixed_legacy",
+        3,
+        10,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(FIELD_LZ_ID, "field_lz", 3, fixed(5, 1), Struct),
+    node(
+        QUANTIZE_OFFSETS_ID,
+        "quantize_offsets",
+        3,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(
+        QUANTIZE_LENGTHS_ID,
+        "quantize_lengths",
+        3,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(BITPACK_SERIAL_ID, "bitpack_serial", 3, fixed(1, 1), Serial),
+    node(BITPACK_INT_ID, "bitpack_int", 3, fixed(1, 1), Numeric),
+    node(FLATPACK_ID, "flatpack", 3, fixed(2, 1), Serial),
+    node(
+        TRANSPOSE_SPLIT2_ID,
+        "transpose_split2",
+        3,
+        fixed(2, 1),
+        Struct,
+    ),
+    node(
+        TRANSPOSE_SPLIT4_ID,
+        "transpose_split4",
+        3,
+        fixed(4, 1),
+        Struct,
+    ),
+    node(
+        TRANSPOSE_SPLIT8_ID,
+        "transpose_split8",
+        3,
+        fixed(8, 1),
+        Struct,
+    ),
+    node(
+        FLOAT_DECONSTRUCT_ID,
+        "float_deconstruct",
+        4,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(BITUNPACK_ID, "bitunpack", 6, fixed(1, 1), Serial),
+    node(RANGE_PACK_ID, "range_pack", 8, fixed(1, 1), Numeric),
+    node(TOKENIZE_FIXED_ID, "tokenize_fixed", 8, fixed(2, 1), Struct),
+    node(
+        TOKENIZE_NUMERIC_ID,
+        "tokenize_numeric",
+        8,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(
+        TOKENIZE_STRING_ID,
+        "tokenize_string",
+        11,
+        fixed(2, 1),
+        String,
+    ),
+    node(SPLITN_ID, "splitn", 9, variable(0), Serial),
+    node(
+        SPLIT_BY_STRUCT_ID,
+        "split_by_struct",
+        9,
+        variable(0),
+        Serial,
+    ),
+    node(
+        DISPATCH_N_BY_TAG_ID,
+        "dispatch_n_by_tag",
+        9,
+        variable(2),
+        Serial,
+    ),
+    node(MERGE_SORTED_ID, "merge_sorted", 9, fixed(2, 1), Numeric),
+    node(
+        CONSTANT_SERIAL_ID,
+        "constant_serial",
+        11,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(CONSTANT_FIXED_ID, "constant_fixed", 11, fixed(1, 1), Struct),
+    node(PREFIX_ID, "prefix", 11, fixed(2, 1), String),
+    node(SPLITN_STRUCT_ID, "splitn_struct", 14, variable(0), Struct),
+    node(SPLITN_NUM_ID, "splitn_num", 14, variable(0), Numeric),
+    node(FSE_V2_ID, "fse_v2", 15, fixed(2, 1), Serial),
+    node(HUFFMAN_V2_ID, "huffman_v2", 15, fixed(2, 1), Serial),
+    node(
+        HUFFMAN_STRUCT_V2_ID,
+        "huffman_struct_v2",
+        15,
+        fixed(2, 1),
+        Struct,
+    ),
+    node(FSE_NCOUNT_ID, "fse_ncount", 15, fixed(1, 1), Numeric),
+    node(DIVIDE_BY_ID, "divide_by", 16, fixed(1, 1), Numeric),
+    node(
+        DISPATCH_STRING_ID,
+        "dispatch_string",
+        16,
+        variable(1),
+        String,
+    ),
+    node(CONCAT_SERIAL_ID, "concat_serial", 16, fan_out(2), Serial),
+    node(DEDUP_NUM_ID, "dedup_num", 16, fan_out(1), Numeric),
+    node(CONCAT_NUM_ID, "concat_num", 17, fan_out(2), Numeric),
+    node(CONCAT_STRUCT_ID, "concat_struct", 17, fan_out(2), Struct),
+    node(CONCAT_STRING_ID, "concat_string", 18, fan_out(2), String),
+    node(PARSE_INT_ID, "parse_int", 19, fixed(1, 1), String),
+    node(
+        INTERLEAVE_STRING_ID,
+        "interleave_string",
+        20,
+        fan_out(1),
+        String,
+    ),
+    node(LZ4_ID, "lz4", 23, fixed(1, 1), Serial),
+    node(BIT_SPLIT_ID, "bit_split", 24, variable(0), Numeric),
+    node(PARTITION_ID, "partition", 24, fixed(2, 1), Numeric),
+    node(MUX_LENGTHS_ID, "mux_lengths", 24, fixed(2, 2), Numeric),
+    node(SPARSE_NUM_ID, "sparse_num", 26, fixed(2, 1), Numeric),
+    node(PIVCO_HUFFMAN_ID, "pivco_huffman", 27, fixed(2, 1), Serial),
 ];
 
 /// Position in `STANDARD_NODES` of each ID below 128, the OpenZL standard
