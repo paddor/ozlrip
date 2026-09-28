@@ -39,15 +39,7 @@ pub(super) unsafe fn append_wide_header_pattern(
         .map(|source| source.byte_position)
         .collect::<Vec<_>>();
     let mut out_pos = output.len();
-    let final_out_pos = sources.iter().try_fold(out_pos, |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    check_output_capacity(sources, output)?;
     let output_ptr = output.as_mut_ptr();
 
     // SAFETY: the capacity check above covers every byte the sources hold,
@@ -118,30 +110,9 @@ pub(super) unsafe fn append_2byte_csv_pattern_rows(
     sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let final_out_pos = sources.iter().try_fold(output.len(), |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    check_output_capacity(sources, output)?;
 
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
+    let (mut positions, mut byte_positions) = pattern_positions(sources);
     let mut out_pos = output.len();
     let output_ptr = output.as_mut_ptr();
 
@@ -259,34 +230,13 @@ unsafe fn append_2byte_csv_fixed_prefix_pattern_rows_impl<const COMMA_NEWLINE: b
     sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let final_out_pos = sources.iter().try_fold(output.len(), |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    check_output_capacity(sources, output)?;
 
     let source0_bytes = sources[0].bytes.as_ptr();
     let source1_bytes = sources[1].bytes.as_ptr();
     let mut source0_byte = sources[0].byte_position;
     let mut source1_byte = sources[1].byte_position;
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
+    let (mut positions, mut byte_positions) = pattern_positions(sources);
     let mut out_pos = output.len();
     let output_ptr = output.as_mut_ptr();
 
@@ -394,30 +344,9 @@ pub(super) unsafe fn append_2byte_csv_header_pattern_rows(
     sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let final_out_pos = sources[..5].iter().try_fold(output.len(), |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    check_output_capacity(&sources[..5], output)?;
 
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
+    let (mut positions, mut byte_positions) = pattern_positions(sources);
     let mut out_pos = output.len();
     let output_ptr = output.as_mut_ptr();
 
@@ -547,34 +476,13 @@ unsafe fn append_2byte_csv_fixed_prefix_header_pattern_rows_impl<const COMMA_NEW
     sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let final_out_pos = sources[..5].iter().try_fold(output.len(), |sum, source| {
-        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
-    })?;
-    if final_out_pos > output.capacity() {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
-        );
-    }
+    check_output_capacity(&sources[..5], output)?;
 
     let source0_bytes = sources[0].bytes.as_ptr();
     let source1_bytes = sources[1].bytes.as_ptr();
     let mut source0_byte = sources[0].byte_position;
     let mut source1_byte = sources[1].byte_position;
-    let mut positions = [
-        sources[0].position,
-        sources[1].position,
-        sources[2].position,
-        sources[3].position,
-        sources[4].position,
-    ];
-    let mut byte_positions = [
-        sources[0].byte_position,
-        sources[1].byte_position,
-        sources[2].byte_position,
-        sources[3].byte_position,
-        sources[4].byte_position,
-    ];
+    let (mut positions, mut byte_positions) = pattern_positions(sources);
     let mut out_pos = output.len();
     let output_ptr = output.as_mut_ptr();
 
@@ -854,6 +762,52 @@ unsafe fn append_pattern_delimiter_unchecked(
     positions[4] += 1;
     byte_positions[4] = src_pos + 1;
     *out_pos += 1;
+}
+
+/// Fails unless `output`'s capacity holds every byte the sources have
+/// left, which bounds all unchecked writes of a row writer.
+#[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "runs once before a hot row loop; keeps the writers' code unchanged"
+)]
+#[inline(always)]
+fn check_output_capacity(sources: &[DispatchStringSource<'_>], output: &Vec<u8>) -> Result<()> {
+    let final_out_pos = sources.iter().try_fold(output.len(), |sum, source| {
+        sum.checked_add(source.bytes.len().saturating_sub(source.byte_position))
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
+    })?;
+    if final_out_pos > output.capacity() {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("dispatch output capacity is invalid")
+        );
+    }
+    Ok(())
+}
+
+/// The string and byte positions of the five pattern sources.
+#[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "runs once before a hot row loop; keeps the writers' code unchanged"
+)]
+#[inline(always)]
+fn pattern_positions(sources: &[DispatchStringSource<'_>]) -> ([usize; 5], [usize; 5]) {
+    let positions = [
+        sources[0].position,
+        sources[1].position,
+        sources[2].position,
+        sources[3].position,
+        sources[4].position,
+    ];
+    let byte_positions = [
+        sources[0].byte_position,
+        sources[1].byte_position,
+        sources[2].byte_position,
+        sources[3].byte_position,
+        sources[4].byte_position,
+    ];
+    (positions, byte_positions)
 }
 
 #[cfg(not(feature = "paranoid"))]
