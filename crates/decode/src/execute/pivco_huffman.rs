@@ -702,7 +702,7 @@ impl<'a> PivCoBitReader<'a> {
             .checked_add(byte_len)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         let bitmap = self.bytes.get(byte_start..byte_end).ok_or_else(|| {
-            Error::new(ErrorKind::Truncated).with_detail("pivco_huffman bitstream is truncated")
+            Error::new(ErrorKind::Malformed).with_detail("pivco_huffman bitstream is truncated")
         })?;
         self.bit_pos = self
             .bit_pos
@@ -721,7 +721,7 @@ impl<'a> PivCoBitReader<'a> {
             .checked_add(bits)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         if end > self.total_bits()? {
-            return Err(Error::new(ErrorKind::Truncated)
+            return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("pivco_huffman bitstream is truncated"));
         }
 
@@ -742,7 +742,7 @@ impl<'a> PivCoBitReader<'a> {
 
     fn consumed_bytes(&self) -> Result<usize> {
         if self.bit_pos > self.total_bits()? {
-            return Err(Error::new(ErrorKind::Truncated)
+            return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("pivco_huffman bitstream is truncated"));
         }
         Ok(self.bit_pos.div_ceil(8))
@@ -757,7 +757,7 @@ impl<'a> PivCoBitReader<'a> {
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         }
         if self.bit_pos > self.total_bits()? {
-            return Err(Error::new(ErrorKind::Truncated)
+            return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("pivco_huffman bitstream is truncated"));
         }
         Ok(())
@@ -772,7 +772,7 @@ impl<'a> PivCoBitReader<'a> {
 
     fn bit_at(&self, bit: usize) -> Result<bool> {
         let byte = *self.bytes.get(bit / 8).ok_or_else(|| {
-            Error::new(ErrorKind::Truncated).with_detail("pivco_huffman bitstream is truncated")
+            Error::new(ErrorKind::Malformed).with_detail("pivco_huffman bitstream is truncated")
         })?;
         Ok(((byte >> (bit % 8)) & 1) != 0)
     }

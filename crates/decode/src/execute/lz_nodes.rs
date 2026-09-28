@@ -1093,7 +1093,7 @@ fn parse_rolz_deprecated_payload(
     limits: Limits,
 ) -> Result<RolzDeprecatedPayload<'_>> {
     let header = payload.get(..ROLZ_DEPRECATED_HEADER_LEN).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated).with_detail("rolz_deprecated header is truncated")
+        Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated header is truncated")
     })?;
     let params = parse_rolz_deprecated_params(header)?;
     let num_literals = usize::try_from(read_deprecated_lz_le_u32(
@@ -1187,7 +1187,7 @@ fn parse_rolz_deprecated_literals<'a>(
     }
 
     let order = *payload.get(*offset).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal order flag is truncated")
     })?;
     *offset = (*offset)
@@ -1215,7 +1215,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
     limits: Limits,
 ) -> Result<RolzDeprecatedLiterals<'a>> {
     let max_context = *payload.get(*offset).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal clustering is truncated")
     })?;
     *offset = (*offset)
@@ -1229,7 +1229,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
         .checked_add(map_len)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let map = payload.get(*offset..map_end).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal clustering is truncated")
     })?;
     *offset = map_end;
@@ -1726,7 +1726,7 @@ fn decode_rolz_deprecated_seq_values(
         .checked_add(bit_size)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let bitstream = source.get(*offset..bit_end).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated).with_detail(format!("{transform_name} is truncated"))
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} is truncated"))
     })?;
     *offset = bit_end;
 
@@ -1872,7 +1872,7 @@ fn parse_deprecated_lz_stored_stream<'a>(
             .with_detail(format!("{transform_name} input must be serial")));
     }
     let size_prefix = source.bytes.get(..4).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated).with_detail("deprecated lz stream is missing size prefix")
+        Error::new(ErrorKind::Malformed).with_detail("deprecated lz stream is missing size prefix")
     })?;
     let decoded_size = usize::try_from(u32::from_le_bytes([
         size_prefix[0],
@@ -1913,7 +1913,7 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
     max_depth: usize,
 ) -> Result<LegacyLiteralPayload<'a>> {
     let header = *source.get(*offset).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
     if header & 0x07 == 4 {
@@ -1961,7 +1961,7 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             let value = source
                 .get(*offset..end)
-                .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+                .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
             *offset = end;
             Ok(LegacyLiteralPayload::Constant {
                 value,
@@ -1980,7 +1980,7 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             let payload = source
                 .get(*offset..end)
-                .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+                .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
             *offset = end;
             Ok(LegacyLiteralPayload::Raw(payload))
         }
@@ -2076,7 +2076,7 @@ fn decode_legacy_fse_entropy_payload(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let encoded = source
         .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
     let mut reader = BitReader::new(encoded);
     let (distribution, accuracy_log) =
         parse_fse_table_description(&mut reader, u8::MAX).map_err(|err| {
@@ -2186,7 +2186,7 @@ fn read_deprecated_lz_le_u32(source: &[u8], offset: usize, transform_name: &str)
         .checked_add(4)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let bytes = source.get(offset..end).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated).with_detail(format!("{transform_name} is truncated"))
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} is truncated"))
     })?;
     Ok(u32::from_le_bytes(
         bytes
@@ -2208,7 +2208,7 @@ fn read_deprecated_lz_sized_slice<'a>(
         .checked_add(size)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let slice = source.get(*offset..end).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} stream is truncated"))
     })?;
     *offset = end;

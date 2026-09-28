@@ -42,7 +42,7 @@ pub(crate) fn decode_single_zstd_frame_with_context(
     }
     let magicless = stored
         .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
     let declared = frame.decoded_bytes.ok_or_else(|| {
         Error::new(ErrorKind::Unsupported)
             .with_detail("unknown OpenZL output sizes are unsupported")
@@ -109,7 +109,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     }
     let magicless = stored
         .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
     let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
     let start = dst.len();
     let written =
@@ -167,7 +167,7 @@ pub(super) fn decode_zstd_chunk(
     }
     let magicless = stored
         .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
     if let Some(dict_index) = dict_index {
         let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
@@ -199,7 +199,7 @@ pub(super) fn decode_zstd_chunk_to_output(
     }
     let magicless = stored
         .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Truncated, offset))?;
+        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
     let start = dst.len();
     let written = if let Some(dict_index) = dict_index {
         let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {

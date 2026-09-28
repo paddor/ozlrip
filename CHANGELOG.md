@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- A node whose header or input stream ends early returns `Malformed`.
+  Some deprecated entropy and LZ nodes, `pivco_huffman`, and varints inside
+  node headers returned `Truncated`, which now only means the frame bytes
+  ended early.
 - A non-empty transform header on a node whose upstream decoder reads none
   returns `Unsupported` for every node. `dispatch_string`, `dispatchN_byTag`,
   `parse_int`, `prefix`, `separate_string_components`,

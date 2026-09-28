@@ -15,6 +15,7 @@ use super::layout_nodes::{
 };
 use super::lz4::decode_lz4_chunk;
 use super::numeric::checked_sum_u32;
+use super::numeric::read_var_u64;
 use super::plan::NodeExecutionPlan;
 use super::streams::{
     LiveBytes, OwnedStream, StreamInput, StreamSlot, move_stream_to_single_output,
@@ -36,7 +37,6 @@ use super::{
     decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
     decode_zstd_chunk, parse_int, pivco_huffman,
 };
-use crate::varint::read_var_u64;
 
 pub(super) fn try_execute_single_input_splitn_node(
     streams: &mut [StreamSlot<'_>],

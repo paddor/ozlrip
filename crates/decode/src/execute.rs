@@ -2,7 +2,6 @@ use alloc::vec::Vec;
 
 #[cfg(test)]
 use crate::dict::DictionaryStore;
-use crate::varint::read_var_u64;
 use crate::{parse::FramePlan, standard};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
@@ -63,7 +62,7 @@ use node::{
 };
 use numeric::{
     checked_sum_u32, max_numeric_value, numeric_element_count, read_usize_numeric_element,
-    require_numeric_width, validate_numeric_stream_width,
+    read_var_u64, require_numeric_width, validate_numeric_stream_width,
 };
 use numeric_nodes::{
     decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,

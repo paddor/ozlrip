@@ -1,13 +1,12 @@
 use alloc::{vec, vec::Vec};
 
 use crate::standard;
-use crate::varint::read_var_u64;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::DecodeScratch;
 use super::numeric::{
     max_numeric_value, numeric_element_count, read_numeric_element, read_u32_element,
-    read_usize_numeric_element, validate_numeric_stream_width, write_numeric_element,
+    read_usize_numeric_element, read_var_u64, validate_numeric_stream_width, write_numeric_element,
 };
 use super::output::{alloc_output, check_output_len};
 use super::streams::{OwnedStream, StreamInput};

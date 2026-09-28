@@ -4,6 +4,20 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 use super::streams::StreamInput;
 
+/// Reads a varint from a node header or stream. The parser checked their
+/// sizes against the frame, so one that ends inside a varint is malformed,
+/// not a truncated frame.
+#[inline]
+pub(super) fn read_var_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
+    crate::varint::read_var_u64(bytes, offset).map_err(|err| {
+        if err.kind() == ErrorKind::Truncated {
+            Error::new(ErrorKind::Malformed).with_detail("varint is truncated")
+        } else {
+            err
+        }
+    })
+}
+
 pub(super) fn max_numeric_value(element_width: usize) -> Result<u64> {
     match element_width {
         1 => Ok(u64::from(u8::MAX)),
@@ -188,4 +202,18 @@ pub(super) fn require_numeric_width(
     }
     numeric_element_count(stream.bytes, expected)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_varint_that_ends_early_is_malformed() {
+        let mut offset = 0;
+        let err = read_var_u64(&[0x80, 0x80], &mut offset).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(offset, 0);
+    }
 }

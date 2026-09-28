@@ -209,7 +209,7 @@ fn decode_legacy_entropy_payload_internal(
     max_depth: usize,
 ) -> Result<LegacyEntropyPayload> {
     let header = *source.get(*offset).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
     if header & 0x07 == 4 {
@@ -292,7 +292,7 @@ pub(super) fn read_legacy_entropy_header(
     transform_name: &str,
 ) -> Result<(u8, usize)> {
     let header = *source.get(*offset).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated)
+        Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
     *offset = (*offset)
@@ -353,7 +353,7 @@ fn decode_legacy_entropy_raw(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let payload = source
         .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
     *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
@@ -381,7 +381,7 @@ fn decode_legacy_entropy_constant(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let value = source
         .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
     *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
@@ -482,7 +482,7 @@ fn decode_legacy_entropy_fse(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let encoded = source
         .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
 
     let mut reader = BitReader::new(encoded);
     let (distribution, accuracy_log) =
@@ -524,7 +524,7 @@ pub(super) fn read_legacy_compressed_entropy_header(
         .checked_add(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let header = source.get(*offset..end).ok_or_else(|| {
-        Error::new(ErrorKind::Truncated).with_detail(format!(
+        Error::new(ErrorKind::Malformed).with_detail(format!(
             "{transform_name} compressed entropy header is truncated"
         ))
     })?;
@@ -622,7 +622,7 @@ pub(super) fn unpack_legacy_bits(
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let encoded = source
         .get(*offset..end)
-        .ok_or_else(|| Error::new(ErrorKind::Truncated))?;
+        .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
     *offset = end;
 
     let mut bytes = Vec::new();
@@ -646,7 +646,7 @@ pub(super) fn unpack_legacy_bits(
         let mut bits_read = 0usize;
         while bits_read < num_bits {
             let byte = encoded.get(bit_pos / 8).ok_or_else(|| {
-                Error::new(ErrorKind::Truncated)
+                Error::new(ErrorKind::Malformed)
                     .with_detail(format!("{transform_name} bit stream is truncated"))
             })?;
             let take = (8 - (bit_pos & 7)).min(num_bits - bits_read);
