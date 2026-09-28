@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Document every public item; the crates warn on missing docs. The crate
+  docs list the entry points and the cargo features.
 - Track PivCo-Huffman in the feature compatibility manifest, backed by a
   zli interop case whose LZ literals upstream codes with PivCo-Huffman.
 - Add `DictionaryProvider`, like upstream's `ZL_DictLoader`, and

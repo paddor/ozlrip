@@ -1,9 +1,17 @@
 //! Memory-safe Rust decoder for OpenZL standard-codec frames.
 //!
-//! Use [`decode`] for the common owned-output case, [`decode_into`] to append
-//! into an existing buffer, and [`inspect`] to parse metadata without executing
-//! the frame graph. Use the `*_with_options` variants or [`Decoder::with_options`]
-//! when the default decoder options are not appropriate.
+//! - [`decode`] and [`decode_into`] decode a frame with one serial output.
+//! - [`decode_outputs`] decodes every output of a frame with its type:
+//!   bytes, fixed-width records, integers or strings.
+//! - [`Decoder`] keeps buffers, codec state and dictionary bundles between
+//!   frames. [`Decoder::decode_chunks`] decodes a large frame one chunk at a
+//!   time.
+//! - [`inspect`], [`inspect_header`] and [`frame_size`] read frame metadata
+//!   without decoding.
+//!
+//! The `*_with_options` variants and [`Decoder::with_options`] take
+//! [`Options`]: the [`Limits`] that bound work on untrusted input, and
+//! whether to verify checksums.
 //!
 //! ```
 //! let frame = [
@@ -13,7 +21,18 @@
 //! let decoded = ozlrip::decode(&frame).unwrap();
 //! assert_eq!(decoded, [7, 8, 9]);
 //! ```
+//!
+//! # Features
+//!
+//! - `std` (default): SIMD dispatch and `std` support in the codecs.
+//!   Without it the crate is `no_std` and needs `alloc`.
+//! - `alloc` (default): required.
+//! - `zstd` (default): zstd nodes, decoded by `zrip`.
+//! - `lz4` (default): lz4 nodes, decoded by `lz4rip`.
+//! - `paranoid`: forbids unsafe code in this crate and its codecs and uses
+//!   safe code paths throughout.
 #![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs)]
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
 
 extern crate alloc;

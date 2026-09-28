@@ -1,4 +1,8 @@
+//! OpenZL frame parsing, graph validation and decoding for `ozlrip`.
+//!
+//! Use the `ozlrip` crate; it re-exports everything here.
 #![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs)]
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
 
 extern crate alloc;
@@ -89,10 +93,12 @@ impl Decoder {
         }
     }
 
+    /// The options this decoder was created with.
     pub fn options(&self) -> Options {
         self.options
     }
 
+    /// The limits in this decoder's options.
     pub fn limits(&self) -> Limits {
         self.options.limits
     }
