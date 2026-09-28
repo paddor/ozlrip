@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Result};
 
 #[cfg(not(feature = "paranoid"))]
-use super::dispatch::DispatchStringSource;
+use super::dispatch_source::DispatchStringSource;
 
 /// # Safety
 ///

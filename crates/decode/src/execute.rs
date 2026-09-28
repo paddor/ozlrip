@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 mod conversion;
 mod direct_append;
 mod dispatch;
+mod dispatch_source;
 mod entropy;
 mod fast_bitpack;
 mod fast_csv;
