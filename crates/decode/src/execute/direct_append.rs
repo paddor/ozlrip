@@ -5,11 +5,11 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::conversion::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
 use super::header::require_empty_header;
-use super::layout_nodes::append_split_by_struct_output;
+use super::layout::append_split_by_struct_output;
+use super::layout::split_by_struct_output_len;
 use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::slots::StreamSlot;
-use super::split_struct::split_by_struct_output_len;
 use super::streams::StreamInput;
 
 #[derive(Clone, Copy)]

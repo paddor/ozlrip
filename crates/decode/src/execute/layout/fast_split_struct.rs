@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 #[cfg(not(feature = "paranoid"))]
 use super::split_struct::split_by_struct_output_len;
-use super::streams::StreamInput;
+use crate::execute::streams::StreamInput;
 
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn append_split_by_struct_output(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {

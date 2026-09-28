@@ -3,11 +3,11 @@
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
-use super::streams::StreamInput;
+use crate::execute::streams::StreamInput;
 
 /// Output size of a split_by_struct node, after checking that every input
 /// has whole elements of a nonzero width and the same element count.
-pub(super) fn split_by_struct_output_len(inputs: &[StreamInput<'_>]) -> Result<usize> {
+pub(in crate::execute) fn split_by_struct_output_len(inputs: &[StreamInput<'_>]) -> Result<usize> {
     let Some(first) = inputs.first() else {
         return Err(Error::new(ErrorKind::Malformed).with_detail("split_by_struct requires inputs"));
     };

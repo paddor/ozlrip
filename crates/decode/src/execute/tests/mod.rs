@@ -24,7 +24,7 @@ use super::partition::{
 };
 use super::runtime::StandardNodeContext;
 use super::runtime::{DecodeRuntime, DecodeScratch};
-use super::{layout_nodes::*, streams::*, string_nodes::*};
+use super::{layout::*, streams::*, string_nodes::*};
 use crate::dict::DictionaryStore;
 use crate::info::FrameValueType;
 use crate::parse::parse_frame_plan;

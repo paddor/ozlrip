@@ -8,7 +8,7 @@ use super::elements::{
 };
 use super::fast_lengths;
 use super::header::require_empty_header;
-use super::layout_nodes::{concat_output_count, read_concat_size};
+use super::layout::{concat_output_count, read_concat_size};
 use super::output::{alloc_output, check_output_len};
 use super::streams::{OwnedStream, StreamInput};
 

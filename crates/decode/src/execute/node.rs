@@ -5,7 +5,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 use smallvec::{SmallVec, smallvec};
 
-use super::layout_nodes::{
+use super::layout::{
     decode_bitsplit_node, decode_concat_node, decode_flatpack_node, decode_float_deconstruct_node,
     decode_merge_sorted_node, decode_mux_lengths_node, decode_sentinel_node,
     decode_split_by_struct_node, decode_splitn_node, decode_splitn_typed_node,
