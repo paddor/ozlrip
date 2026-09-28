@@ -45,7 +45,11 @@ pub(super) fn byte_preserving_conversion_output_width(
             }
             element_width
         }
-        standard::CONVERT_STRUCT_TO_NUM_LE_ID | standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
+        standard::CONVERT_STRUCT_TO_NUM_LE_ID => {
+            require_empty_header(header, "convert_struct_to_num_le headers are unsupported")?;
+            input.element_width
+        }
+        standard::CONVERT_NUM_TO_STRUCT_LE_ID => {
             require_empty_header(header, "convert_num_to_struct_le headers are unsupported")?;
             input.element_width
         }
@@ -123,5 +127,38 @@ pub(super) fn validate_conversion_numeric_width(element_width: usize) -> Result<
         1 | 2 | 4 | 8 => Ok(()),
         _ => Err(Error::new(ErrorKind::InvalidType)
             .with_detail("conversion numeric width is unsupported")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn le_struct_conversion_header_errors_name_their_transform() {
+        let input = StreamInput {
+            bytes: &[0; 4],
+            element_width: 4,
+            string_lengths: None,
+        };
+        for (id, name) in [
+            (
+                standard::CONVERT_STRUCT_TO_NUM_LE_ID,
+                "convert_struct_to_num_le",
+            ),
+            (
+                standard::CONVERT_NUM_TO_STRUCT_LE_ID,
+                "convert_num_to_struct_le",
+            ),
+        ] {
+            let err =
+                byte_preserving_conversion_output_width(id, 1, input, &[0], Limits::default())
+                    .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.detail(),
+                Some(format!("{name} headers are unsupported").as_str())
+            );
+        }
     }
 }

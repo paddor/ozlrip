@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- A `convert_struct_to_num_le` node with a header names itself in its
+  `Unsupported` error detail. It named `convert_num_to_struct_le`.
 - Breaking: remove `Limits::paranoid()`. The `paranoid` feature forbids
   unsafe code and does not change limits; a preset with the same name
   suggested otherwise. Start from `Limits::strict()` and lower the fields
