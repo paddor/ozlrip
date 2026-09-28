@@ -185,13 +185,13 @@ impl Chunk {
         if !self.nodes.is_empty() {
             self.encode_nodes(version, out);
         }
-        for stream in self.stored.iter().rev() {
+        for stream in &self.stored {
             push_var_u64(out, stream.len() as u64);
         }
         for node in &self.nodes {
             out.extend_from_slice(&node.header);
         }
-        for stream in self.stored.iter().rev() {
+        for stream in &self.stored {
             out.extend_from_slice(stream);
         }
     }
