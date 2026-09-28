@@ -14,7 +14,7 @@ use super::layout::{
 };
 use super::lz4::decode_lz4_chunk;
 use super::streams::{OwnedStream, StreamInput};
-use super::string_nodes::{
+use super::strings::{
     decode_concat_string_node, decode_interleave_string_node, decode_prefix_node,
     decode_separate_string_components_node, decode_tokenize_string_node,
 };

@@ -16,7 +16,6 @@ mod elements;
 mod entropy;
 mod fast_bitpack;
 mod fast_delta;
-mod fast_lengths;
 mod fast_partition;
 mod fast_zigzag;
 mod header;
@@ -34,7 +33,7 @@ mod runtime;
 mod slots;
 mod sparse_num;
 mod streams;
-mod string_nodes;
+mod strings;
 mod zstd;
 
 use chunk::{decode_transform_chunk_appending, decode_transform_chunk_with_plan};
