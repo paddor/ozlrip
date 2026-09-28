@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `Decoder::decode_chunks`, which decodes a frame with a single serial
+  output one chunk at a time and passes each chunk's bytes to a callback.
+  Decoded memory peaks at one chunk. Each chunk's content checksum is
+  verified before the callback sees it; an error from the callback stops
+  decoding.
 - A new interop test compresses a spread of inputs with upstream at every
   format version it writes, 8 to 27, through every standard graph, chains
   of numeric nodes and upstream's private deprecated nodes. ozlrip decodes

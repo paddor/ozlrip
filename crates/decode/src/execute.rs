@@ -214,6 +214,99 @@ fn decode_serial_chunks(
     Ok(dst.len() - start_len)
 }
 
+/// Decodes each chunk of a single-serial-output frame and passes its bytes
+/// to `sink`, in frame order. Chunks decode into one buffer that the next
+/// chunk reuses, so decoded memory peaks at one chunk.
+pub(crate) fn decode_chunks_with_context(
+    input: &[u8],
+    plan: &FramePlan,
+    limits: Limits,
+    verify_content: bool,
+    runtime: &mut DecodeRuntime<'_>,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<usize> {
+    if plan.info.output_types.as_slice() != [FrameValueType::Serial] {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("only single serial output frames decode in chunks"));
+    }
+    let mut buffer = runtime
+        .scratch
+        .take_byte_buffer(0, "chunk allocation failed")?;
+    let result = stream_serial_chunks(
+        input,
+        plan,
+        limits,
+        verify_content,
+        runtime,
+        &mut buffer,
+        sink,
+    );
+    runtime.scratch.recycle_byte_buffer(buffer);
+    result
+}
+
+fn stream_serial_chunks(
+    input: &[u8],
+    plan: &FramePlan,
+    limits: Limits,
+    verify_content: bool,
+    runtime: &mut DecodeRuntime<'_>,
+    buffer: &mut Vec<u8>,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<usize> {
+    let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
+    let mut total = 0usize;
+    for chunk in &plan.chunks {
+        buffer.clear();
+        let mut owned = None;
+        let decoded = if chunk.has_nodes() {
+            let execution = build_chunk_execution_plan(chunk)?;
+            if direct_append_tail(&execution).is_some() {
+                decode_transform_chunk_appending(
+                    input,
+                    DirectAppendChunk {
+                        chunk,
+                        execution: &execution,
+                    },
+                    plan.info.format_version,
+                    limits,
+                    budget.remaining(),
+                    buffer,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )?;
+                buffer.as_slice()
+            } else {
+                match decode_transform_chunk_with_plan(
+                    input,
+                    chunk,
+                    &execution,
+                    plan.info.format_version,
+                    limits,
+                    plan.info.dictionary_bundle_id.as_deref(),
+                    runtime,
+                )? {
+                    DecodedChunk::Borrowed(bytes) => bytes,
+                    DecodedChunk::Owned(bytes) => owned.insert(bytes).as_slice(),
+                }
+            }
+        } else {
+            stored_only_chunk(input, chunk)?
+        };
+        budget.consume(decoded.len())?;
+        if verify_content {
+            verify_decoded_checksum(decoded, chunk.decoded_checksum)?;
+        }
+        sink(decoded)?;
+        total += decoded.len();
+        if let Some(bytes) = owned {
+            runtime.scratch.recycle_byte_buffer(bytes);
+        }
+    }
+    budget.finish()?;
+    Ok(total)
+}
+
 /// Appends one decoded chunk. A single-chunk frame whose output is an owned
 /// buffer moves it into an empty `dst` that is too small to hold it, instead
 /// of copying; the displaced allocation goes back to the scratch pool.

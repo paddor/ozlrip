@@ -211,6 +211,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_chunks"
+path = "fuzz_targets/decode_chunks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_outputs"
 path = "fuzz_targets/decode_outputs.rs"
 test = false

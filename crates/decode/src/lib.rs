@@ -153,6 +153,40 @@ impl Decoder {
         )
     }
 
+    /// Decodes a frame with a single serial output chunk by chunk.
+    ///
+    /// Each chunk's decoded bytes go to `sink` in frame order. The next chunk
+    /// reuses their buffer, so decoded memory peaks at one chunk instead of
+    /// the whole output. Returns the total decoded size. Chunks decode one
+    /// after the other; there is no parallel decode.
+    ///
+    /// The whole frame is parsed and its compressed checksums are verified
+    /// first. Each chunk's content checksum is verified before the chunk
+    /// reaches `sink`. The frame's declared output size is checked as chunks
+    /// arrive and after the last one, so `sink` may see chunks of a frame
+    /// that then fails. An error from `sink` stops decoding and is returned.
+    pub fn decode_chunks<F>(&mut self, input: &[u8], mut sink: F) -> Result<usize>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        let options = self.options;
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        let mut runtime = execute::DecodeRuntime::new(
+            &mut self.scratch,
+            &mut self.dict_store,
+            #[cfg(feature = "zstd")]
+            &mut self.zstd,
+        );
+        execute::decode_chunks_with_context(
+            input,
+            &plan,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+            &mut sink,
+        )
+    }
+
     /// Decodes one OpenZL frame into a new `Vec`.
     ///
     /// The frame must have a single serial output; frames with typed or

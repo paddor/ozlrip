@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "openzl/codecs/zl_segmenters.h"
 #include "openzl/openzl.h"
 
 static _Thread_local char OZLRIP_SHIM_LAST_ERROR[8192];
@@ -342,7 +343,8 @@ static ZL_TypedRef* typed_ref(const ozlrip_shim_input* input)
 
 // Compresses `nb_inputs` typed inputs through `nb_nodes` single-output
 // nodes, then one standard graph. `format_version` 0 selects the library
-// default. `store_on_expansion` is a ZL_TernaryParam.
+// default. `store_on_expansion` is a ZL_TernaryParam. A nonzero
+// `chunk_size` splits serial input into chunks of that many bytes first.
 int ozlrip_shim_compress(
         const ozlrip_shim_node* nodes,
         size_t nb_nodes,
@@ -350,6 +352,7 @@ int ozlrip_shim_compress(
         unsigned format_version,
         int compression_level,
         int store_on_expansion,
+        size_t chunk_size,
         const ozlrip_shim_input* inputs,
         size_t nb_inputs,
         void* dst,
@@ -406,6 +409,14 @@ int ozlrip_shim_compress(
                 compressor, pipeline, nb_nodes, start);
         if (!ZL_GraphID_isValid(start)) {
             set_error_message("pipeline graph registration failed");
+            goto cleanup;
+        }
+    }
+    if (chunk_size > 0) {
+        start = ZL_Compressor_buildSerialSegmenter(
+                compressor, chunk_size, start);
+        if (!ZL_GraphID_isValid(start)) {
+            set_error_message("serial segmenter registration failed");
             goto cleanup;
         }
     }

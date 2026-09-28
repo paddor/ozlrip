@@ -53,6 +53,7 @@ unsafe extern "C" {
         format_version: c_uint,
         compression_level: c_int,
         store_on_expansion: c_int,
+        chunk_size: usize,
         inputs: *const ShimInput,
         nb_inputs: usize,
         dst: *mut c_void,
@@ -218,6 +219,9 @@ pub struct CompressOptions {
     /// Store a chunk raw when its graph would expand it. Upstream does so
     /// by default; turning it off keeps every node in the frame.
     pub store_on_expansion: bool,
+    /// Split serial input into chunks of this many bytes, at least 32 KiB,
+    /// through upstream's serial segmenter. `0` keeps one chunk.
+    pub chunk_size: usize,
 }
 
 impl Default for CompressOptions {
@@ -227,6 +231,7 @@ impl Default for CompressOptions {
             format_version: 0,
             level: 0,
             store_on_expansion: true,
+            chunk_size: 0,
         }
     }
 }
@@ -332,6 +337,7 @@ pub fn compress_pipeline(
             options.level,
             // ZL_TernaryParam_enable and ZL_TernaryParam_disable.
             if options.store_on_expansion { 1 } else { 2 },
+            options.chunk_size,
             shim_inputs.as_ptr(),
             shim_inputs.len(),
             dst.as_mut_ptr().cast(),

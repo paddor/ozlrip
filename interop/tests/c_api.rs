@@ -278,3 +278,50 @@ fn assert_header_matches_frame(frame: &[u8]) {
         );
     }
 }
+
+/// `decode_chunks` passes each chunk of upstream's segmented frames on its
+/// own, and together they are the input.
+#[test]
+fn decode_chunks_matches_segmented_frames() {
+    const CHUNK: usize = 64 * 1024;
+    // Letters from a fixed LCG: compressible, but far below the default
+    // expansion limit.
+    let mut state = 0x2545_f491_u32;
+    let input = (0..5 * CHUNK + 123)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            b'a' + (state >> 27) as u8 % 16
+        })
+        .collect::<Vec<_>>();
+    let mut decoder = ozlrip::Decoder::new();
+    let mut frames = 0;
+    for version in 21..=openzl_shim::max_format_version() {
+        for graph in [Graph::Generic, Graph::Store, Graph::Zstd, Graph::Lz4] {
+            let options = CompressOptions {
+                graph,
+                format_version: version,
+                chunk_size: CHUNK,
+                ..CompressOptions::default()
+            };
+            let Ok(frame) = compress(&[Input::Serial(&input)], options) else {
+                continue;
+            };
+            let info = ozlrip::inspect(&frame).unwrap();
+            let mut chunks = Vec::new();
+
+            let written = decoder
+                .decode_chunks(&frame, |chunk| {
+                    chunks.push(chunk.to_vec());
+                    Ok(())
+                })
+                .unwrap_or_else(|err| panic!("v{version} {graph:?}: {err}"));
+
+            assert_eq!(written, input.len(), "v{version} {graph:?}");
+            assert_eq!(chunks.len(), info.chunks, "v{version} {graph:?}");
+            assert_eq!(chunks.len(), 6, "v{version} {graph:?}");
+            assert!(chunks.concat() == input, "v{version} {graph:?}");
+            frames += 1;
+        }
+    }
+    assert!(frames >= 3 * 7, "{frames} frames");
+}
