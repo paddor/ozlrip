@@ -2,8 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
-
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+use ozlrip_test_support::{MAGIC_BASE, push_var_u64};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -65,12 +64,4 @@ fn transpose_split_frame(width: usize, payload: &[u8]) -> Vec<u8> {
     }
     input.push(0);
     input
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

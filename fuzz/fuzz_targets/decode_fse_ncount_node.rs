@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
+use ozlrip_test_support::{MAGIC_BASE, push_var_u64};
 
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const FSE_NCOUNT_ID: u8 = 52;
 
 fuzz_target!(|data: &[u8]| {
@@ -45,12 +45,4 @@ fn standard_transform_serial_frame(transform_id: u8, stored: &[u8], decoded_len:
     input.extend_from_slice(stored);
     input.push(0);
     input
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

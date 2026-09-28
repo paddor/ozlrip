@@ -1,16 +1,12 @@
 use ozlrip::{ErrorKind, Limits, Options};
+use ozlrip_test_support::magic;
 
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
 const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
 const UNIQUE_ID_BYTES: usize = 32;
 const FAT_BUNDLE_FLAG: u8 = 1;
 const ZSTD_ID: u32 = 22;
 const LZ4_ID: u32 = 62;
-
-fn magic(version: u32) -> [u8; 4] {
-    (MAGIC_BASE + version).to_le_bytes()
-}
 
 fn stored_serial_frame(bytes: &[u8]) -> Vec<u8> {
     let mut input = Vec::new();

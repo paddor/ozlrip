@@ -5,26 +5,13 @@ use super::{layout_nodes::*, streams::*, string_nodes::*};
 use crate::parse::parse_frame_plan;
 use alloc::{format, vec};
 use ozlrip_test_support::{Chunk, FrameBuilder, Node};
+use ozlrip_test_support::{bits_needed, magic, push_bitpacked_u32, push_var_u64};
 
 /// Last format version of each deprecated transform (upstream
 /// `decoder_registry.c`).
 const ZSTD_FIXED_LAST_VERSION: u32 = 10;
 const LEGACY_LZ_LAST_VERSION: u32 = 12;
 const LEGACY_ENTROPY_LAST_VERSION: u32 = 14;
-
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
-
-fn magic(version: u32) -> [u8; 4] {
-    (MAGIC_BASE + version).to_le_bytes()
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
-}
 
 fn lz4_serial_frame(stored: &[u8], decoded_len: usize) -> Vec<u8> {
     let mut transform_header = Vec::new();
@@ -170,33 +157,6 @@ fn standard_graph_serial_frame_with_distances(
     }
     input.push(0);
     input
-}
-
-fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
-    if values.is_empty() || bits == 0 {
-        return;
-    }
-    let mut packed = vec![0; (values.len() * bits).div_ceil(8)];
-    for (index, &value) in values.iter().enumerate() {
-        let bit_offset = index * bits;
-        let byte_offset = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-        let lane = u64::from(value) << bit_shift;
-        let lane_bytes = lane.to_le_bytes();
-        let byte_count = (bit_shift + bits).div_ceil(8);
-        for byte_index in 0..byte_count {
-            packed[byte_offset + byte_index] |= lane_bytes[byte_index];
-        }
-    }
-    out.extend_from_slice(&packed);
-}
-
-fn bits_needed(max_value: usize) -> usize {
-    if max_value <= 1 {
-        0
-    } else {
-        usize::BITS as usize - (max_value - 1).leading_zeros() as usize
-    }
 }
 
 fn concat_serial_frame(payload: &[u8]) -> Vec<u8> {

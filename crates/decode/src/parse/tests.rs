@@ -1,32 +1,7 @@
 use super::*;
 use alloc::vec;
 use ozlrip_test_support::{Chunk, FrameBuilder, OutputType};
-
-fn magic(version: u32) -> [u8; 4] {
-    (MAGIC_BASE + version).to_le_bytes()
-}
-
-fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
-    let len = (values.len() * bits).div_ceil(8);
-    let start = out.len();
-    out.resize(start + len, 0);
-    for (index, &value) in values.iter().enumerate() {
-        for bit in 0..bits {
-            if ((value >> bit) & 1) != 0 {
-                let absolute = index * bits + bit;
-                out[start + absolute / 8] |= 1 << (absolute % 8);
-            }
-        }
-    }
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
-}
+use ozlrip_test_support::{magic, push_bitpacked_u32, push_var_u64};
 
 fn push_v21_output_sizes(out: &mut Vec<u8>, outputs: usize) {
     for _ in 0..outputs {

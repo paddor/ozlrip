@@ -4,6 +4,7 @@ use super::{
 use crate::parse::parse_frame_plan;
 use alloc::vec::Vec;
 use ozlrip_core::{ErrorKind, Limits};
+use ozlrip_test_support::{magic, push_var_u64};
 
 fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
     StreamInput {
@@ -11,18 +12,6 @@ fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
         element_width,
         string_lengths: None,
     }
-}
-
-fn magic(version: u32) -> [u8; 4] {
-    (0xd7b1_a5c0u32 + version).to_le_bytes()
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }
 
 fn standard_transform_serial_frame(

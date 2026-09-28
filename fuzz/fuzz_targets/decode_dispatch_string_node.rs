@@ -2,8 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
-
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+use ozlrip_test_support::{MAGIC_BASE, push_bitpacked_u32, push_var_u64};
 
 fuzz_target!(|data: &[u8]| {
     let frame = dispatch_string_graph_frame(data);
@@ -51,12 +50,12 @@ fn dispatch_string_graph_frame(data: &[u8]) -> Vec<u8> {
     push_var_u64(&mut input, 4);
     push_var_u64(&mut input, 5);
     input.push(0);
-    input.extend_from_slice(&pack_values(&[12, 12, 54], 6));
+    push_bitpacked_u32(&mut input, &[12, 12, 54], 6);
     input.push(0);
     input.push(0b0000_0100);
     input.push(1);
     input.push(0);
-    input.extend_from_slice(&pack_values(&[3, 0, 0], 3));
+    push_bitpacked_u32(&mut input, &[3, 0, 0], 3);
     for stream in stored_streams {
         push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
     }
@@ -102,31 +101,4 @@ fn dispatch_indices(first_count: usize, second_count: usize, data: &[u8]) -> Vec
         indices.extend_from_slice(&source.to_le_bytes());
     }
     indices
-}
-
-fn pack_values(values: &[u32], bits: usize) -> Vec<u8> {
-    if bits == 0 || values.is_empty() {
-        return Vec::new();
-    }
-    let mut out = vec![0; (values.len() * bits).div_ceil(8)];
-    for (index, &value) in values.iter().enumerate() {
-        let bit_offset = index * bits;
-        let byte_offset = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-        let lane = u64::from(value) << bit_shift;
-        let bytes = lane.to_le_bytes();
-        let byte_count = (bit_shift + bits).div_ceil(8);
-        for byte_index in 0..byte_count {
-            out[byte_offset + byte_index] |= bytes[byte_index];
-        }
-    }
-    out
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

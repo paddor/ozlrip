@@ -193,25 +193,13 @@ pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo>
 mod tests {
     use super::*;
     use ozlrip_core::ErrorKind;
+    use ozlrip_test_support::{magic, push_var_u64};
 
-    const MAGIC_BASE: u32 = 0xd7b1_a5c0;
     const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
     const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
     const BUNDLE_ID: [u8; 32] = [7; 32];
     const OTHER_BUNDLE_ID: [u8; 32] = [8; 32];
     const DICT_ID: [u8; 32] = [9; 32];
-
-    fn magic(version: u32) -> [u8; 4] {
-        (MAGIC_BASE + version).to_le_bytes()
-    }
-
-    fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-        while value >= 0x80 {
-            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-            value >>= 7;
-        }
-        out.push(u8::try_from(value).unwrap());
-    }
 
     #[cfg(feature = "zstd")]
     fn test_zstd_dict_bytes() -> Vec<u8> {

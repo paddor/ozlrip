@@ -2,8 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
-
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+use ozlrip_test_support::{MAGIC_BASE, push_bitpacked_u32, push_var_u64};
 
 fuzz_target!(|data: &[u8]| {
     let frame = field_lz_graph_frame(data);
@@ -56,14 +55,14 @@ fn field_lz_graph_frame(data: &[u8]) -> Vec<u8> {
     push_var_u64(&mut input, 6);
     push_var_u64(&mut input, 5);
     input.push(0);
-    input.extend_from_slice(&pack_values(&[10, 10, 10, 10, 24], 7));
+    push_bitpacked_u32(&mut input, &[10, 10, 10, 10, 24], 7);
     input.push(0b0001_1111);
     for size in [1usize, 1, 1, 1, field_lz_header.len()] {
         push_var_u64(&mut input, u64::try_from(size - 1).unwrap());
     }
     input.push(0);
     input.push(0);
-    input.extend_from_slice(&pack_values(&[6, 4, 2, 0, 0], 4));
+    push_bitpacked_u32(&mut input, &[6, 4, 2, 0, 0], 4);
     for stream in stored_streams {
         push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
     }
@@ -85,31 +84,4 @@ fn take_aligned(input: &[u8], seed: Option<u8>, align: usize) -> (&[u8], &[u8]) 
     let len = usize::from(seed.unwrap_or(0)) % (input.len() + 1);
     let len = len - (len % align);
     input.split_at(len)
-}
-
-fn pack_values(values: &[u32], bits: usize) -> Vec<u8> {
-    if bits == 0 || values.is_empty() {
-        return Vec::new();
-    }
-    let mut out = vec![0; (values.len() * bits).div_ceil(8)];
-    for (index, &value) in values.iter().enumerate() {
-        let bit_offset = index * bits;
-        let byte_offset = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-        let lane = u64::from(value) << bit_shift;
-        let bytes = lane.to_le_bytes();
-        let byte_count = (bit_shift + bits).div_ceil(8);
-        for byte_index in 0..byte_count {
-            out[byte_offset + byte_index] |= bytes[byte_index];
-        }
-    }
-    out
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

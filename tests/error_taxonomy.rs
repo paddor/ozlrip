@@ -1,17 +1,13 @@
 use ozlrip::{ErrorKind, Limits, Options};
+use ozlrip_test_support::{magic, push_bitpacked_u32, push_var_u64};
 
 const MANIFEST: &str = include_str!("fixtures/error-taxonomy.tsv");
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
 const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
 const UNIQUE_ID_BYTES: usize = 32;
 const FAT_BUNDLE_FLAG: u8 = 1;
 const ZSTD_ID: u32 = 22;
 const LZ4_ID: u32 = 62;
-
-fn magic(version: u32) -> [u8; 4] {
-    (MAGIC_BASE + version).to_le_bytes()
-}
 
 fn stored_serial_frame(bytes: &[u8]) -> Vec<u8> {
     let mut input = Vec::new();
@@ -88,14 +84,6 @@ fn append_standard_transform_chunk(
     push_var_u64(input, u64::try_from(stored.len()).unwrap());
     input.extend_from_slice(transform_header);
     input.extend_from_slice(stored);
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }
 
 fn dictionary_bundle(codec_id: u32, custom: bool) -> Vec<u8> {
@@ -540,20 +528,6 @@ fn duplicate_regen_distance_frame() -> Vec<u8> {
     input.extend_from_slice(&[1, 2, 3]);
     input.push(0);
     input
-}
-
-fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
-    let mut bytes = vec![0u8; values.len().saturating_mul(bits).div_ceil(8)];
-    for (index, &value) in values.iter().enumerate() {
-        for bit in 0..bits {
-            if (value >> bit) & 1 == 0 {
-                continue;
-            }
-            let bit_index = index * bits + bit;
-            bytes[bit_index / 8] |= 1 << (bit_index % 8);
-        }
-    }
-    out.extend_from_slice(&bytes);
 }
 
 fn stored_stream_size_overflow_frame() -> Vec<u8> {
