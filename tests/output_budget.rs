@@ -34,7 +34,10 @@ fn limit_errors_name_the_limit() {
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     let detail = err.detail().unwrap();
-    assert!(detail.starts_with("max_frame_bytes exceeds its limit"), "{detail}");
+    assert!(
+        detail.starts_with("max_frame_bytes exceeds its limit"),
+        "{detail}"
+    );
 }
 
 /// With every limit raised, a declared size above `isize::MAX` passes the
