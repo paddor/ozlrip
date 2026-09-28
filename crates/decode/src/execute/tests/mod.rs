@@ -14,13 +14,10 @@ use super::lz::{
 #[cfg(feature = "lz4")]
 use super::lz4::*;
 use super::node::execute_standard_node;
-use super::numeric_nodes::decode_dedup_num_node;
-use super::numeric_nodes::{
-    decode_bitunpack_node, decode_constant_fixed_chunk, decode_delta_node, decode_divide_by_node,
-    decode_range_pack_node, decode_zigzag_numeric_chunk,
-};
-use super::partition::{
-    QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node,
+use super::numeric::{
+    QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitunpack_node, decode_constant_fixed_chunk,
+    decode_dedup_num_node, decode_delta_node, decode_divide_by_node, decode_partition_node,
+    decode_quantize_node, decode_range_pack_node, decode_zigzag_numeric_chunk,
 };
 use super::runtime::StandardNodeContext;
 use super::runtime::{DecodeRuntime, DecodeScratch};

@@ -7,31 +7,22 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::info::FrameValueType;
 
-mod bit_reader;
 mod chunk;
-mod conversion;
 mod direct_append;
 mod dispatch;
 mod elements;
 mod entropy;
-mod fast_bitpack;
-mod fast_delta;
-mod fast_partition;
-mod fast_zigzag;
 mod header;
 mod layout;
 mod lz;
 mod lz4;
 mod node;
-mod numeric_nodes;
+mod numeric;
 mod output;
 mod outputs;
-mod parse_int;
-mod partition;
 mod plan;
 mod runtime;
 mod slots;
-mod sparse_num;
 mod streams;
 mod strings;
 mod zstd;
@@ -45,13 +36,6 @@ pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 use zstd::try_decode_single_zstd_into_dst;
 #[cfg(feature = "zstd")]
 pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
-
-#[cfg(test)]
-mod convert_be_corpus;
-#[cfg(test)]
-mod parse_int_corpus;
-#[cfg(test)]
-mod sparse_num_corpus;
 
 #[cfg(test)]
 pub(crate) fn decode_plan(

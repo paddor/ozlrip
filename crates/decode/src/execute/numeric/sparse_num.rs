@@ -2,8 +2,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::output::alloc_output;
-use super::{
+use crate::execute::output::alloc_output;
+use crate::execute::{
     elements::push_numeric_element,
     elements::{numeric_element_count, read_usize_numeric_element},
     streams::{OwnedStream, StreamInput},
@@ -11,7 +11,7 @@ use super::{
 
 #[inline(never)]
 #[cold]
-pub(super) fn decode_node(
+pub(in crate::execute) fn decode_sparse_num_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,

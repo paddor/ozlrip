@@ -2,14 +2,14 @@ use alloc::{string::ToString, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::header::require_empty_header;
-use super::output::check_output_len;
-use super::{
+use crate::execute::header::require_empty_header;
+use crate::execute::output::check_output_len;
+use crate::execute::{
     elements::numeric_element_count,
     streams::{OwnedStream, StreamInput},
 };
 
-pub(super) fn decode_node(
+pub(in crate::execute) fn decode_parse_int_node(
     input: StreamInput<'_>,
     header: &[u8],
     limits: Limits,

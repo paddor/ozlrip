@@ -3,10 +3,10 @@ use alloc::vec::Vec;
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::conversion::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
 use super::header::require_empty_header;
 use super::layout::append_split_by_struct_output;
 use super::layout::split_by_struct_output_len;
+use super::numeric::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
 use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::slots::StreamSlot;

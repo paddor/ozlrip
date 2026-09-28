@@ -1,4 +1,5 @@
-use super::{sparse_num, streams::StreamInput};
+use super::sparse_num::decode_sparse_num_node;
+use crate::execute::streams::StreamInput;
 use ozlrip_core::{ErrorKind, Limits};
 
 fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
@@ -13,7 +14,7 @@ fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {
 fn sparse_num_accepts_zero_literal() {
     let distances = [3, 1];
     let values = [0];
-    let output = sparse_num::decode_node(
+    let output = decode_sparse_num_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[],
         Limits::default(),
@@ -28,7 +29,7 @@ fn sparse_num_accepts_zero_literal() {
 fn sparse_num_decodes_explicit_dominant() {
     let distances = [2, 0, 1];
     let values = [1, 2];
-    let output = sparse_num::decode_node(
+    let output = decode_sparse_num_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[7],
         Limits::default(),
@@ -43,7 +44,7 @@ fn sparse_num_decodes_explicit_dominant() {
 fn sparse_num_decodes_wide_explicit_dominant() {
     let distances = [1, 2];
     let values = [5u16.to_le_bytes(), 6u16.to_le_bytes()].concat();
-    let output = sparse_num::decode_node(
+    let output = decode_sparse_num_node(
         &[stream(&distances, 1), stream(&values, 2)],
         &1024u16.to_le_bytes(),
         Limits::default(),
@@ -68,7 +69,7 @@ fn sparse_num_decodes_wide_explicit_dominant() {
 fn sparse_num_rejects_invalid_distance_count() {
     let distances = [0, 0, 0];
     let values = [1];
-    let err = sparse_num::decode_node(
+    let err = decode_sparse_num_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[],
         Limits::default(),
@@ -82,7 +83,7 @@ fn sparse_num_rejects_invalid_distance_count() {
 fn sparse_num_rejects_header_wider_than_value() {
     let distances = [0];
     let values = [1];
-    let err = sparse_num::decode_node(
+    let err = decode_sparse_num_node(
         &[stream(&distances, 1), stream(&values, 1)],
         &[1, 0],
         Limits::default(),

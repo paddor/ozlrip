@@ -4,7 +4,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
-use super::{bit_reader::ForwardBitReader, streams::OwnedStream};
+use super::bit_reader::ForwardBitReader;
+use crate::execute::streams::OwnedStream;
 
 pub(super) fn decode_u32_node(
     buckets: &[u8],

@@ -1,18 +1,19 @@
-//! Conversion nodes that relabel their input without changing its bytes,
-//! and the header checks the numeric conversions share.
+//! Conversion nodes: the ones that relabel their input without changing
+//! its bytes, the big-endian numeric conversions, and the header checks
+//! the numeric conversions share.
 
 use alloc::format;
-
-use ozlrip_core::{Error, ErrorKind, Limits, Result};
+use alloc::vec::Vec;
 
 use crate::standard;
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::elements::{checked_sum_u32, read_var_u64};
-use super::header::require_empty_header;
-use super::output::check_output_len;
-use super::streams::StreamInput;
+use crate::execute::elements::{checked_sum_u32, read_var_u64};
+use crate::execute::header::require_empty_header;
+use crate::execute::output::check_output_len;
+use crate::execute::streams::{OwnedStream, StreamInput};
 
-pub(super) fn is_byte_preserving_conversion(standard_id: u32) -> bool {
+pub(in crate::execute) fn is_byte_preserving_conversion(standard_id: u32) -> bool {
     matches!(
         standard_id,
         standard::CONVERT_SERIAL_TO_STRUCT_ID
@@ -25,7 +26,7 @@ pub(super) fn is_byte_preserving_conversion(standard_id: u32) -> bool {
     )
 }
 
-pub(super) fn byte_preserving_conversion_output_width(
+pub(in crate::execute) fn byte_preserving_conversion_output_width(
     standard_id: u32,
     input_count: usize,
     input: StreamInput<'_>,
@@ -108,7 +109,7 @@ fn read_single_conversion_width(header: &[u8]) -> Result<usize> {
     Ok(element_width)
 }
 
-pub(super) fn read_conversion_int_size(header: &[u8], transform: &'static str) -> Result<usize> {
+fn read_conversion_int_size(header: &[u8], transform: &'static str) -> Result<usize> {
     let [int_log] = header else {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform} header is malformed")));
@@ -122,12 +123,61 @@ pub(super) fn read_conversion_int_size(header: &[u8], transform: &'static str) -
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
-pub(super) fn validate_conversion_numeric_width(element_width: usize) -> Result<()> {
+fn validate_conversion_numeric_width(element_width: usize) -> Result<()> {
     match element_width {
         1 | 2 | 4 | 8 => Ok(()),
         _ => Err(Error::new(ErrorKind::InvalidType)
             .with_detail("conversion numeric width is unsupported")),
     }
+}
+
+pub(in crate::execute) fn decode_struct_to_num_be_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    require_empty_header(header, "convert_struct_to_num_be headers are unsupported")?;
+    decode_big_endian_numeric_conversion(stored, stored.element_width, limits)
+}
+
+pub(in crate::execute) fn decode_serial_to_num_be_chunk(
+    stored: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    let int_size = read_conversion_int_size(header, "convert_serial_to_num_be")?;
+    if !stored.bytes.len().is_multiple_of(int_size) {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("serial stream size is not a multiple of integer width"));
+    }
+    decode_big_endian_numeric_conversion(stored, int_size, limits)
+}
+
+fn decode_big_endian_numeric_conversion(
+    stored: StreamInput<'_>,
+    element_width: usize,
+    limits: Limits,
+) -> Result<OwnedStream> {
+    validate_conversion_numeric_width(element_width)?;
+    check_output_len(stored.bytes.len(), limits)?;
+    if !stored.bytes.len().is_multiple_of(element_width) {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("numeric stream has partial element")
+        );
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
+        Error::new(ErrorKind::AllocationFailed).with_detail("conversion allocation failed")
+    })?;
+    for element in stored.bytes.chunks_exact(element_width) {
+        output.extend(element.iter().rev().copied());
+    }
+    Ok(OwnedStream {
+        bytes: output,
+        element_width,
+        string_lengths: None,
+        recyclable: false,
+    })
 }
 
 #[cfg(test)]

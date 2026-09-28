@@ -29,14 +29,13 @@ use super::{
         decode_fastlz_deprecated_node, decode_field_lz_node, decode_lz_node,
         decode_rolz_deprecated_node,
     },
-    numeric_nodes::{
-        decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_node,
-        decode_constant_fixed_chunk, decode_constant_serial_chunk, decode_delta_node,
-        decode_divide_by_node, decode_range_pack_node, decode_serial_to_num_be_chunk,
+    numeric::{
+        QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitpack_int_chunk, decode_bitpack_serial_chunk,
+        decode_bitunpack_node, decode_constant_fixed_chunk, decode_constant_serial_chunk,
+        decode_delta_node, decode_divide_by_node, decode_parse_int_node, decode_partition_node,
+        decode_quantize_node, decode_range_pack_node, decode_serial_to_num_be_chunk,
         decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
     },
-    parse_int,
-    partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node},
     runtime::StandardNodeContext,
     zstd::decode_zstd_chunk,
 };
@@ -234,7 +233,7 @@ pub(super) fn execute_standard_node(
             header,
             ctx.limits,
         )),
-        standard::PARSE_INT_ID => one_typed(parse_int::decode_node(
+        standard::PARSE_INT_ID => one_typed(decode_parse_int_node(
             single_stream(inputs)?,
             header,
             ctx.limits,

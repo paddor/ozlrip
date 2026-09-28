@@ -2,18 +2,16 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::elements::push_numeric_element;
-use super::header::require_empty_header;
-use super::output::check_output_len;
-
-use super::{
-    bit_reader::ForwardBitReader,
-    elements::{max_numeric_value, read_var_u64, require_numeric_width},
-    fast_partition,
-    streams::{OwnedStream, StreamInput},
+use super::bit_reader::ForwardBitReader;
+use super::fast_partition;
+use crate::execute::elements::{
+    max_numeric_value, push_numeric_element, read_var_u64, require_numeric_width,
 };
+use crate::execute::header::require_empty_header;
+use crate::execute::output::check_output_len;
+use crate::execute::streams::{OwnedStream, StreamInput};
 
-pub(super) struct QuantizeParams {
+pub(in crate::execute) struct QuantizeParams {
     bits: &'static [u8],
     base: &'static [u32],
 }
@@ -106,16 +104,16 @@ const QUANTIZE_LENGTHS_BASE: [u32; 44] = [
     0x4000_0000,
     0x8000_0000,
 ];
-pub(super) const QUANTIZE_OFFSETS: QuantizeParams = QuantizeParams {
+pub(in crate::execute) const QUANTIZE_OFFSETS: QuantizeParams = QuantizeParams {
     bits: &QUANTIZE_OFFSETS_BITS,
     base: &QUANTIZE_OFFSETS_BASE,
 };
-pub(super) const QUANTIZE_LENGTHS: QuantizeParams = QuantizeParams {
+pub(in crate::execute) const QUANTIZE_LENGTHS: QuantizeParams = QuantizeParams {
     bits: &QUANTIZE_LENGTHS_BITS,
     base: &QUANTIZE_LENGTHS_BASE,
 };
 
-pub(super) fn decode_quantize_node(
+pub(in crate::execute) fn decode_quantize_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
@@ -272,7 +270,7 @@ struct PartitionParams {
 }
 
 #[inline(never)]
-pub(super) fn decode_partition_node(
+pub(in crate::execute) fn decode_partition_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
