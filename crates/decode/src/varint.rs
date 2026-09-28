@@ -2,6 +2,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 /// Reads an OpenZL varint (unsigned LEB128, at most ten bytes) from `bytes`
 /// at `*offset` and moves `offset` past it. `offset` is unchanged on error.
+#[inline]
 pub(crate) fn read_var_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
     let start = *offset;
     let mut value = 0u64;
