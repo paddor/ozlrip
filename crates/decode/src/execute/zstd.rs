@@ -9,13 +9,13 @@ use crate::parse::FramePlan;
 #[cfg(feature = "zstd")]
 use crate::{parse::SingleZstdFrame, standard};
 
-use super::StandardNodeContext;
 #[cfg(feature = "zstd")]
 use super::output::{OutputBudget, size_mismatch};
 #[cfg(feature = "zstd")]
 use super::verify_decoded_checksum;
 #[cfg(feature = "zstd")]
 use super::{DecodeScratch, read_var_u64};
+use super::{OwnedStream, StandardNodeContext};
 
 /// The zstd context in `slot`, created on first use.
 #[cfg(feature = "zstd")]
@@ -108,9 +108,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     if element_width == 0 || element_width != 1 {
         return Ok(None);
     }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
+    let magicless = zstd_frame_after_magic(stored, offset, plan.info.format_version)?;
     let mut budget = OutputBudget::for_output(plan, 0, input.len(), limits)?;
     let start = dst.len();
     let written =
@@ -150,33 +148,52 @@ pub(super) fn try_decode_single_zstd_into_dst(
 }
 
 #[cfg(feature = "zstd")]
+/// Decodes a zstd node. The deprecated `zstd_fixed` node outputs records of
+/// the width its input states; `zstd` outputs bytes.
 pub(super) fn decode_zstd_chunk(
     stored: &[u8],
     header: &[u8],
     dict_index: Option<u32>,
+    fixed: bool,
     ctx: &mut StandardNodeContext<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<OwnedStream> {
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("zstd transform headers are unsupported"));
     }
     let mut offset = 0usize;
     let element_width = read_var_u64(stored, &mut offset)?;
-    if element_width == 0 || element_width != 1 {
+    if element_width == 0 {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("zstd element width is zero"));
+    }
+    if element_width != 1 && !fixed {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only serial byte zstd output is implemented"));
     }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
-    if let Some(dict_index) = dict_index {
+    let element_width = usize::try_from(element_width).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("zstd element width is too large")
+    })?;
+    let magicless = zstd_frame_after_magic(stored, offset, ctx.format_version)?;
+    let bytes = if let Some(dict_index) = dict_index {
         let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
             Error::new(ErrorKind::Malformed).with_detail("dictionary-backed node has no bundle ID")
         })?;
         let dict_zstd = ctx.dict_store.zstd_context(bundle_id, dict_index)?;
-        return decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, dict_zstd);
+        decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, dict_zstd)?
+    } else {
+        decode_zstd_magicless_with_context(
+            magicless,
+            ctx.limits,
+            ctx.scratch,
+            zstd_context(ctx.zstd),
+        )?
+    };
+    if !bytes.len().is_multiple_of(element_width) {
+        ctx.scratch.recycle_byte_buffer(bytes);
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("zstd content size is not a multiple of its element width"));
     }
-    decode_zstd_magicless_with_context(magicless, ctx.limits, ctx.scratch, zstd_context(ctx.zstd))
+    Ok(OwnedStream::pooled(bytes, element_width))
 }
 
 #[cfg(feature = "zstd")]
@@ -198,9 +215,7 @@ pub(super) fn decode_zstd_chunk_to_output(
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("only serial byte zstd output is implemented"));
     }
-    let magicless = stored
-        .get(offset..)
-        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
+    let magicless = zstd_frame_after_magic(stored, offset, ctx.format_version)?;
     let start = dst.len();
     let written = if let Some(dict_index) = dict_index {
         let bundle_id = ctx.dictionary_bundle_id.ok_or_else(|| {
@@ -278,6 +293,30 @@ fn decode_zstd_magicless_with_context(
     Ok(output)
 }
 
+/// First format version whose zstd nodes omit the zstd magic number.
+#[cfg(feature = "zstd")]
+const ZSTD_MAGICLESS_VERSION_MIN: u32 = 9;
+
+/// The zstd magic number, little-endian.
+#[cfg(feature = "zstd")]
+const ZSTD_MAGIC: [u8; 4] = 0xfd2f_b528_u32.to_le_bytes();
+
+/// The zstd frame in a zstd node's input, which starts at `offset` after the
+/// element width, without its magic number. Upstream writes the magic
+/// before format v9.
+#[cfg(feature = "zstd")]
+fn zstd_frame_after_magic(stored: &[u8], offset: usize, format_version: u32) -> Result<&[u8]> {
+    let frame = stored
+        .get(offset..)
+        .ok_or_else(|| Error::at(ErrorKind::Malformed, offset))?;
+    if format_version >= ZSTD_MAGICLESS_VERSION_MIN {
+        return Ok(frame);
+    }
+    frame
+        .strip_prefix(&ZSTD_MAGIC)
+        .ok_or_else(|| Error::new(ErrorKind::Malformed).with_detail("zstd magic number is missing"))
+}
+
 /// Spare bytes zrip's block writer keeps past the end of its output.
 #[cfg(feature = "zstd")]
 const ZSTD_OUTPUT_SLACK: usize = 64;
@@ -313,8 +352,9 @@ pub(super) fn decode_zstd_chunk(
     _stored: &[u8],
     _header: &[u8],
     _dict_index: Option<u32>,
+    _fixed: bool,
     _ctx: &mut StandardNodeContext<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<OwnedStream> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("zstd support is disabled"))
 }
 

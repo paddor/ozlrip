@@ -27,13 +27,13 @@ use super::string_nodes::{
 };
 use super::{
     DecodeScratch, QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitpack_int_chunk,
-    decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk, decode_constant_fixed_chunk,
+    decode_bitpack_serial_chunk, decode_bitunpack_node, decode_constant_fixed_chunk,
     decode_constant_serial_chunk, decode_delta_node, decode_dispatch_n_by_tag_node,
     decode_dispatch_string_node, decode_divide_by_node, decode_fastlz_deprecated_node,
     decode_field_lz_node, decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
     decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
     decode_huffman_struct_v2_node, decode_huffman_v2_node, decode_lz_node, decode_partition_node,
-    decode_quantize_node, decode_range_pack_serial8_chunk, decode_rolz_deprecated_node,
+    decode_quantize_node, decode_range_pack_node, decode_rolz_deprecated_node,
     decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
     decode_zstd_chunk, parse_int, pivco_huffman,
 };
@@ -351,10 +351,13 @@ pub(super) fn execute_standard_node(
             ctx.limits,
         )),
         standard::LZ4_ID => one_serial(decode_lz4_chunk(single_input(inputs)?, header, ctx.limits)),
-        standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_typed(
-            decode_zstd_chunk(single_input(inputs)?, header, dict_index, ctx)
-                .map(|bytes| OwnedStream::pooled(bytes, 1)),
-        ),
+        standard::ZSTD_ID | standard::ZSTD_FIXED_ID => one_typed(decode_zstd_chunk(
+            single_input(inputs)?,
+            header,
+            dict_index,
+            standard_id == standard::ZSTD_FIXED_ID,
+            ctx,
+        )),
         standard::BITPACK_SERIAL_ID => one_serial(decode_bitpack_serial_chunk(
             single_input(inputs)?,
             header,
@@ -407,6 +410,7 @@ pub(super) fn execute_standard_node(
         standard::DELTA_INT_ID => one_typed(decode_delta_node(
             single_stream(inputs)?,
             header,
+            ctx.format_version,
             ctx.limits,
             ctx.scratch,
         )),
@@ -415,8 +419,8 @@ pub(super) fn execute_standard_node(
             header,
             ctx.limits,
         )),
-        standard::BITUNPACK_ID => one_serial(decode_bitunpack_serial8_chunk(
-            single_input(inputs)?,
+        standard::BITUNPACK_ID => one_serial(decode_bitunpack_node(
+            single_stream(inputs)?,
             header,
             ctx.limits,
         )),
@@ -426,8 +430,8 @@ pub(super) fn execute_standard_node(
             header,
             ctx.limits,
         )),
-        standard::RANGE_PACK_ID => one_serial(decode_range_pack_serial8_chunk(
-            single_input(inputs)?,
+        standard::RANGE_PACK_ID => one_typed(decode_range_pack_node(
+            single_stream(inputs)?,
             header,
             ctx.limits,
         )),

@@ -23,6 +23,13 @@ struct ShimInput {
     count: usize,
 }
 
+#[repr(C)]
+struct ShimNode {
+    kind: c_int,
+    param: c_int,
+    name: *const c_char,
+}
+
 unsafe extern "C" {
     fn ozlrip_shim_last_error() -> *const c_char;
     fn ozlrip_shim_min_format_version() -> c_uint;
@@ -40,9 +47,12 @@ unsafe extern "C" {
         written: *mut usize,
     ) -> c_int;
     fn ozlrip_shim_compress(
+        nodes: *const ShimNode,
+        nb_nodes: usize,
         graph: c_int,
         format_version: c_uint,
         compression_level: c_int,
+        store_on_expansion: c_int,
         inputs: *const ShimInput,
         nb_inputs: usize,
         dst: *mut c_void,
@@ -205,6 +215,9 @@ pub struct CompressOptions {
     /// `0` selects [`default_format_version`].
     pub format_version: u32,
     pub level: i32,
+    /// Store a chunk raw when its graph would expand it. Upstream does so
+    /// by default; turning it off keeps every node in the frame.
+    pub store_on_expansion: bool,
 }
 
 impl Default for CompressOptions {
@@ -213,12 +226,67 @@ impl Default for CompressOptions {
             graph: Graph::Generic,
             format_version: 0,
             level: 0,
+            store_on_expansion: true,
+        }
+    }
+}
+
+/// Standard nodes with one input and one output, for [`compress_pipeline`].
+/// Keep in sync with `openzl_shim.c`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Node {
+    /// Serial bytes to little-endian integers of this width: 1, 2, 4 or 8.
+    SerialToNumLe(u8),
+    /// Integers to their little-endian bytes.
+    NumToSerialLe,
+    DeltaInt,
+    Zigzag,
+    RangePack,
+    /// Serial bits to integers of this many bits each.
+    Bitunpack(u8),
+    /// Serial bytes to records of this width: 2, 4 or 8.
+    SerialToStruct(u8),
+    /// A node by name without the leading `!`, such as upstream's private
+    /// `zl.private.rolz_deprecated`.
+    Named(&'static CStr),
+}
+
+impl Node {
+    fn shim(self) -> ShimNode {
+        let (kind, param) = match self {
+            Self::SerialToNumLe(width) => (0, width),
+            Self::NumToSerialLe => (1, 0),
+            Self::DeltaInt => (2, 0),
+            Self::Zigzag => (3, 0),
+            Self::RangePack => (4, 0),
+            Self::Bitunpack(bits) => (5, bits),
+            Self::Named(_) => (6, 0),
+            Self::SerialToStruct(width) => (7, width),
+        };
+        let name = match self {
+            Self::Named(name) => name.as_ptr(),
+            _ => ptr::null(),
+        };
+        ShimNode {
+            kind,
+            param: c_int::from(param),
+            name,
         }
     }
 }
 
 /// Compresses typed inputs into one OpenZL frame.
 pub fn compress(inputs: &[Input<'_>], options: CompressOptions) -> Result<Vec<u8>, Error> {
+    compress_pipeline(inputs, &[], options)
+}
+
+/// Compresses typed inputs through `nodes` in order, then `options.graph`.
+pub fn compress_pipeline(
+    inputs: &[Input<'_>],
+    nodes: &[Node],
+    options: CompressOptions,
+) -> Result<Vec<u8>, Error> {
+    let shim_nodes = nodes.iter().map(|node| node.shim()).collect::<Vec<_>>();
     // OpenZL reads numeric inputs as aligned host-endian arrays, so copy them
     // into u64-aligned storage first.
     let aligned = inputs
@@ -244,15 +312,26 @@ pub fn compress(inputs: &[Input<'_>], options: CompressOptions) -> Result<Vec<u8
         .sum::<usize>();
     // SAFETY: pure computation.
     let bound = unsafe { ozlrip_shim_compress_bound(total) };
-    let mut dst = vec![0u8; bound];
+    // Without the store fallback a graph may expand its input, by up to 8
+    // times for one-bit unpacking.
+    let capacity = if options.store_on_expansion {
+        bound
+    } else {
+        bound.saturating_mul(9)
+    };
+    let mut dst = vec![0u8; capacity];
     let mut written = 0usize;
     // SAFETY: every `ShimInput` points into `inputs` or `aligned`, both alive
-    // for the whole call; `dst` is valid for `dst.len()` bytes.
+    // for the whole call; `shim_nodes` and `dst` are valid for their lengths.
     check(unsafe {
         ozlrip_shim_compress(
+            shim_nodes.as_ptr(),
+            shim_nodes.len(),
             options.graph as c_int,
             options.format_version,
             options.level,
+            // ZL_TernaryParam_enable and ZL_TernaryParam_disable.
+            if options.store_on_expansion { 1 } else { 2 },
             shim_inputs.as_ptr(),
             shim_inputs.len(),
             dst.as_mut_ptr().cast(),

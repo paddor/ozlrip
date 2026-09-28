@@ -87,6 +87,115 @@ fn decodes_v10_zstd_fixed_serial_chunk() {
     assert_eq!(output, expected);
 }
 
+/// Before format v9 zstd nodes hold whole zstd frames, magic number
+/// included.
+#[cfg(feature = "zstd")]
+#[test]
+fn decodes_v8_zstd_frames_with_their_magic_number() {
+    let expected = b"zstd frame with its magic number";
+    let mut stored = Vec::new();
+    push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&zrip::compress(expected, 1).unwrap());
+    let input = standard_transform_serial_frame(8, 22, &stored, expected.len(), &[]);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(output, expected);
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn rejects_v8_zstd_frames_without_their_magic_number() {
+    let expected = b"zstd frame without its magic number";
+    let stored = zstd_stored_stream(expected);
+    let input = standard_transform_serial_frame(8, 22, &stored, expected.len(), &[]);
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = vec![1, 2];
+
+    let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(err.detail(), Some("zstd magic number is missing"));
+    assert_eq!(output, [1, 2]);
+}
+
+/// Runs one zstd or `zstd_fixed` node over `stored` in format v10.
+#[cfg(feature = "zstd")]
+fn run_zstd_node(standard_id: u32, stored: &[u8]) -> Result<OwnedStream> {
+    let mut scratch = DecodeScratch::new();
+    let mut dict_store = DictionaryStore::new();
+    let mut zstd = None;
+    let mut ctx = StandardNodeContext {
+        format_version: ZSTD_FIXED_LAST_VERSION,
+        limits: Limits::default(),
+        scratch: &mut scratch,
+        dictionary_bundle_id: None,
+        dict_store: &mut dict_store,
+        zstd: &mut zstd,
+    };
+    let input = StreamInput {
+        bytes: stored,
+        element_width: 1,
+        string_lengths: None,
+    };
+    let mut outputs = execute_standard_node(standard_id, &[input], 0, 1, None, &[], &mut ctx)?;
+    Ok(outputs.remove(0))
+}
+
+/// A zstd node's input from format v9: the element width, then a zstd frame
+/// without its magic number.
+#[cfg(feature = "zstd")]
+fn zstd_node_input(element_width: u64, content: &[u8]) -> Vec<u8> {
+    let mut stored = Vec::new();
+    push_var_u64(&mut stored, element_width);
+    stored.extend_from_slice(&zrip::compress(content, 1).unwrap()[4..]);
+    stored
+}
+
+/// `zstd_fixed` outputs records of the width its input states.
+#[cfg(feature = "zstd")]
+#[test]
+fn decodes_zstd_fixed_records() {
+    let content = b"0123456789abcdef";
+    for width in [2, 4, 8] {
+        let stored = zstd_node_input(width, content);
+
+        let output = run_zstd_node(standard::ZSTD_FIXED_ID, &stored).unwrap();
+
+        assert_eq!(output.element_width, usize::try_from(width).unwrap());
+        assert_eq!(output.bytes, content);
+    }
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn rejects_zstd_fixed_content_that_splits_a_record() {
+    let stored = zstd_node_input(4, b"0123456789");
+
+    let err = run_zstd_node(standard::ZSTD_FIXED_ID, &stored).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(
+        err.detail(),
+        Some("zstd content size is not a multiple of its element width")
+    );
+}
+
+/// The `zstd` node outputs bytes. Upstream writes element width 1 only.
+#[cfg(feature = "zstd")]
+#[test]
+fn rejects_wide_zstd_elements_outside_zstd_fixed() {
+    let stored = zstd_node_input(2, b"0123");
+
+    let err = run_zstd_node(standard::ZSTD_ID, &stored).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    let err = run_zstd_node(standard::ZSTD_FIXED_ID, &zstd_node_input(0, b"01")).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
 /// zrip caps a zstd node's output at the zstd frame's content size. Output
 /// past that size is a malformed frame.
 #[cfg(feature = "zstd")]

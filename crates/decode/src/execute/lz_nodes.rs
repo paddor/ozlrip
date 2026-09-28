@@ -9,8 +9,8 @@ use zrip_core::{
 };
 
 use super::entropy::{
-    LEGACY_ENTROPY_MAX_DEPTH, decode_fse_symbols, read_legacy_compressed_entropy_header,
-    read_legacy_entropy_header, unpack_legacy_bits,
+    LEGACY_ENTROPY_MAX_DEPTH, decode_fse_symbols, decode_legacy_huffman_block,
+    read_legacy_compressed_entropy_header, read_legacy_entropy_header, unpack_legacy_bits,
 };
 use super::{
     DecodeScratch, OwnedStream, StreamInput, numeric_element_count, read_usize_numeric_element,
@@ -1929,7 +1929,8 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
         Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
-    if header & 0x07 == 4 {
+    let entropy_type = header & 0x07;
+    if entropy_type == 4 {
         *offset = (*offset)
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -1949,13 +1950,24 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
         )
         .map(LegacyLiteralPayload::Decoded);
     }
-    if header & 0x07 == 1 {
+    if entropy_type == 1 {
         return decode_legacy_fse_entropy_payload(
             source,
             offset,
             element_width,
             limits,
             transform_name,
+        )
+        .map(LegacyLiteralPayload::Decoded);
+    }
+    if entropy_type == 0 {
+        return decode_legacy_huffman_block(
+            source,
+            offset,
+            element_width,
+            limits,
+            transform_name,
+            max_depth,
         )
         .map(LegacyLiteralPayload::Decoded);
     }
@@ -2007,10 +2019,8 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
             max_depth,
         )
         .map(LegacyLiteralPayload::Decoded),
-        6 | 7 => Err(Error::new(ErrorKind::Malformed)
+        _ => Err(Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy mode is reserved"))),
-        _ => Err(Error::new(ErrorKind::Unsupported)
-            .with_detail(format!("{transform_name} entropy mode is unsupported"))),
     }
 }
 

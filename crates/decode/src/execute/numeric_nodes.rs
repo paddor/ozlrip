@@ -256,35 +256,49 @@ pub(super) fn decode_zigzag_numeric_chunk(
     })
 }
 
+/// First format version that keeps the first value of a delta stream in the
+/// transform header. Older versions keep it first in the stream.
+const DELTA_HEADER_VERSION_MIN: u32 = 13;
+
 pub(super) fn decode_delta_node(
     stored: StreamInput<'_>,
     header: &[u8],
+    format_version: u32,
     limits: Limits,
     scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     validate_numeric_stream_width(stored.element_width, "delta input")?;
-    let stored_elements = numeric_element_count(stored.bytes, stored.element_width)?;
-    let output_elements = match header.len() {
-        0 if stored_elements == 0 => 0,
-        0 => {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("delta stream has no first value")
-            );
+    numeric_element_count(stored.bytes, stored.element_width)?;
+    let (first, deltas) = if format_version < DELTA_HEADER_VERSION_MIN {
+        if !header.is_empty() {
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("delta headers before format v13 are unsupported"));
         }
-        len if len == stored.element_width => stored_elements.checked_add(1).ok_or_else(|| {
-            Error::new(ErrorKind::IntegerOverflow).with_detail("delta size overflowed")
-        })?,
-        _ => {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("delta header must contain one element"));
+        stored
+            .bytes
+            .split_at_checked(stored.element_width)
+            .unwrap_or_default()
+    } else {
+        match header.len() {
+            0 if stored.bytes.is_empty() => (header, stored.bytes),
+            0 => {
+                return Err(
+                    Error::new(ErrorKind::Malformed).with_detail("delta stream has no first value")
+                );
+            }
+            len if len == stored.element_width => (header, stored.bytes),
+            _ => {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail("delta header must contain one element"));
+            }
         }
     };
-    let output_len = output_elements
-        .checked_mul(stored.element_width)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let output_len = first.len().checked_add(deltas.len()).ok_or_else(|| {
+        Error::new(ErrorKind::IntegerOverflow).with_detail("delta size overflowed")
+    })?;
     check_output_len(output_len, limits)?;
     let mut output = scratch.take_byte_buffer(output_len, "delta allocation failed")?;
-    if output_elements == 0 {
+    if first.is_empty() {
         return Ok(OwnedStream {
             bytes: output,
             element_width: stored.element_width,
@@ -292,13 +306,7 @@ pub(super) fn decode_delta_node(
             recyclable: true,
         });
     }
-    fast_delta::decode_delta_elements(
-        stored.bytes,
-        header,
-        stored.element_width,
-        output_len,
-        &mut output,
-    );
+    fast_delta::decode_delta_elements(deltas, first, stored.element_width, output_len, &mut output);
     Ok(OwnedStream::pooled(output, stored.element_width))
 }
 
@@ -392,56 +400,37 @@ fn parse_divide_by_divisor(header: &[u8], element_width: usize) -> Result<u64> {
     Ok(divisor)
 }
 
-pub(super) fn decode_bitunpack_serial8_chunk(
-    stored: &[u8],
+pub(super) fn decode_bitunpack_node(
+    stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
 ) -> Result<Vec<u8>> {
     if header.is_empty() || header.len() > 2 {
         return Err(Error::new(ErrorKind::Malformed).with_detail("bitunpack header is malformed"));
     }
+    validate_numeric_stream_width(stored.element_width, "bitunpack input")?;
+    let elements = numeric_element_count(stored.bytes, stored.element_width)?;
     let bits = usize::from(header[0]);
-    if bits == 0 || bits > 8 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only byte-width bitunpack input is implemented"));
+    if bits == 0 || bits > 8 * stored.element_width {
+        return Err(Error::new(ErrorKind::Malformed).with_detail("bitunpack bit count is invalid"));
     }
-    let bit_count = stored.len().checked_mul(bits).ok_or_else(|| {
+    let bit_count = elements.checked_mul(bits).ok_or_else(|| {
         Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
     })?;
-    let output_len = bit_count.checked_add(7).ok_or_else(|| {
-        Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
-    })? / 8;
+    let output_len = bit_count.div_ceil(8);
     check_output_len(output_len, limits)?;
-    if bits < 8 {
-        let limit = 1u16 << bits;
-        if stored.iter().any(|&value| u16::from(value) >= limit) {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("bitunpack value exceeds bit width")
-            );
-        }
-    }
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed).with_detail("bitunpack allocation failed")
     })?;
-    output.resize(output_len, 0);
-    let mut bit_pos = 0usize;
-    for &value in stored {
-        let byte_pos = bit_pos / 8;
-        let shift = bit_pos % 8;
-        output[byte_pos] |= value << shift;
-        if shift + bits > 8 {
-            output[byte_pos + 1] |= value >> (8 - shift);
-        }
-        bit_pos += bits;
+    if stored.element_width == 1 {
+        pack_byte_values(stored.bytes, bits, &mut output)?;
+    } else {
+        pack_wide_values(stored.bytes, stored.element_width, bits, &mut output)?;
     }
+    debug_assert_eq!(output.len(), output_len);
     if header.len() == 2 {
-        let rem_bits = output_len
-            .checked_mul(8)
-            .and_then(|bits_in_output| bits_in_output.checked_sub(bit_count))
-            .ok_or_else(|| {
-                Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
-            })?;
+        let rem_bits = (8 - bit_count % 8) % 8;
         if rem_bits == 0 || output_len == 0 || usize::from(header[1]) >= (1usize << rem_bits) {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("bitunpack trailing bits are malformed"));
@@ -454,33 +443,101 @@ pub(super) fn decode_bitunpack_serial8_chunk(
     Ok(output)
 }
 
-pub(super) fn decode_range_pack_serial8_chunk(
-    stored: &[u8],
+fn bitunpack_value_too_wide() -> Error {
+    Error::new(ErrorKind::Malformed).with_detail("bitunpack value exceeds bit width")
+}
+
+/// Packs byte values of `bits` bits each, low bits first, into `output`.
+fn pack_byte_values(values: &[u8], bits: usize, output: &mut Vec<u8>) -> Result<()> {
+    if bits < 8 {
+        let limit = 1u16 << bits;
+        if values.iter().any(|&value| u16::from(value) >= limit) {
+            return Err(bitunpack_value_too_wide());
+        }
+    }
+    output.resize((values.len() * bits).div_ceil(8), 0);
+    let mut bit_pos = 0usize;
+    for &value in values {
+        let byte_pos = bit_pos / 8;
+        let shift = bit_pos % 8;
+        output[byte_pos] |= value << shift;
+        if shift + bits > 8 {
+            output[byte_pos + 1] |= value >> (8 - shift);
+        }
+        bit_pos += bits;
+    }
+    Ok(())
+}
+
+/// Packs little-endian values of `width` bytes and `bits` bits each, low bits
+/// first, into `output`.
+fn pack_wide_values(values: &[u8], width: usize, bits: usize, output: &mut Vec<u8>) -> Result<()> {
+    // Fewer than 8 pending bits plus one value of up to 64 bits.
+    let mut pending = 0u128;
+    let mut pending_bits = 0usize;
+    for element in values.chunks_exact(width) {
+        let value = read_element(element);
+        if bits < 64 && value >> bits != 0 {
+            return Err(bitunpack_value_too_wide());
+        }
+        pending |= u128::from(value) << pending_bits;
+        pending_bits += bits;
+        while pending_bits >= 8 {
+            output.push(pending.to_le_bytes()[0]);
+            pending >>= 8;
+            pending_bits -= 8;
+        }
+    }
+    if pending_bits > 0 {
+        output.push(pending.to_le_bytes()[0]);
+    }
+    Ok(())
+}
+
+pub(super) fn decode_range_pack_node(
+    stored: StreamInput<'_>,
     header: &[u8],
     limits: Limits,
-) -> Result<Vec<u8>> {
-    if header.is_empty() {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("range_pack header is malformed"));
+) -> Result<OwnedStream> {
+    validate_numeric_stream_width(stored.element_width, "range_pack input")?;
+    let elements = numeric_element_count(stored.bytes, stored.element_width)?;
+    let (&output_width, min_bytes) = header.split_first().ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("range_pack header is malformed")
+    })?;
+    let output_width = usize::from(output_width);
+    if !matches!(output_width, 1 | 2 | 4 | 8) || output_width < stored.element_width {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("range_pack output width is invalid")
+        );
     }
-    if header[0] != 1 {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("only byte-width range_pack output is implemented"));
-    }
-    let min_value = match header.len() {
-        1 => 0,
-        2 => header[1],
+    let min_value = match min_bytes.len() {
+        0 => 0,
+        len if len == output_width => read_element(min_bytes),
         _ => {
             return Err(
                 Error::new(ErrorKind::Malformed).with_detail("range_pack header is malformed")
             );
         }
     };
-    let mut output = alloc_output(stored.len(), limits, "range_pack allocation failed")?;
-    for &value in stored {
-        let decoded = value.checked_add(min_value).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("range_pack value overflowed")
-        })?;
-        output.push(decoded);
+    let output_len = elements
+        .checked_mul(output_width)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let mut output = alloc_output(output_len, limits, "range_pack allocation failed")?;
+    let overflowed = || Error::new(ErrorKind::Malformed).with_detail("range_pack value overflowed");
+    if output_width == 1 {
+        let min_value = min_bytes.first().copied().unwrap_or(0);
+        for &value in stored.bytes {
+            output.push(value.checked_add(min_value).ok_or_else(overflowed)?);
+        }
+    } else {
+        let max_value = max_numeric_value(output_width)?;
+        for element in stored.bytes.chunks_exact(stored.element_width) {
+            let value = read_element(element)
+                .checked_add(min_value)
+                .filter(|&value| value <= max_value)
+                .ok_or_else(overflowed)?;
+            push_numeric_element(&mut output, output_width, value);
+        }
     }
-    Ok(output)
+    Ok(OwnedStream::typed(output, output_width))
 }

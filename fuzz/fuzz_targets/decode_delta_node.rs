@@ -2,15 +2,24 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
-use ozlrip_test_support::{MAGIC_BASE, push_var_u64};
+use ozlrip_test_support::standard_transform_serial_frame;
 
+const DELTA_INT_ID: u32 = 1;
+
+// Format v13 and later keep the first value in the transform header, older
+// versions first in the delta stream. The low bit of `data[0]` picks v12 or
+// v21; the first value and the deltas follow.
 fuzz_target!(|data: &[u8]| {
-    if data.is_empty() {
+    let [control, first, deltas @ ..] = data else {
         return;
-    }
-    let first = data[0];
-    let deltas = &data[1..];
-    let frame = delta_serial_frame(first, deltas);
+    };
+    let decoded_len = deltas.len() + 1;
+    let frame = if control & 1 == 0 {
+        standard_transform_serial_frame(21, DELTA_INT_ID, deltas, decoded_len, &[*first])
+    } else {
+        let stored = [&[*first][..], deltas].concat();
+        standard_transform_serial_frame(12, DELTA_INT_ID, &stored, decoded_len, &[])
+    };
     let mut limits = Limits::strict();
     limits.max_frame_bytes = 8192;
     limits.max_decoded_bytes = 4096;
@@ -25,24 +34,3 @@ fuzz_target!(|data: &[u8]| {
     let mut output = Vec::new();
     let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
-
-fn delta_serial_frame(first: u8, deltas: &[u8]) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&(MAGIC_BASE + 21).to_le_bytes());
-    input.push(0);
-    input.push(1);
-    push_var_u64(&mut input, u64::try_from(deltas.len() + 2).unwrap());
-    input.push(2);
-    input.push(1);
-    input.push(0);
-    input.push(1);
-    input.push(1);
-    input.push(0);
-    input.push(0);
-    input.push(0);
-    push_var_u64(&mut input, u64::try_from(deltas.len()).unwrap());
-    input.push(first);
-    input.extend_from_slice(deltas);
-    input.push(0);
-    input
-}

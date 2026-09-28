@@ -440,6 +440,7 @@ fn decodes_wide_delta_elements_as_little_endian() {
                 string_lengths: None,
             },
             &le(&[first]),
+            13,
             Limits::default(),
             &mut DecodeScratch::new(),
         )
@@ -454,6 +455,162 @@ fn decodes_wide_delta_elements_as_little_endian() {
         &[0x0100_0000_0000_0000],
         &[0x0102_0304_0506_0708, 0x0202_0304_0506_0708],
     );
+}
+
+fn delta(stored: &[u8], width: usize, header: &[u8], version: u32) -> Result<OwnedStream> {
+    decode_delta_node(
+        StreamInput {
+            bytes: stored,
+            element_width: width,
+            string_lengths: None,
+        },
+        header,
+        version,
+        Limits::default(),
+        &mut DecodeScratch::new(),
+    )
+}
+
+/// Before format v13 the first value leads the delta stream.
+#[test]
+fn decodes_delta_streams_before_v13() {
+    let stored = [0x02, 0x01, 0x00, 0x01, 0xff, 0xff];
+
+    let output = delta(&stored, 2, &[], 12).unwrap();
+
+    assert_eq!(output.element_width, 2);
+    assert_eq!(output.bytes, [0x02, 0x01, 0x02, 0x02, 0x01, 0x02]);
+    assert!(delta(&[], 2, &[], 12).unwrap().bytes.is_empty());
+}
+
+#[test]
+fn rejects_delta_headers_before_v13() {
+    let err = delta(&[1, 2], 1, &[3], 12).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+fn range_pack(values: &[u8], width: usize, header: &[u8]) -> Result<OwnedStream> {
+    decode_range_pack_node(
+        StreamInput {
+            bytes: values,
+            element_width: width,
+            string_lengths: None,
+        },
+        header,
+        Limits::default(),
+    )
+}
+
+#[test]
+fn decodes_range_pack_to_wider_integers() {
+    let min = 10_000u16.to_le_bytes();
+    let output = range_pack(&[0, 5, 255], 1, &[2, min[0], min[1]]).unwrap();
+    assert_eq!(output.element_width, 2);
+    assert_eq!(
+        output.bytes,
+        [10_000u16, 10_005, 10_255]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+
+    let mut header = vec![8];
+    header.extend_from_slice(&(1u64 << 40).to_le_bytes());
+    let output = range_pack(&[1, 0, 0xff, 0xff], 2, &header).unwrap();
+    assert_eq!(output.element_width, 8);
+    assert_eq!(
+        output.bytes,
+        [(1u64 << 40) + 1, (1 << 40) + 0xffff]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+
+    let output = range_pack(&[1, 0, 0, 0], 4, &[4]).unwrap();
+    assert_eq!(output.element_width, 4);
+    assert_eq!(output.bytes, [1, 0, 0, 0]);
+}
+
+#[test]
+fn rejects_malformed_range_pack_headers_and_values() {
+    let cases: [(&[u8], usize, &[u8], &str); 5] = [
+        (&[0, 0], 2, &[1], "range_pack output width is invalid"),
+        (&[0], 1, &[3], "range_pack output width is invalid"),
+        (&[0], 1, &[2, 1], "range_pack header is malformed"),
+        (&[0xff, 0xff], 2, &[2, 1, 0], "range_pack value overflowed"),
+        (&[], 1, &[], "range_pack header is malformed"),
+    ];
+    for (values, width, header, detail) in cases {
+        let err = range_pack(values, width, header).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed, "{detail}");
+        assert_eq!(err.detail(), Some(detail));
+    }
+}
+
+fn bitunpack(values: &[u8], width: usize, header: &[u8]) -> Result<Vec<u8>> {
+    decode_bitunpack_node(
+        StreamInput {
+            bytes: values,
+            element_width: width,
+            string_lengths: None,
+        },
+        header,
+        Limits::default(),
+    )
+}
+
+#[test]
+fn decodes_bitunpack_values_wider_than_a_byte() {
+    let values = [0xabcu16, 0x123]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(bitunpack(&values, 2, &[12]).unwrap(), [0xbc, 0x3a, 0x12]);
+
+    let values = [u64::MAX, 1]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect::<Vec<_>>();
+    let mut expected = vec![0xff; 8];
+    expected.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(bitunpack(&values, 8, &[64]).unwrap(), expected);
+
+    // Two 32-bit values fill whole bytes, so no trailing bits fit.
+    let values = [1u32 << 31, 1]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bitunpack(&values, 4, &[32, 0x2a]).unwrap_err().kind(),
+        ErrorKind::Malformed
+    );
+    // Two 33-bit values leave 6 bits for the trailing bits.
+    let values = [1u64 << 32, 1]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bitunpack(&values, 8, &[33, 0x2a]).unwrap(),
+        [0, 0, 0, 0, 3, 0, 0, 0, 0x2a << 2]
+    );
+}
+
+#[test]
+fn rejects_malformed_bitunpack_widths_and_values() {
+    let wide = 0x1000u16.to_le_bytes();
+    let cases: [(&[u8], usize, &[u8], &str); 3] = [
+        (&wide, 2, &[12], "bitunpack value exceeds bit width"),
+        (&wide, 2, &[17], "bitunpack bit count is invalid"),
+        (&[0], 1, &[0], "bitunpack bit count is invalid"),
+    ];
+    for (values, width, header, detail) in cases {
+        let err = bitunpack(values, width, header).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed, "{detail}");
+        assert_eq!(err.detail(), Some(detail));
+    }
 }
 
 #[test]

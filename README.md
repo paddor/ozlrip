@@ -55,6 +55,19 @@ with typed `Unsupported` errors. Adding extension execution needs a callback API
 with explicit graph typing, dictionary lifetime, allocation-limit, and rollback
 contracts; it should not be bolted into the standard decoder path.
 
+## Unsupported Frame Shapes
+
+An interop test compresses inputs with upstream at every format version it
+writes, through every standard graph and the deprecated nodes, and ozlrip
+decodes every frame. A few shapes that no upstream encoder writes return
+`Unsupported`:
+
+- The AVX2 layout of the deprecated Huffman codecs. Only the deprecated fastlz
+  encoder allows it, for 16-bit symbols up to 1024, and its tokens reach 2047.
+- Huffman tables of log 12. Upstream encoders cap Huffman tables at log 11.
+- `zstd` nodes with elements wider than a byte. Only `zstd_fixed` writes
+  records; `zstd` takes serial input.
+
 ## Performance
 
 - Baseline: in-process `openzl-c-ffi`, not the `zli` CLI.

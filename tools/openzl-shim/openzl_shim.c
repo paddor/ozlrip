@@ -217,6 +217,90 @@ static int graph_id(int graph, ZL_GraphID* out)
     }
 }
 
+// Keep in sync with `Node` in src/lib.rs.
+enum {
+    OZLRIP_SHIM_NODE_SERIAL_TO_NUM_LE = 0,
+    OZLRIP_SHIM_NODE_NUM_TO_SERIAL_LE = 1,
+    OZLRIP_SHIM_NODE_DELTA_INT        = 2,
+    OZLRIP_SHIM_NODE_ZIGZAG           = 3,
+    OZLRIP_SHIM_NODE_RANGE_PACK       = 4,
+    OZLRIP_SHIM_NODE_BITUNPACK        = 5,
+    OZLRIP_SHIM_NODE_NAMED            = 6,
+    OZLRIP_SHIM_NODE_SERIAL_TO_STRUCT = 7,
+};
+
+// One node of a pipeline. `param` is the width for SERIAL_TO_NUM_LE and
+// SERIAL_TO_STRUCT, and the bit count for BITUNPACK. NAMED nodes are looked
+// up by `name`, which reaches upstream's private standard nodes.
+typedef struct {
+    int kind;
+    int param;
+    const char* name;
+} ozlrip_shim_node;
+
+static int node_id(
+        ZL_Compressor* compressor,
+        const ozlrip_shim_node* node,
+        ZL_NodeID* out)
+{
+    switch (node->kind) {
+        case OZLRIP_SHIM_NODE_SERIAL_TO_NUM_LE:
+            switch (node->param) {
+                case 1:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_NUM_LE8;
+                    return 0;
+                case 2:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_NUM_LE16;
+                    return 0;
+                case 4:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_NUM_LE32;
+                    return 0;
+                case 8:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_NUM_LE64;
+                    return 0;
+                default:
+                    return set_error_message("numeric width must be 1, 2, 4 or 8");
+            }
+        case OZLRIP_SHIM_NODE_NUM_TO_SERIAL_LE:
+            *out = ZL_NODE_CONVERT_NUM_TO_SERIAL_LE;
+            return 0;
+        case OZLRIP_SHIM_NODE_DELTA_INT:
+            *out = ZL_NODE_DELTA_INT;
+            return 0;
+        case OZLRIP_SHIM_NODE_ZIGZAG:
+            *out = ZL_NODE_ZIGZAG;
+            return 0;
+        case OZLRIP_SHIM_NODE_RANGE_PACK:
+            *out = ZL_NODE_RANGE_PACK;
+            return 0;
+        case OZLRIP_SHIM_NODE_BITUNPACK:
+            *out = ZL_Compressor_registerBitunpackNode(compressor, node->param);
+            return 0;
+        case OZLRIP_SHIM_NODE_SERIAL_TO_STRUCT:
+            switch (node->param) {
+                case 2:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_STRUCT2;
+                    return 0;
+                case 4:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_STRUCT4;
+                    return 0;
+                case 8:
+                    *out = ZL_NODE_CONVERT_SERIAL_TO_STRUCT8;
+                    return 0;
+                default:
+                    return set_error_message("struct width must be 2, 4 or 8");
+            }
+        case OZLRIP_SHIM_NODE_NAMED:
+            *out = ZL_Compressor_getNode(compressor, node->name);
+            if (!ZL_NodeID_isValid(*out)) {
+                return set_error_message("unknown node name");
+            }
+            return 0;
+        default:
+            return set_error_message("unknown ozlrip shim node");
+    }
+}
+
 // Keep in sync with `InputKind` in src/lib.rs.
 enum {
     OZLRIP_SHIM_INPUT_SERIAL  = 0,
@@ -256,21 +340,28 @@ static ZL_TypedRef* typed_ref(const ozlrip_shim_input* input)
     }
 }
 
-// Compresses `nb_inputs` typed inputs with one standard starting graph.
-// `format_version` 0 selects the library default.
+// Compresses `nb_inputs` typed inputs through `nb_nodes` single-output
+// nodes, then one standard graph. `format_version` 0 selects the library
+// default. `store_on_expansion` is a ZL_TernaryParam.
 int ozlrip_shim_compress(
+        const ozlrip_shim_node* nodes,
+        size_t nb_nodes,
         int graph,
         unsigned format_version,
         int compression_level,
+        int store_on_expansion,
         const ozlrip_shim_input* inputs,
         size_t nb_inputs,
         void* dst,
         size_t dst_capacity,
         size_t* written)
 {
-    enum { MAX_INPUTS = 64 };
+    enum { MAX_INPUTS = 64, MAX_NODES = 16 };
     if (nb_inputs == 0 || nb_inputs > MAX_INPUTS) {
         return set_error_message("input count must be between 1 and 64");
+    }
+    if (nb_nodes > MAX_NODES) {
+        return set_error_message("node count must be at most 16");
     }
     ZL_GraphID start;
     if (graph_id(graph, &start) != 0) {
@@ -302,6 +393,26 @@ int ozlrip_shim_compress(
             compressor, ZL_CParam_compressionLevel, compression_level);
     if (ZL_isError(report)) {
         set_error_message("ZL_Compressor_setParameter(level) failed");
+        goto cleanup;
+    }
+    if (nb_nodes > 0) {
+        ZL_NodeID pipeline[MAX_NODES];
+        for (size_t i = 0; i < nb_nodes; i++) {
+            if (node_id(compressor, &nodes[i], &pipeline[i]) != 0) {
+                goto cleanup;
+            }
+        }
+        start = ZL_Compressor_registerStaticGraph_fromPipelineNodes1o(
+                compressor, pipeline, nb_nodes, start);
+        if (!ZL_GraphID_isValid(start)) {
+            set_error_message("pipeline graph registration failed");
+            goto cleanup;
+        }
+    }
+    report = ZL_Compressor_setParameter(
+            compressor, ZL_CParam_storeOnExpansion, store_on_expansion);
+    if (ZL_isError(report)) {
+        set_error_message("ZL_Compressor_setParameter(storeOnExpansion) failed");
         goto cleanup;
     }
     report = ZL_Compressor_selectStartingGraphID(compressor, start);

@@ -298,7 +298,7 @@ fn decodes_v14_huffman_fixed_deprecated_raw_frame() {
 }
 
 #[test]
-fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
+fn rejects_truncated_legacy_huffman_header_without_mutating_destination() {
     let input = standard_transform_serial_frame(
         LEGACY_ENTROPY_LAST_VERSION,
         standard::HUFFMAN_DEPRECATED_ID,
@@ -311,8 +311,218 @@ fn rejects_legacy_entropy_huf_mode_without_mutating_destination() {
 
     let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.kind(), ErrorKind::Malformed);
     assert_eq!(output, [1, 2]);
+}
+
+/// A legacy Huffman block holding zstd Huffman literals: the tree
+/// description, then four streams.
+fn legacy_entropy_huffman_payload(symbols: &[u8]) -> Vec<u8> {
+    let table = zrip_core::huffman::encode::HuffmanEncodeTable::from_data(symbols).unwrap();
+    let mut encoded = table.serialize_weights();
+    encoded.extend_from_slice(&table.encode_4_streams(symbols));
+    legacy_compressed_entropy_payload(0, symbols.len(), &encoded)
+}
+
+fn decode_huffman_deprecated(payload: &[u8]) -> Result<Vec<u8>> {
+    decode_huffman_deprecated_node(
+        StreamInput {
+            bytes: payload,
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[],
+        Limits::default(),
+    )
+}
+
+#[test]
+fn decodes_v14_huffman_deprecated_huffman_frame() {
+    let expected = b"legacy Huffman symbols: aaaaaaaabbbbccd, aaaaaaaabbbbccd".repeat(5);
+    let payload = legacy_entropy_huffman_payload(&expected);
+    let input = standard_transform_serial_frame(
+        LEGACY_ENTROPY_LAST_VERSION,
+        standard::HUFFMAN_DEPRECATED_ID,
+        &payload,
+        expected.len(),
+        &[],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    let written = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(written, expected.len());
+    assert_eq!(output, expected);
+}
+
+/// Like upstream `HUF_decompress`, a block as large as its output is a copy
+/// and a one-byte block is that byte repeated.
+#[test]
+fn decodes_legacy_huffman_copies_and_repeats() {
+    let copy = legacy_compressed_entropy_payload(0, 3, b"abc");
+    let repeat = legacy_compressed_entropy_payload(0, 4, b"z");
+
+    assert_eq!(decode_huffman_deprecated(&copy).unwrap(), b"abc");
+    assert_eq!(decode_huffman_deprecated(&repeat).unwrap(), b"zzzz");
+}
+
+#[test]
+fn rejects_legacy_huffman_blocks_larger_than_their_output() {
+    let payload = legacy_compressed_entropy_payload(0, 2, b"abc");
+
+    let err = decode_huffman_deprecated(&payload).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+/// Upstream `HUF_readStats` requires an even number of weight-one symbols,
+/// at least two. Weight 2 and the implied last weight 2 have none.
+#[test]
+fn rejects_legacy_huffman_weights_without_weight_one_pairs() {
+    let mut encoded = vec![128, 0x20];
+    encoded.extend_from_slice(&[0; 10]);
+    let payload = legacy_compressed_entropy_payload(0, 64, &encoded);
+
+    let err = decode_huffman_deprecated(&payload).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(
+        err.detail(),
+        Some("huffman_deprecated huffman weights are invalid")
+    );
+}
+
+/// Weights 12 down to 1 and the implied last weight 1 fill a table of log
+/// 12, which upstream accepts but zrip cannot decode.
+#[test]
+fn reports_legacy_huffman_table_log_12_as_unsupported() {
+    let mut encoded = vec![127 + 12, 0xcb, 0xa9, 0x87, 0x65, 0x43, 0x21];
+    encoded.extend_from_slice(&[0; 10]);
+    let payload = legacy_compressed_entropy_payload(0, 64, &encoded);
+
+    let err = decode_huffman_deprecated(&payload).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+#[test]
+fn reports_legacy_avx2_huffman_layout_as_unsupported() {
+    let mut payload = legacy_compressed_entropy_payload(0, 3, b"abc");
+    payload[0] |= 1 << 5;
+
+    let err = decode_huffman_deprecated(&payload).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+}
+
+fn decode_huffman_fixed_deprecated_u16(payload: &[u8]) -> Result<OwnedStream> {
+    decode_huffman_fixed_deprecated_node(
+        StreamInput {
+            bytes: payload,
+            element_width: 1,
+            string_lengths: None,
+        },
+        &[0, 2],
+        LEGACY_ENTROPY_LAST_VERSION,
+        Limits::default(),
+    )
+}
+
+fn u16_bytes(values: &[u16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// A 16-bit legacy Huffman block with two one-bit symbols.
+fn legacy_entropy_large_huffman_payload(symbols: &[u16], x4: bool) -> Vec<u8> {
+    legacy_compressed_entropy_payload(0, symbols.len(), &large_huffman_block(symbols, x4))
+}
+
+/// Upstream `ZS_largeHuffmanDecode` input: the Huffman prefix, table log 1,
+/// largest symbol 1, raw weights, the stream layout and the streams.
+fn large_huffman_block(symbols: &[u16], x4: bool) -> Vec<u8> {
+    let mut encoded = vec![0, 1, 1, 0];
+    encoded.extend_from_slice(&legacy_entropy_raw_payload(&[1, 1], 1));
+    encoded.push(u8::from(x4));
+    if x4 {
+        let quarter = symbols.len().div_ceil(4);
+        let mut chunks = symbols.chunks(quarter);
+        let chunks = [(); 4].map(|()| chunks.next().unwrap_or(&[]));
+        encoded.extend_from_slice(&huffman_struct_v2_x4_bits(&chunks));
+    } else {
+        encoded.extend_from_slice(&huffman_struct_v2_bits(symbols));
+    }
+    encoded
+}
+
+#[test]
+fn decodes_legacy_huffman_16_bit_blocks() {
+    let symbols = [0u16, 1, 1, 0, 1, 0, 0, 1, 1];
+    for x4 in [false, true] {
+        let payload = legacy_entropy_large_huffman_payload(&symbols, x4);
+
+        let output = decode_huffman_fixed_deprecated_u16(&payload).unwrap();
+
+        assert_eq!(output.element_width, 2);
+        assert_eq!(output.bytes, u16_bytes(&symbols), "x4 {x4}");
+    }
+}
+
+#[test]
+fn decodes_v14_huffman_fixed_deprecated_huffman_frame() {
+    let symbols = [1u16, 0, 0, 1, 1, 1];
+    let payload = legacy_entropy_large_huffman_payload(&symbols, false);
+    let input = standard_transform_serial_frame(
+        LEGACY_ENTROPY_LAST_VERSION,
+        standard::HUFFMAN_FIXED_DEPRECATED_ID,
+        &payload,
+        symbols.len() * 2,
+        &[0, 2],
+    );
+    let plan = parse_frame_plan(&input, Limits::default()).unwrap();
+    let mut output = Vec::new();
+
+    decode_plan(&input, &plan, &mut output, Limits::default()).unwrap();
+
+    assert_eq!(output, u16_bytes(&symbols));
+}
+
+#[test]
+fn decodes_legacy_huffman_16_bit_literals_and_constants() {
+    let literal = legacy_compressed_entropy_payload(0, 2, &[1, 2, 0x34, 0x12, 0x78, 0x56]);
+    let constant = legacy_compressed_entropy_payload(0, 3, &[2, 3, 0x34, 0x12]);
+
+    let literal = decode_huffman_fixed_deprecated_u16(&literal).unwrap();
+    let constant = decode_huffman_fixed_deprecated_u16(&constant).unwrap();
+
+    assert_eq!(literal.bytes, u16_bytes(&[0x1234, 0x5678]));
+    assert_eq!(constant.bytes, u16_bytes(&[0x1234; 3]));
+}
+
+#[test]
+fn rejects_malformed_legacy_huffman_16_bit_blocks() {
+    let mut wrong_table_log = large_huffman_block(&[0, 1], false);
+    wrong_table_log[1] = 2;
+    let cases = [
+        (&[3, 1, 0, 0][..], 1, "huffman block prefix is invalid"),
+        (&[1, 1, 0, 0], 2, "huffman symbol count is invalid"),
+        (&[2, 2, 0], 2, "huffman constant size is invalid"),
+        (&wrong_table_log, 2, "huffman weights are not normalized"),
+    ];
+    for (encoded, symbols, detail) in cases {
+        let payload = legacy_compressed_entropy_payload(0, symbols, encoded);
+
+        let err = decode_huffman_fixed_deprecated_u16(&payload).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed, "{detail}");
+        assert_eq!(
+            err.detail(),
+            Some(format!("huffman_fixed_deprecated {detail}").as_str())
+        );
+    }
 }
 
 #[test]

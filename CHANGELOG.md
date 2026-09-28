@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- A new interop test compresses a spread of inputs with upstream at every
+  format version it writes, 8 to 27, through every standard graph, chains
+  of numeric nodes and upstream's private deprecated nodes. ozlrip decodes
+  each frame to its input. The test found these gaps, now decoded:
+  - zstd nodes before format v9, which keep the zstd magic number.
+  - `delta_int` before format v13, which keeps the first value in the
+    stream instead of the header.
+  - `range_pack` outputs of 2, 4 and 8 bytes.
+  - `bitunpack` inputs wider than a byte, up to 64 bits.
+  - The Huffman modes of the deprecated entropy codecs, for bytes and 16-bit
+    symbols, also in `rolz_deprecated` and `fastlz_deprecated` literals.
+  - `zstd_fixed` records wider than a byte.
+- Shapes that no upstream encoder writes still return `Unsupported`; the
+  README lists them. A `range_pack` or `bitunpack` header that upstream
+  rejects returns `Malformed` instead of `Unsupported`.
 - Add `inspect_header`, which reads the frame header from a prefix that
   holds only the header: format version, output count, types, sizes and
   element counts, comment and dictionary bundle id. A shorter prefix

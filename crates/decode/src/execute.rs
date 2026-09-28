@@ -66,9 +66,9 @@ use numeric::{
     read_var_u64, require_numeric_width, validate_numeric_stream_width,
 };
 use numeric_nodes::{
-    decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_serial8_chunk,
+    decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_node,
     decode_constant_fixed_chunk, decode_constant_serial_chunk, decode_dedup_num_node,
-    decode_delta_node, decode_divide_by_node, decode_range_pack_serial8_chunk,
+    decode_delta_node, decode_divide_by_node, decode_range_pack_node,
     decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
 };
 use output::verify_decoded_checksum;
