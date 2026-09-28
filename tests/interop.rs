@@ -509,6 +509,14 @@ fn supported_interop_cases() -> Vec<InteropCase> {
             relaxed_limits: false,
         },
         InteropCase {
+            name: "serial-pivco-words-1m",
+            input: InteropInput::Inline(random_words(1 << 20)),
+            profile: "serial",
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        },
+        InteropCase {
             name: "serial-chunked-2m",
             input: InteropInput::Inline(sequential_bytes(2_000_000)),
             profile: "serial",
@@ -895,6 +903,22 @@ fn le_bytes<const N: usize, T: LeBytes>(values: [T; N]) -> Vec<u8> {
         out.extend_from_slice(&value.to_le_vec());
     }
     out
+}
+
+/// Words from a fixed vocabulary, in a fixed pseudo-random order. LZ leaves
+/// more than 16 KiB of literals, which upstream codes with PivCo-Huffman
+/// from format v27.
+fn random_words(len: usize) -> Vec<u8> {
+    let mut state = 5u64;
+    let mut words = Vec::with_capacity(len + 8);
+    while words.len() < len {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        words.extend_from_slice(format!("w{}x ", (state >> 33) % 3000).as_bytes());
+    }
+    words.truncate(len);
+    words
 }
 
 fn sequential_bytes(len: usize) -> Vec<u8> {

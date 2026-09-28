@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Track PivCo-Huffman in the feature compatibility manifest, backed by a
+  zli interop case whose LZ literals upstream codes with PivCo-Huffman.
 - Add `DictionaryProvider`, like upstream's `ZL_DictLoader`, and
   `Decoder::set_dictionary_provider`. A decoder asks its provider for the
   dictionary bundle a frame names when it has not loaded it, then keeps the

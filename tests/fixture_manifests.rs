@@ -202,6 +202,7 @@ fn feature_compatibility_manifest_tracks_profiles() {
         "sddl2-structured",
         "parquet-structured",
         "zstd-profile",
+        "pivco-huffman",
     ] {
         assert!(
             features.contains(feature),

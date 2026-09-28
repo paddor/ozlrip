@@ -64,4 +64,4 @@ id	name	coverage
 64	partition	unit+inline-frame
 65	mux_lengths	unit+inline-frame
 66	sparse_num	unit+inline-frame
-67	pivco_huffman	unit+fuzz
+67	pivco_huffman	unit+fuzz+interop
