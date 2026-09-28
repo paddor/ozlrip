@@ -11,8 +11,9 @@ pub(super) fn decode_node(
     limits: Limits,
 ) -> Result<OwnedStream> {
     if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("parse_int transform header must be empty"));
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("parse_int headers are unsupported")
+        );
     }
     if input.element_width != 8 {
         return Err(Error::new(ErrorKind::InvalidType)

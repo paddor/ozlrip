@@ -162,10 +162,15 @@ pub(super) fn validate_string_to_serial_tail(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("direct string append tail is malformed"));
     };
-    let header = node_header(transform_headers, node.header_start, node.header_size)?;
-    if node.standard_id != standard::CONVERT_STRING_TO_SERIAL_ID || !header.is_empty() {
+    if node.standard_id != standard::CONVERT_STRING_TO_SERIAL_ID {
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("direct string append tail is malformed"));
+    }
+    // Same error as the general conversion path.
+    let header = node_header(transform_headers, node.header_start, node.header_size)?;
+    if !header.is_empty() {
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("convert_string_to_serial headers are unsupported"));
     }
     Ok(())
 }

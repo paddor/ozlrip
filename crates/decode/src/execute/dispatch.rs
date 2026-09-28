@@ -19,9 +19,8 @@ pub(super) fn decode_dispatch_string_node(
     limits: Limits,
 ) -> Result<OwnedStream> {
     if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string header must be empty")
-        );
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatch_string headers are unsupported"));
     }
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
@@ -176,9 +175,8 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("dispatch_string header must be empty")
-        );
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatch_string headers are unsupported"));
     }
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;
@@ -870,9 +868,8 @@ pub(super) fn decode_dispatch_n_by_tag_node(
     limits: Limits,
 ) -> Result<Vec<u8>> {
     if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag header must be empty")
-        );
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("dispatchN_byTag headers are unsupported"));
     }
     let variable_inputs = usize::try_from(variable_inputs)
         .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail("input count too large"))?;

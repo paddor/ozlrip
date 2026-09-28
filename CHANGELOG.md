@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- A non-empty transform header on a node whose upstream decoder reads none
+  returns `Unsupported` for every node. `dispatch_string`, `dispatchN_byTag`,
+  `parse_int`, `prefix`, `separate_string_components`,
+  `convert_string_to_serial` and `float_deconstruct` before v5 returned
+  `Malformed`, and a `convert_string_to_serial` tail after `dispatch_string`
+  returned `InvalidGraph`.
 - `LimitExceeded` errors from frame parsing name the `Limits` field and
   show the value and the bound, for example
   `max_frame_bytes exceeds its limit: 42 > 41`.

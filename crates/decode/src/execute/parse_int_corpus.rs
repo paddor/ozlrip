@@ -45,7 +45,7 @@ fn parse_int_rejects_non_empty_header() {
     let input = numbers(&[1]);
     let err = parse_int::decode_node(stream(&input, 8), &[0], Limits::default()).unwrap_err();
 
-    assert_eq!(err.kind(), ErrorKind::Malformed);
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
 }
 
 #[test]

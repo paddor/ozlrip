@@ -304,8 +304,8 @@ pub(super) fn parse_float_deconstruct_header(
 ) -> Result<FloatDeconstructType> {
     if format_version < 5 {
         if !header.is_empty() {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("float_deconstruct v4 header must be empty"));
+            return Err(Error::new(ErrorKind::Unsupported)
+                .with_detail("float_deconstruct headers before format v5 are unsupported"));
         }
         return Ok(FloatDeconstructType::Float32);
     }

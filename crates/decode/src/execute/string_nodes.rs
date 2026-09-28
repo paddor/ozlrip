@@ -198,8 +198,8 @@ pub(super) fn decode_separate_string_components_node(
     limits: Limits,
 ) -> Result<OwnedStream> {
     if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("separate_string_components header must be empty"));
+        return Err(Error::new(ErrorKind::Unsupported)
+            .with_detail("separate_string_components headers are unsupported"));
     }
     let [content, field_sizes] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)
@@ -298,7 +298,9 @@ pub(super) fn decode_prefix_node(
     limits: Limits,
 ) -> Result<OwnedStream> {
     if !header.is_empty() {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("prefix header must be empty"));
+        return Err(
+            Error::new(ErrorKind::Unsupported).with_detail("prefix headers are unsupported")
+        );
     }
     let [suffixes, match_sizes] = inputs else {
         return Err(Error::new(ErrorKind::InvalidGraph)

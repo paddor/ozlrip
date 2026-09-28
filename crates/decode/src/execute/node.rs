@@ -144,8 +144,8 @@ pub(super) fn byte_preserving_conversion_output_width(
         }
         standard::CONVERT_STRING_TO_SERIAL_ID => {
             if !header.is_empty() {
-                return Err(Error::new(ErrorKind::Malformed)
-                    .with_detail("convert_string_to_serial header must be empty"));
+                return Err(Error::new(ErrorKind::Unsupported)
+                    .with_detail("convert_string_to_serial headers are unsupported"));
             }
             if input.element_width != 1 {
                 return Err(Error::new(ErrorKind::InvalidType)
