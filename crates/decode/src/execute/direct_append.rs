@@ -3,10 +3,9 @@ use alloc::vec::Vec;
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::conversion::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
 use super::layout_nodes::{append_split_by_struct_output, split_by_struct_output_len};
-use super::node::{
-    byte_preserving_conversion_output_width, is_byte_preserving_conversion, node_header,
-};
+use super::node::node_header;
 use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::streams::{StreamInput, StreamSlot};

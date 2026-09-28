@@ -8,6 +8,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use crate::info::FrameValueType;
 use smallvec::SmallVec;
 
+mod conversion;
 mod direct_append;
 mod dispatch;
 mod entropy;
