@@ -13,7 +13,7 @@ use crate::standard;
 
 use super::output::{OutputBudget, check_expansion, check_output_len, declared_output_size};
 use super::plan::{ChunkExecutionPlan, build_chunk_execution_plan};
-use super::streams::StreamSlot;
+use super::slots::{StreamSlot, recycle_stream_slots};
 use super::{chunk::run_chunk, decode_plan_with_context, runtime::DecodeRuntime};
 
 /// One decoded frame output. The buffers are reused across decodes.
@@ -80,7 +80,7 @@ pub(crate) fn decode_outputs_with_context(
             &mut hasher,
         )?;
         hasher.finish()?;
-        runtime.scratch.recycle_stream_slots(streams);
+        recycle_stream_slots(runtime.scratch, streams);
     }
     budgets.iter().try_for_each(OutputBudgets::finish)
 }

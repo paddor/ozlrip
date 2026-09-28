@@ -4,7 +4,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::dict::DictionaryStore;
 
-use super::streams::{OwnedStream, StreamSlot};
+use super::streams::OwnedStream;
 
 /// Most buffers the scratch pool keeps.
 const MAX_POOLED_BUFFERS: usize = 64;
@@ -61,15 +61,6 @@ impl DecodeScratch {
     pub(super) fn recycle_owned_stream(&mut self, stream: OwnedStream) {
         if stream.recyclable {
             self.recycle_byte_buffer(stream.bytes);
-        }
-    }
-
-    /// Recycles the owned streams among a chunk's stream slots.
-    pub(super) fn recycle_stream_slots(&mut self, streams: Vec<StreamSlot<'_>>) {
-        for slot in streams {
-            if let StreamSlot::Owned(stream) = slot {
-                self.recycle_owned_stream(stream);
-            }
         }
     }
 

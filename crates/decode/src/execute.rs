@@ -40,6 +40,7 @@ mod partition;
 mod pivco_huffman;
 mod plan;
 mod runtime;
+mod slots;
 mod sparse_num;
 mod split_struct;
 mod streams;

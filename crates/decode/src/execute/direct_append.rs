@@ -8,8 +8,9 @@ use super::header::require_empty_header;
 use super::layout_nodes::append_split_by_struct_output;
 use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
+use super::slots::StreamSlot;
 use super::split_struct::split_by_struct_output_len;
-use super::streams::{StreamInput, StreamSlot};
+use super::streams::StreamInput;
 
 #[derive(Clone, Copy)]
 pub(super) struct DirectAppendChunk<'a> {

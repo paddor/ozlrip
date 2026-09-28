@@ -22,11 +22,12 @@ use super::numeric_nodes::decode_dedup_num_node;
 use super::output::{DecodedChunk, check_output_len};
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::runtime::{DecodeRuntime, StandardNodeContext};
-use super::sparse_num;
-use super::streams::{
+use super::slots::{
     LiveBytes, StreamSlot, collect_node_inputs, initialize_stream_slots,
-    move_stream_to_single_output, recycle_consumed_owned_streams, single_execution_input,
+    move_stream_to_single_output, recycle_consumed_owned_streams, recycle_stream_slots,
+    single_execution_input,
 };
+use super::sparse_num;
 use super::zstd::decode_zstd_chunk_to_output;
 
 pub(super) fn decode_transform_chunk_with_plan<'a>(
@@ -196,7 +197,7 @@ pub(super) fn decode_transform_chunk_appending(
     let output_start = dst.len();
     let element_width = tail.decode(&streams, &mut ctx, max_output, dst)?;
     tail.validate(element_width, &dst[output_start..], limits)?;
-    ctx.scratch.recycle_stream_slots(streams);
+    recycle_stream_slots(ctx.scratch, streams);
     Ok(dst.len() - output_start)
 }
 
