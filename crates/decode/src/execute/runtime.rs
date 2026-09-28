@@ -54,7 +54,7 @@ impl DecodeScratch {
         let mut buffer = Vec::new();
         buffer
             .try_reserve_exact(capacity)
-            .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail(detail))?;
+            .map_err(|_| Error::new(ErrorKind::AllocationFailed).with_detail(detail))?;
         Ok(buffer)
     }
 

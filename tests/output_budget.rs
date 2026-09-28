@@ -20,6 +20,28 @@ fn declared_size_above_expansion_ratio_fails_before_reserving() {
     assert_eq!(dst.capacity(), 0);
 }
 
+/// With every limit raised, a declared size above `isize::MAX` passes the
+/// checks, and reserving it fails as an allocation failure, not a limit.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn unreservable_declared_size_is_an_allocation_failure() {
+    let declared = 1usize << 63;
+    let frame = FrameBuilder::new(21)
+        .serial_output(declared)
+        .chunk(Chunk::stored(*b"abc"))
+        .build();
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_decoded_bytes = usize::MAX;
+    limits.max_buffer_bytes = usize::MAX;
+    limits.max_expansion_ratio = declared / frame.len() + 1;
+    let mut dst = Vec::new();
+
+    let err = ozlrip::decode_into_with_options(&frame, &mut dst, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::AllocationFailed);
+    assert_eq!(dst.capacity(), 0);
+}
+
 /// A chunk that overruns the declared size fails right away, not after later
 /// chunks have been decoded and checked.
 #[cfg(feature = "checksum")]

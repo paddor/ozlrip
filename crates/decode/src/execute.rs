@@ -236,7 +236,7 @@ fn append_decoded_chunk(
 fn append_slice(dst: &mut Vec<u8>, bytes: &[u8], budget: &mut OutputBudget) -> Result<()> {
     budget.reserve(dst)?;
     dst.try_reserve(bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("output allocation failed")
     })?;
     dst.extend_from_slice(bytes);
     Ok(())

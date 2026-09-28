@@ -55,7 +55,7 @@ pub(super) fn decode_node(
     let mut reader = PivCoBitReader::new(bitstream.bytes);
     let mut output = Vec::new();
     output.try_reserve_exact(header.decoded_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("pivco_huffman allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("pivco_huffman allocation failed")
     })?;
 
     let mut remaining = header.decoded_size;
@@ -168,19 +168,19 @@ impl Tree {
         self.rank_to_symbol
             .try_reserve_exact(MAX_SYMBOLS)
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("pivco_huffman tree allocation failed")
             })?;
         self.rank_to_flat_depth
             .try_reserve_exact(MAX_SYMBOLS)
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("pivco_huffman tree allocation failed")
             })?;
         self.rank_to_codeword
             .try_reserve_exact(MAX_SYMBOLS)
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("pivco_huffman tree allocation failed")
             })?;
 
@@ -327,7 +327,7 @@ fn compute_table_log(weights: &[u8]) -> Result<usize> {
 fn weight_buckets(weights: &[u8]) -> Result<Vec<Vec<Leaf>>> {
     let mut buckets = Vec::new();
     buckets.try_reserve_exact(MAX_WEIGHT + 1).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("pivco_huffman tree allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("pivco_huffman tree allocation failed")
     })?;
     for _ in 0..=MAX_WEIGHT {
         buckets.push(Vec::new());
@@ -375,7 +375,7 @@ fn optimize_leaves(buckets: &mut [Vec<Leaf>], table_log: usize) -> Result<()> {
             let peeled = buckets[weight].split_off(flat_offset);
             let mut symbols = Vec::new();
             symbols.try_reserve_exact(flat_count).map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("pivco_huffman tree allocation failed")
             })?;
             for leaf in peeled {
@@ -468,7 +468,7 @@ fn decode_leaf(
     let bitmap = reader.aligned_bitmap(bitmap_bits)?;
     let mut output = Vec::new();
     output.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("pivco_huffman allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("pivco_huffman allocation failed")
     })?;
     for index in 0..count {
         let symbol_index = read_bitmap_int(bitmap, index * depth, depth);
@@ -494,7 +494,7 @@ fn merge_results(
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     output.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("pivco_huffman allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("pivco_huffman allocation failed")
     })?;
 
     match (left, right) {

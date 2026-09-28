@@ -38,7 +38,7 @@ pub(super) fn alloc_output(len: usize, limits: Limits, detail: &'static str) -> 
     let mut output = Vec::new();
     output
         .try_reserve_exact(len)
-        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail(detail))?;
+        .map_err(|_| Error::new(ErrorKind::AllocationFailed).with_detail(detail))?;
     Ok(output)
 }
 
@@ -107,7 +107,7 @@ impl OutputBudget {
     pub(super) fn reserve(&mut self, dst: &mut Vec<u8>) -> Result<()> {
         if !self.reserved {
             dst.try_reserve_exact(self.remaining()).map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded).with_detail("output allocation failed")
+                Error::new(ErrorKind::AllocationFailed).with_detail("output allocation failed")
             })?;
             self.reserved = true;
         }

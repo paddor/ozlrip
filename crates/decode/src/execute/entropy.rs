@@ -357,7 +357,7 @@ fn decode_legacy_entropy_raw(
     *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
     bytes.extend_from_slice(payload);
@@ -385,7 +385,7 @@ fn decode_legacy_entropy_constant(
     *offset = end;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
     for _ in 0..decoded_elements {
@@ -444,7 +444,7 @@ fn decode_legacy_entropy_multi(
         let output_len =
             checked_legacy_entropy_output_len(decoded_elements, element_width, limits)?;
         bytes.try_reserve_exact(block.bytes.len()).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
+            Error::new(ErrorKind::AllocationFailed)
                 .with_detail(format!("{transform_name} allocation failed"))
         })?;
         bytes.extend_from_slice(&block.bytes);
@@ -627,7 +627,7 @@ pub(super) fn unpack_legacy_bits(
 
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
     if num_bits == 0 {
@@ -716,7 +716,8 @@ pub(super) fn decode_fse_v2_node(
     distribution
         .try_reserve_exact(numeric_element_count(norm.bytes, 2)?)
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("fse distribution allocation failed")
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("fse distribution allocation failed")
         })?;
     for count in norm.bytes.as_chunks::<2>().0 {
         distribution.push(i16::from_le_bytes(*count));
@@ -884,7 +885,7 @@ pub(super) fn decode_fse_symbols(
 
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("fse output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("fse output allocation failed")
     })?;
     match nb_states {
         2 => {
@@ -1019,7 +1020,7 @@ pub(super) fn decode_huffman_struct_v2_node(
     let (table, table_log) = build_large_huffman_decode_table(weights.bytes)?;
     let mut output = Vec::new();
     output.try_reserve_exact(output_bytes).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("huffman_struct_v2 allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("huffman_struct_v2 allocation failed")
     })?;
     if parsed.x4 {
         decode_large_huffman_streams_x4(
@@ -1244,7 +1245,7 @@ fn build_large_huffman_decode_table(weights: &[u8]) -> Result<(Vec<LargeHuffmanD
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     let mut table = Vec::new();
     table.try_reserve_exact(table_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("huffman_struct_v2 table is too large")
+        Error::new(ErrorKind::AllocationFailed).with_detail("huffman_struct_v2 table is too large")
     })?;
     table.resize(table_size, LargeHuffmanDecodeEntry::default());
 

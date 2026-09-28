@@ -109,7 +109,7 @@ pub(super) fn read_output_types(
 ) -> Result<OutputTypes> {
     let mut types = OutputTypes::new();
     types.try_reserve_exact(outputs).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output type allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("output type allocation failed")
     })?;
 
     if format_version < 14 {
@@ -219,10 +219,10 @@ pub(super) fn read_output_sizes(
     let mut sizes = OutputSizeValues::new();
     let mut elements = OutputSizeValues::new();
     sizes.try_reserve_exact(outputs).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output size allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("output size allocation failed")
     })?;
     elements.try_reserve_exact(outputs).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("output element allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("output element allocation failed")
     })?;
 
     if format_version < CHUNK_VERSION_MIN {

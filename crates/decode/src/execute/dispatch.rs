@@ -47,7 +47,7 @@ pub(super) fn decode_dispatch_string_node(
     sources
         .try_reserve_exact(string_inputs.len())
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("dispatch allocation failed")
         })?;
     let mut total_string_count = 0usize;
     let mut total_bytes = 0usize;
@@ -85,7 +85,7 @@ pub(super) fn decode_dispatch_string_node(
     let mut output = alloc_output(total_bytes, limits, "dispatch output allocation failed")?;
     let mut output_lengths = Vec::new();
     output_lengths.try_reserve_exact(index_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch length allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dispatch length allocation failed")
     })?;
     match indices.element_width {
         1 => {
@@ -205,7 +205,7 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
     sources
         .try_reserve_exact(string_inputs.len())
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dispatch allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("dispatch allocation failed")
         })?;
     let mut total_string_count = 0usize;
     let mut total_bytes = 0usize;
@@ -240,7 +240,7 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
     }
     check_output_len(total_bytes, limits)?;
     output.try_reserve_exact(total_bytes).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dispatch output allocation failed")
     })?;
 
     match indices.element_width {
@@ -921,7 +921,7 @@ pub(super) fn decode_dispatch_n_by_tag_node(
     source_totals
         .try_reserve_exact(segment_inputs.len())
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dispatchN_byTag allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("dispatchN_byTag allocation failed")
         })?;
     let mut total_output = 0usize;
     for input in segment_inputs {

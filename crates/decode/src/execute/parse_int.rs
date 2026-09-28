@@ -26,7 +26,7 @@ pub(super) fn decode_node(
     let count = numeric_element_count(input.bytes, input.element_width)?;
     let mut lengths = Vec::new();
     lengths.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("parse_int length allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("parse_int length allocation failed")
     })?;
 
     let mut output = Vec::new();
@@ -40,7 +40,8 @@ pub(super) fn decode_node(
         check_output_len(new_len, limits)?;
         lengths.push(len);
         output.try_reserve_exact(text.len()).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("parse_int output allocation failed")
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("parse_int output allocation failed")
         })?;
         output.extend_from_slice(text.as_bytes());
     }

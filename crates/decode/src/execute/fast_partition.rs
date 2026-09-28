@@ -34,7 +34,7 @@ fn decode_u32_node_safe(
     let mut reader = ForwardBitReader::new(offset_bits);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition allocation failed")
     })?;
     output.resize(output_len, 0);
 
@@ -86,7 +86,7 @@ fn decode_u32_node_fast(
     let mut reader = ForwardBitReader::new(offset_bits);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition allocation failed")
     })?;
 
     let mut base_table = [0u64; 256];

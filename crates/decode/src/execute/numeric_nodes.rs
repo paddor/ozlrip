@@ -218,7 +218,7 @@ fn decode_big_endian_numeric_conversion(
     }
     let mut output = Vec::new();
     output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("conversion allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("conversion allocation failed")
     })?;
     for element in stored.bytes.chunks_exact(element_width) {
         output.extend(element.iter().rev().copied());
@@ -362,12 +362,12 @@ pub(super) fn decode_dedup_num_node(
 
     let mut outputs = Vec::new();
     outputs.try_reserve_exact(output_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dedup_num output allocation failed")
     })?;
     for _ in 0..output_count {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(stored.bytes.len()).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("dedup_num allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("dedup_num allocation failed")
         })?;
         bytes.extend_from_slice(stored.bytes);
         outputs.push(OwnedStream::typed(bytes, stored.element_width));
@@ -422,7 +422,7 @@ pub(super) fn decode_bitunpack_serial8_chunk(
     }
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitunpack allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("bitunpack allocation failed")
     })?;
     output.resize(output_len, 0);
     let mut bit_pos = 0usize;

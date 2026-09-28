@@ -222,7 +222,7 @@ pub(super) fn append_split_by_struct_to_final_splitn(
     }
     check_output_len(total_len, limits)?;
     dst.try_reserve_exact(total_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("splitn allocation failed")
     })?;
     for stream_index in (splitn.input_start..input_end).rev() {
         if stream_index == *split_output {

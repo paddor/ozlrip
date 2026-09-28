@@ -42,7 +42,7 @@ impl DictionaryStore {
             *existing = bundle;
         } else {
             self.bundles.try_reserve_exact(1).map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("dictionary bundle allocation failed")
             })?;
             self.bundles.push(bundle);
@@ -135,7 +135,7 @@ fn parse_fat_bundle(
     check_dictionary_limits(loaded, bundle_id, dict_count, bytes.len(), limits)?;
     let mut dict_ids = Vec::new();
     dict_ids.try_reserve_exact(dict_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dictionary ID allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dictionary ID allocation failed")
     })?;
     for _ in 0..dict_count {
         dict_ids.push(reader.read_id()?);
@@ -143,7 +143,7 @@ fn parse_fat_bundle(
 
     let mut dicts = Vec::new();
     dicts.try_reserve_exact(dict_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dictionary allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dictionary allocation failed")
     })?;
     for expected_id in dict_ids {
         dicts.push(parse_packed_dict(&mut reader, expected_id)?);

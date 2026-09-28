@@ -254,7 +254,7 @@ impl ChunkPlan {
         self.stored_stream_ranges
             .try_reserve_exact(self.stored_stream_sizes.len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("stored stream range allocation failed")
             })?;
         for &size in &self.stored_stream_sizes {

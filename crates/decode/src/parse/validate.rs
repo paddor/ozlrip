@@ -50,13 +50,13 @@ pub(super) fn validate_chunk_plan(
     let mut regenerated = 0usize;
     let mut regen_targets = Vec::new();
     regen_targets.try_reserve_exact(stream_bound).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail("regen target validation allocation failed")
     })?;
     regen_targets.resize(stream_bound, false);
     let mut stream_depths = Vec::new();
     stream_depths.try_reserve_exact(stream_bound).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail("stream depth validation allocation failed")
     })?;
     stream_depths.resize(stream_bound, 0usize);

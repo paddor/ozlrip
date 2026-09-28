@@ -102,6 +102,7 @@ fn error_taxonomy_manifest_tracks_public_error_classes() {
                     | "Malformed"
                     | "Truncated"
                     | "LimitExceeded"
+                    | "AllocationFailed"
                     | "ChecksumMismatch"
                     | "InvalidGraph"
                     | "InvalidType"

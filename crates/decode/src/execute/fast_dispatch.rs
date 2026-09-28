@@ -15,7 +15,8 @@ pub(super) fn decode_dispatch_n_by_tag_to_output(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     output.try_reserve_exact(total_output).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dispatchN_byTag output allocation failed")
+        Error::new(ErrorKind::AllocationFailed)
+            .with_detail("dispatchN_byTag output allocation failed")
     })?;
 
     #[cfg(not(feature = "paranoid"))]

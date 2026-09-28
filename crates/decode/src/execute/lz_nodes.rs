@@ -109,7 +109,7 @@ fn decode_lz_node_to_output_validated(
         output
             .try_reserve_exact(output_limit - output.len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded).with_detail("lz allocation failed")
+                Error::new(ErrorKind::AllocationFailed).with_detail("lz allocation failed")
             })?;
     }
 
@@ -671,13 +671,13 @@ impl RolzDeprecatedTable {
 
         let mut heads = Vec::new();
         heads.try_reserve_exact(contexts).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
+            Error::new(ErrorKind::AllocationFailed)
                 .with_detail("rolz_deprecated head table allocation failed")
         })?;
         heads.resize(contexts, 0);
         let mut entries = Vec::new();
         entries.try_reserve_exact(entries_len).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
+            Error::new(ErrorKind::AllocationFailed)
                 .with_detail("rolz_deprecated table allocation failed")
         })?;
         entries.resize(entries_len, RolzDeprecatedTableEntry::default());
@@ -914,7 +914,7 @@ fn decode_fastlz_deprecated_payload(
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     output.try_reserve_exact(decoded_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("fastlz_deprecated allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("fastlz_deprecated allocation failed")
     })?;
     let mut literals = LegacyLiteralCursor::new(payload.literals);
     let tokens = copy_deprecated_lz_literals(payload.tokens, "fastlz_deprecated tokens")?;
@@ -1252,7 +1252,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
 
     let mut clusters = Vec::new();
     clusters.try_reserve_exact(num_clusters).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail("rolz_deprecated literal cluster allocation failed")
     })?;
     let mut total = 0usize;
@@ -1336,7 +1336,7 @@ fn decode_rolz_deprecated_payload(
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     output.try_reserve_exact(decoded_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("rolz_deprecated allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("rolz_deprecated allocation failed")
     })?;
     let mut literals = RolzDeprecatedLiteralCursor::new(payload.literals);
     let mut reps = ROLZ_DEPRECATED_INITIAL_REPS;
@@ -1694,7 +1694,7 @@ fn decode_rolz_deprecated_seq_values(
     let num_sequences = match_types.len();
     let mut values = Vec::new();
     values.try_reserve_exact(num_sequences).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
     if num_sequences == 0 {
@@ -1732,7 +1732,7 @@ fn decode_rolz_deprecated_seq_values(
 
     let mut codes = Vec::new();
     codes.try_reserve_exact(num_sequences).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} code allocation failed"))
     })?;
     codes.resize(num_sequences, 0);
@@ -2044,7 +2044,7 @@ fn decode_legacy_multi_entropy_payload(
                 .with_detail(format!("{transform_name} exceeds buffer limit")));
         }
         output.try_reserve_exact(block_len).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
+            Error::new(ErrorKind::AllocationFailed)
                 .with_detail(format!("{transform_name} allocation failed"))
         })?;
         append_legacy_literal_payload(block, &mut output);
@@ -2238,7 +2238,7 @@ fn copy_deprecated_lz_literals(
     let output_len = literals.byte_len()?;
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
     append_legacy_literal_payload(literals, &mut output);
@@ -2351,7 +2351,7 @@ pub(super) fn decode_field_lz_node_to_output(
         output
             .try_reserve_exact(output_limit - output.len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded).with_detail("field_lz allocation failed")
+                Error::new(ErrorKind::AllocationFailed).with_detail("field_lz allocation failed")
             })?;
     }
 

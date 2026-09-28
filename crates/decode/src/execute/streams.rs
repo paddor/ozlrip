@@ -65,7 +65,7 @@ pub(super) fn initialize_stream_slots<'a>(
     streams
         .try_reserve_exact(regen_targets.len())
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("stream table allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("stream table allocation failed")
         })?;
     streams.resize_with(regen_targets.len(), || StreamSlot::Empty);
 
@@ -105,7 +105,7 @@ pub(super) fn collect_node_inputs<'a>(
     })?;
     let mut inputs = SmallVec::<[StreamInput<'a>; 8]>::new();
     inputs.try_reserve_exact(input_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("node input allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("node input allocation failed")
     })?;
     for slot in input_slots.iter().rev() {
         inputs.push(slot.as_input()?);

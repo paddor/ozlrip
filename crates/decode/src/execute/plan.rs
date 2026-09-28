@@ -33,13 +33,13 @@ pub(super) fn build_chunk_execution_plan(
     regen_targets
         .try_reserve_exact(total_streams)
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("regen target allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("regen target allocation failed")
         })?;
     regen_targets.resize(total_streams, false);
 
     let mut nodes = Vec::new();
     nodes.try_reserve_exact(chunk.transforms()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("node execution allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("node execution allocation failed")
     })?;
     let mut stream_cursor = 0usize;
     for node in chunk.nodes() {
@@ -72,7 +72,7 @@ pub(super) fn build_chunk_execution_plan(
         output_targets
             .try_reserve_exact(node.regen_distances().len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("node output target allocation failed")
             })?;
         for &distance in node.regen_distances() {

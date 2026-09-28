@@ -42,7 +42,7 @@ pub(super) fn decode_concat_string_node(
     let mut consumed_bytes = 0usize;
     let mut outputs = Vec::new();
     outputs.try_reserve_exact(output_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("concat output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("concat output allocation failed")
     })?;
 
     for output_index in 0..output_count {
@@ -65,14 +65,15 @@ pub(super) fn decode_concat_string_node(
 
         let mut output = Vec::new();
         output.try_reserve_exact(output_bytes).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("concat allocation failed")
         })?;
         output.extend_from_slice(&concatenated.bytes[consumed_bytes..next_bytes]);
         let mut lengths = Vec::new();
         lengths
             .try_reserve_exact(output_lengths.len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded).with_detail("concat length allocation failed")
+                Error::new(ErrorKind::AllocationFailed)
+                    .with_detail("concat length allocation failed")
             })?;
         lengths.extend_from_slice(output_lengths);
         outputs.push(OwnedStream {
@@ -135,7 +136,7 @@ pub(super) fn decode_interleave_string_node(
     let strings_per_output = string_lengths.len() / output_count;
     let mut byte_counts = Vec::new();
     byte_counts.try_reserve_exact(output_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("interleave size allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("interleave size allocation failed")
     })?;
     byte_counts.resize(output_count, 0usize);
     for (index, &len) in string_lengths.iter().enumerate() {
@@ -150,13 +151,14 @@ pub(super) fn decode_interleave_string_node(
 
     let mut outputs = Vec::new();
     outputs.try_reserve_exact(output_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("interleave output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("interleave output allocation failed")
     })?;
     for &byte_count in &byte_counts {
         let bytes = alloc_output(byte_count, limits, "interleave allocation failed")?;
         let mut lengths = Vec::new();
         lengths.try_reserve_exact(strings_per_output).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("interleave length allocation failed")
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("interleave length allocation failed")
         })?;
         outputs.push(OwnedStream {
             bytes,
@@ -223,7 +225,7 @@ pub(super) fn decode_separate_string_components_node(
     }
     let mut output = Vec::new();
     output.try_reserve_exact(content.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("string component allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("string component allocation failed")
     })?;
     output.extend_from_slice(content.bytes);
     Ok(OwnedStream {
@@ -240,7 +242,7 @@ pub(super) fn decode_string_component_lengths(
 ) -> Result<(Vec<u32>, usize)> {
     let mut string_lengths = Vec::new();
     string_lengths.try_reserve_exact(field_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("string length allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("string length allocation failed")
     })?;
     let mut total = 0usize;
     match field_sizes.element_width {
@@ -328,7 +330,7 @@ pub(super) fn decode_prefix_node(
     output_lengths
         .try_reserve_exact(suffix_lengths.len())
         .map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("prefix length allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("prefix length allocation failed")
         })?;
     let mut output_len = 0usize;
     let mut previous_len = 0usize;
@@ -435,7 +437,7 @@ pub(super) fn decode_tokenize_string_node(
 
     let mut starts = Vec::new();
     starts.try_reserve_exact(alphabet_size).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
+        Error::new(ErrorKind::AllocationFailed)
             .with_detail("tokenize_string alphabet allocation failed")
     })?;
     let mut offset = 0usize;
@@ -465,7 +467,8 @@ pub(super) fn decode_tokenize_string_node(
     let mut bytes = alloc_output(output_len, limits, "tokenize_string allocation failed")?;
     let mut lengths = Vec::new();
     lengths.try_reserve_exact(output_elements).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize_string length allocation failed")
+        Error::new(ErrorKind::AllocationFailed)
+            .with_detail("tokenize_string length allocation failed")
     })?;
 
     for index in 0..output_elements {

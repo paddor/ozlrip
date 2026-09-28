@@ -148,7 +148,7 @@ pub(super) fn decode_quantize_node(
     let mut reader = ForwardBitReader::new(extra_bits.bytes);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("quantize allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("quantize allocation failed")
     })?;
     output.resize(output_len, 0);
     let mut out_pos = 0usize;
@@ -322,7 +322,7 @@ pub(super) fn decode_partition_node(
     let mut reader = ForwardBitReader::new(offsets.bytes);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition allocation failed")
     })?;
 
     for &bucket in buckets.bytes {
@@ -432,7 +432,7 @@ fn parse_partition_pow2_sizes(flags: u8, bytes: &[u8]) -> Result<Vec<u64>> {
     let mut reader = ForwardBitReader::new(bytes);
     let mut sizes = Vec::new();
     sizes.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition sizes allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition sizes allocation failed")
     })?;
     for _ in 0..count {
         let log2_size = reader.read_u64(num_bits)?;
@@ -491,7 +491,7 @@ fn validate_partition_params(params: &PartitionParams) -> Result<()> {
 fn partition_bases(params: &PartitionParams) -> Result<Vec<u64>> {
     let mut bases = Vec::new();
     bases.try_reserve_exact(params.sizes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition bases allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition bases allocation failed")
     })?;
     let mut base = params.start_value;
     for &size in &params.sizes {
@@ -504,7 +504,7 @@ fn partition_bases(params: &PartitionParams) -> Result<Vec<u64>> {
 fn partition_bits(params: &PartitionParams) -> Result<Vec<u8>> {
     let mut bits = Vec::new();
     bits.try_reserve_exact(params.sizes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("partition bits allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("partition bits allocation failed")
     })?;
     for &size in &params.sizes {
         let bit_width = if size <= 1 {

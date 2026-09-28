@@ -91,8 +91,11 @@ pub enum ErrorKind {
     Malformed,
     /// The frame uses a feature this decoder does not implement.
     Unsupported,
-    /// A configured [`Limits`] bound was exceeded, or allocation failed.
+    /// A configured [`Limits`] bound was exceeded.
     LimitExceeded,
+    /// Memory for a buffer within the configured limits could not be
+    /// allocated.
+    AllocationFailed,
     /// A frame checksum did not match.
     ChecksumMismatch,
     /// The transform graph is inconsistent.
@@ -110,6 +113,7 @@ impl fmt::Display for ErrorKind {
             Self::Malformed => "malformed input",
             Self::Unsupported => "unsupported feature",
             Self::LimitExceeded => "limit exceeded",
+            Self::AllocationFailed => "allocation failed",
             Self::ChecksumMismatch => "checksum mismatch",
             Self::InvalidGraph => "invalid graph",
             Self::InvalidType => "invalid type",

@@ -46,7 +46,7 @@ pub(super) fn decode_concat_node(
     let mut consumed_bytes = 0usize;
     let mut outputs = Vec::new();
     outputs.try_reserve_exact(output_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("concat output allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("concat output allocation failed")
     })?;
 
     for output_index in 0..output_count {
@@ -66,7 +66,7 @@ pub(super) fn decode_concat_node(
         }
         let mut output = Vec::new();
         output.try_reserve_exact(output_bytes).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("concat allocation failed")
+            Error::new(ErrorKind::AllocationFailed).with_detail("concat allocation failed")
         })?;
         output.extend_from_slice(&concatenated.bytes[consumed_bytes..next_bytes]);
         outputs.push(OwnedStream {
@@ -409,7 +409,7 @@ pub(super) fn decode_merge_sorted_node(
 
     let mut starts = Vec::new();
     starts.try_reserve_exact(sizes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("merge_sorted run allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("merge_sorted run allocation failed")
     })?;
     let mut cursor = 0usize;
     for &size in &sizes {
@@ -422,7 +422,7 @@ pub(super) fn decode_merge_sorted_node(
     let mut output = vec![0u8; output_len];
     let mut written = Vec::new();
     written.try_reserve_exact(sizes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("merge_sorted count allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("merge_sorted count allocation failed")
     })?;
     written.resize(sizes.len(), 0usize);
 
@@ -795,7 +795,7 @@ pub(super) fn append_split_by_struct_output(
         output
             .try_reserve_exact(required_capacity - output.len())
             .map_err(|_| {
-                Error::new(ErrorKind::LimitExceeded)
+                Error::new(ErrorKind::AllocationFailed)
                     .with_detail("split_by_struct allocation failed")
             })?;
     }
@@ -865,12 +865,12 @@ pub(super) fn decode_mux_lengths_node(
 
     let mut literal_lengths = Vec::new();
     literal_lengths.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("mux_lengths allocation failed")
     })?;
     literal_lengths.resize(output_len, 0);
     let mut match_lengths = Vec::new();
     match_lengths.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("mux_lengths allocation failed")
     })?;
     match_lengths.resize(output_len, 0);
 
@@ -940,12 +940,12 @@ pub(super) fn decode_mux_lengths_u16(
 ) -> Result<Vec<OwnedStream>> {
     let mut literal_lengths = Vec::new();
     literal_lengths.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("mux_lengths allocation failed")
     })?;
     literal_lengths.resize(output_len, 0);
     let mut match_lengths = Vec::new();
     match_lengths.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("mux_lengths allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("mux_lengths allocation failed")
     })?;
     match_lengths.resize(output_len, 0);
 
@@ -1026,7 +1026,7 @@ pub(super) fn decode_bitsplit_node(
 
     let mut bit_widths = Vec::new();
     bit_widths.try_reserve_exact(inputs.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitsplit width allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("bitsplit width allocation failed")
     })?;
     let mut stored_sum = 0usize;
     for &width in stored_widths {
@@ -1160,7 +1160,7 @@ pub(super) fn decode_tokenize_fixed_node(
 
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("tokenize allocation failed")
     })?;
     fast_tokenize::decode_tokenize_indices(
         alphabet.bytes,

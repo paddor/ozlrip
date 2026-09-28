@@ -15,7 +15,7 @@ pub(super) fn read_bitpacked_u32(
     let packed = reader.read_slice(bytes)?;
     let mut out = Vec::new();
     out.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitpacked value allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("bitpacked value allocation failed")
     })?;
     for index in 0..count {
         out.push(read_packed_value(packed, index, bits)?);
@@ -35,7 +35,7 @@ pub(super) fn read_bitpacked_u32_inline<const N: usize>(
     let packed = reader.read_slice(bytes)?;
     let mut out = SmallVec::new();
     out.try_reserve_exact(count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitpacked value allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("bitpacked value allocation failed")
     })?;
     for index in 0..count {
         out.push(read_packed_value(packed, index, bits)?);

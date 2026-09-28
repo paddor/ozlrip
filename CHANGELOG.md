@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add `ErrorKind::AllocationFailed`. A buffer that fits the configured
+  limits but cannot be allocated returns it instead of `LimitExceeded`.
 - An `Unsupported` error for a transform outside its format version range
   names the transform and the version.
 - Update `zrip-decode` to 0.8.10. It caps a zstd frame's output at its

@@ -230,6 +230,7 @@ fn parse_error_kind(value: &str) -> ErrorKind {
         "Malformed" => ErrorKind::Malformed,
         "Truncated" => ErrorKind::Truncated,
         "LimitExceeded" => ErrorKind::LimitExceeded,
+        "AllocationFailed" => ErrorKind::AllocationFailed,
         "ChecksumMismatch" => ErrorKind::ChecksumMismatch,
         "InvalidGraph" => ErrorKind::InvalidGraph,
         "InvalidType" => ErrorKind::InvalidType,

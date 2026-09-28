@@ -352,7 +352,7 @@ pub(super) fn build_node_plans(
 
     let mut nodes = NodePlans::new();
     nodes.try_reserve_exact(transforms).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("node plan allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("node plan allocation failed")
     })?;
 
     let mut header_start = 0usize;
@@ -415,7 +415,7 @@ pub(super) fn read_transform_types(
     let flags = read_bitpacked_u32(reader, transforms, 1)?;
     let mut types = Vec::new();
     types.try_reserve_exact(transforms).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("transform type allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("transform type allocation failed")
     })?;
     for flag in flags {
         types.push(match flag {
@@ -441,7 +441,7 @@ pub(super) fn read_transform_ids(
     let custom_count = transform_types.len() - standard_count;
     let mut custom_ids = Vec::new();
     custom_ids.try_reserve_exact(custom_count).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("custom transform ID allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("custom transform ID allocation failed")
     })?;
     for _ in 0..custom_count {
         let id = reader.read_var_u64()?;
@@ -453,7 +453,7 @@ pub(super) fn read_transform_ids(
     let custom_index = 0usize;
     let mut ids = Vec::new();
     ids.try_reserve_exact(transform_types.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("transform ID allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("transform ID allocation failed")
     })?;
     for &kind in transform_types {
         match kind {
@@ -522,7 +522,7 @@ pub(super) fn read_regen_counts(
     let mut counts = read_bitpacked_u32(reader, transforms, 1)?;
     let mut out = Vec::new();
     out.try_reserve_exact(transforms).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("regen count allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("regen count allocation failed")
     })?;
     for count in &mut counts {
         if *count != 0 {
@@ -567,7 +567,7 @@ pub(super) fn read_dict_indexes(
     let mut value_index = 0usize;
     let mut out = SmallVec::new();
     out.try_reserve_exact(transforms).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dict index allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("dict index allocation failed")
     })?;
     for flag in flags {
         if flag == 0 {
@@ -604,7 +604,7 @@ pub(super) fn read_stored_stream_sizes(
 ) -> Result<StoredStreamSizes> {
     let mut sizes = StoredStreamSizes::new();
     sizes.try_reserve_exact(streams).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("stored stream size allocation failed")
+        Error::new(ErrorKind::AllocationFailed).with_detail("stored stream size allocation failed")
     })?;
     for _ in 0..streams {
         let size = reader.read_var_u64()?;
