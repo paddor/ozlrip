@@ -403,14 +403,19 @@ fn append_dispatched_string_2byte_csv_wide_header_pattern_fast(
         return Ok(false);
     }
 
-    fast_csv::append_wide_header_pattern(
-        rows,
-        data_sources,
-        delimiter_source,
-        header_source,
-        sources,
-        output,
-    )?;
+    // SAFETY: the checks above found `rows` strings in each data source with
+    // lengths that sum to its bytes, `rows * data_sources + 1` one-byte
+    // delimiters, and a header source whose lengths sum to its bytes.
+    unsafe {
+        fast_csv::append_wide_header_pattern(
+            rows,
+            data_sources,
+            delimiter_source,
+            header_source,
+            sources,
+            output,
+        )
+    }?;
     Ok(true)
 }
 
@@ -503,15 +508,25 @@ fn append_dispatched_string_2byte_csv_pattern_fast(
     }
 
     if fixed_prefix && delimiter_bytes_match_csv_rows(&sources[4], rows) {
-        fast_csv::append_2byte_csv_fixed_prefix_comma_pattern_rows(rows, sources, output)?;
+        // SAFETY: the checks above found `rows` strings in sources 0 to 3
+        // with lengths that sum to their bytes, 10- and 3-byte strings in
+        // sources 0 and 1, and `,,,\n` repeated as the delimiters.
+        unsafe {
+            fast_csv::append_2byte_csv_fixed_prefix_comma_pattern_rows(rows, sources, output)
+        }?;
         return Ok(true);
     }
     if fixed_prefix {
-        fast_csv::append_2byte_csv_fixed_prefix_pattern_rows(rows, sources, output)?;
+        // SAFETY: the checks above found `rows` strings in sources 0 to 3
+        // with lengths that sum to their bytes, 10- and 3-byte strings in
+        // sources 0 and 1, and `rows * 4` one-byte delimiters.
+        unsafe { fast_csv::append_2byte_csv_fixed_prefix_pattern_rows(rows, sources, output) }?;
         return Ok(true);
     }
 
-    fast_csv::append_2byte_csv_pattern_rows(rows, sources, output)?;
+    // SAFETY: the checks above found `rows` strings in sources 0 to 3 with
+    // lengths that sum to their bytes, and `rows * 4` one-byte delimiters.
+    unsafe { fast_csv::append_2byte_csv_pattern_rows(rows, sources, output) }?;
     Ok(true)
 }
 
@@ -618,14 +633,26 @@ fn append_dispatched_string_2byte_csv_header_pattern_fast(
         append_dispatched_string_to_serial(5, sources, output)?;
     }
     if fixed_prefix && delimiter_bytes_match_csv_header_rows(&sources[4], rows) {
-        fast_csv::append_2byte_csv_fixed_prefix_comma_header_pattern_rows(rows, sources, output)?;
+        // SAFETY: the checks above found `rows` strings in sources 0 to 3
+        // with lengths that sum to their bytes, 10- and 3-byte strings in
+        // sources 0 and 1, and `\n` then `,,,\n` repeated as the delimiters.
+        unsafe {
+            fast_csv::append_2byte_csv_fixed_prefix_comma_header_pattern_rows(rows, sources, output)
+        }?;
         return Ok(true);
     }
     if fixed_prefix {
-        fast_csv::append_2byte_csv_fixed_prefix_header_pattern_rows(rows, sources, output)?;
+        // SAFETY: the checks above found `rows` strings in sources 0 to 3
+        // with lengths that sum to their bytes, 10- and 3-byte strings in
+        // sources 0 and 1, and `rows * 4 + 1` one-byte delimiters.
+        unsafe {
+            fast_csv::append_2byte_csv_fixed_prefix_header_pattern_rows(rows, sources, output)
+        }?;
         return Ok(true);
     }
-    fast_csv::append_2byte_csv_header_pattern_rows(rows, sources, output)?;
+    // SAFETY: the checks above found `rows` strings in sources 0 to 3 with
+    // lengths that sum to their bytes, and `rows * 4 + 1` one-byte delimiters.
+    unsafe { fast_csv::append_2byte_csv_header_pattern_rows(rows, sources, output) }?;
     Ok(true)
 }
 
