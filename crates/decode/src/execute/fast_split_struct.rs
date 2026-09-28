@@ -1,18 +1,22 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-#![allow(
-    clippy::inline_always,
-    clippy::ptr_as_ptr,
-    reason = "split-by-struct fast paths use small unaligned typed copies"
-)]
 
 use alloc::vec::Vec;
 
 use super::StreamInput;
+#[cfg(not(feature = "paranoid"))]
+use super::layout_nodes::split_by_struct_output_len;
 
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn append_split_by_struct_output(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
-    if inputs.len() == 6 {
-        append_split_by_struct_output_fast(inputs, output);
+    if inputs.len() == 6
+        && let Ok(output_len) = split_by_struct_output_len(inputs)
+    {
+        output.reserve(output_len);
+        // SAFETY: `split_by_struct_output_len` accepted the six inputs, and
+        // `reserve` made room for their output.
+        unsafe {
+            append_split_by_struct_output_fast(inputs, output);
+        }
     } else {
         append_split_by_struct_output_safe(inputs, output);
     }
@@ -116,12 +120,14 @@ fn append_6_4_4_2_2_8_8_safe(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     }
 }
 
+#[expect(clippy::inline_always, reason = "profiled: one call per field per row")]
 #[inline(always)]
 fn copy_2(dst: &mut [u8], src: &[u8]) {
     dst[0] = src[0];
     dst[1] = src[1];
 }
 
+#[expect(clippy::inline_always, reason = "profiled: one call per field per row")]
 #[inline(always)]
 fn copy_4(dst: &mut [u8], src: &[u8]) {
     dst[0] = src[0];
@@ -130,6 +136,7 @@ fn copy_4(dst: &mut [u8], src: &[u8]) {
     dst[3] = src[3];
 }
 
+#[expect(clippy::inline_always, reason = "profiled: one call per field per row")]
 #[inline(always)]
 fn copy_8(dst: &mut [u8], src: &[u8]) {
     dst[0] = src[0];
@@ -142,8 +149,12 @@ fn copy_8(dst: &mut [u8], src: &[u8]) {
     dst[7] = src[7];
 }
 
+/// # Safety
+///
+/// `split_by_struct_output_len` must accept `inputs`, and `output`'s spare
+/// capacity must hold the length it returns.
 #[cfg(not(feature = "paranoid"))]
-fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+unsafe fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let widths = [
         inputs[0].element_width,
         inputs[1].element_width,
@@ -153,11 +164,13 @@ fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut V
         inputs[5].element_width,
     ];
     if widths == [8, 8, 2, 2, 4, 4] {
-        append_6_8_8_2_2_4_4(inputs, output);
+        // SAFETY: our caller's guarantees, with these widths.
+        unsafe { append_6_8_8_2_2_4_4(inputs, output) };
         return;
     }
     if widths == [4, 4, 2, 2, 8, 8] {
-        append_6_4_4_2_2_8_8(inputs, output);
+        // SAFETY: our caller's guarantees, with these widths.
+        unsafe { append_6_4_4_2_2_8_8(inputs, output) };
         return;
     }
 
@@ -168,6 +181,9 @@ fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut V
     let output_len = element_count * struct_width;
     let start_len = output.len();
 
+    // SAFETY: every input holds `element_count` elements of its width, so
+    // each field read is in bounds, and the spare capacity holds the
+    // `output_len` bytes the rows write after `start_len`.
     unsafe {
         let mut dst = output.as_mut_ptr().add(start_len);
         let end = dst.add(output_len);
@@ -197,11 +213,18 @@ fn append_split_by_struct_output_fast(inputs: &[StreamInput<'_>], output: &mut V
     }
 }
 
+/// # Safety
+///
+/// `split_by_struct_output_len` must accept `inputs` with these widths, and `output`'s spare
+/// capacity must hold the length it returns.
 #[cfg(not(feature = "paranoid"))]
-fn append_6_8_8_2_2_4_4(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+unsafe fn append_6_8_8_2_2_4_4(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 8;
     let output_len = element_count * 28;
     let start_len = output.len();
+    // SAFETY: every input holds `element_count` elements of its width, so
+    // each field read is in bounds, and each 28-byte row fits the spare
+    // capacity for `output_len` bytes after `start_len`.
     unsafe {
         let mut dst = output.as_mut_ptr().add(start_len);
         let src0 = inputs[0].bytes.as_ptr();
@@ -211,29 +234,41 @@ fn append_6_8_8_2_2_4_4(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
         let src4 = inputs[4].bytes.as_ptr();
         let src5 = inputs[5].bytes.as_ptr();
         for element in 0..element_count {
-            (dst as *mut u64)
-                .write_unaligned((src0.add(element * 8) as *const u64).read_unaligned());
-            (dst.add(8) as *mut u64)
-                .write_unaligned((src1.add(element * 8) as *const u64).read_unaligned());
-            (dst.add(16) as *mut u16)
-                .write_unaligned((src2.add(element * 2) as *const u16).read_unaligned());
-            (dst.add(18) as *mut u16)
-                .write_unaligned((src3.add(element * 2) as *const u16).read_unaligned());
-            (dst.add(20) as *mut u32)
-                .write_unaligned((src4.add(element * 4) as *const u32).read_unaligned());
-            (dst.add(24) as *mut u32)
-                .write_unaligned((src5.add(element * 4) as *const u32).read_unaligned());
+            dst.cast::<u64>()
+                .write_unaligned(src0.add(element * 8).cast::<u64>().read_unaligned());
+            dst.add(8)
+                .cast::<u64>()
+                .write_unaligned(src1.add(element * 8).cast::<u64>().read_unaligned());
+            dst.add(16)
+                .cast::<u16>()
+                .write_unaligned(src2.add(element * 2).cast::<u16>().read_unaligned());
+            dst.add(18)
+                .cast::<u16>()
+                .write_unaligned(src3.add(element * 2).cast::<u16>().read_unaligned());
+            dst.add(20)
+                .cast::<u32>()
+                .write_unaligned(src4.add(element * 4).cast::<u32>().read_unaligned());
+            dst.add(24)
+                .cast::<u32>()
+                .write_unaligned(src5.add(element * 4).cast::<u32>().read_unaligned());
             dst = dst.add(28);
         }
         output.set_len(start_len + output_len);
     }
 }
 
+/// # Safety
+///
+/// `split_by_struct_output_len` must accept `inputs` with these widths, and `output`'s spare
+/// capacity must hold the length it returns.
 #[cfg(not(feature = "paranoid"))]
-fn append_6_4_4_2_2_8_8(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
+unsafe fn append_6_4_4_2_2_8_8(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
     let element_count = inputs[0].bytes.len() / 4;
     let output_len = element_count * 28;
     let start_len = output.len();
+    // SAFETY: every input holds `element_count` elements of its width, so
+    // each field read is in bounds, and each 28-byte row fits the spare
+    // capacity for `output_len` bytes after `start_len`.
     unsafe {
         let mut dst = output.as_mut_ptr().add(start_len);
         let src0 = inputs[0].bytes.as_ptr();
@@ -243,46 +278,52 @@ fn append_6_4_4_2_2_8_8(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {
         let src4 = inputs[4].bytes.as_ptr();
         let src5 = inputs[5].bytes.as_ptr();
         for element in 0..element_count {
-            (dst as *mut u32)
-                .write_unaligned((src0.add(element * 4) as *const u32).read_unaligned());
-            (dst.add(4) as *mut u32)
-                .write_unaligned((src1.add(element * 4) as *const u32).read_unaligned());
-            (dst.add(8) as *mut u16)
-                .write_unaligned((src2.add(element * 2) as *const u16).read_unaligned());
-            (dst.add(10) as *mut u16)
-                .write_unaligned((src3.add(element * 2) as *const u16).read_unaligned());
-            (dst.add(12) as *mut u64)
-                .write_unaligned((src4.add(element * 8) as *const u64).read_unaligned());
-            (dst.add(20) as *mut u64)
-                .write_unaligned((src5.add(element * 8) as *const u64).read_unaligned());
+            dst.cast::<u32>()
+                .write_unaligned(src0.add(element * 4).cast::<u32>().read_unaligned());
+            dst.add(4)
+                .cast::<u32>()
+                .write_unaligned(src1.add(element * 4).cast::<u32>().read_unaligned());
+            dst.add(8)
+                .cast::<u16>()
+                .write_unaligned(src2.add(element * 2).cast::<u16>().read_unaligned());
+            dst.add(10)
+                .cast::<u16>()
+                .write_unaligned(src3.add(element * 2).cast::<u16>().read_unaligned());
+            dst.add(12)
+                .cast::<u64>()
+                .write_unaligned(src4.add(element * 8).cast::<u64>().read_unaligned());
+            dst.add(20)
+                .cast::<u64>()
+                .write_unaligned(src5.add(element * 8).cast::<u64>().read_unaligned());
             dst = dst.add(28);
         }
         output.set_len(start_len + output_len);
     }
 }
 
+/// Copies one `width`-byte field from `src` to `*dst` and advances `*dst`.
+///
+/// # Safety
+///
+/// `src` must be valid for `width` reads and `*dst` for `width` writes, in
+/// different buffers.
 #[cfg(not(feature = "paranoid"))]
 unsafe fn copy_field(src: *const u8, dst: &mut *mut u8, width: usize) {
-    match width {
-        1 => unsafe {
-            (*dst).write(src.read());
-            *dst = (*dst).add(1);
-        },
-        2 => unsafe {
-            (*dst as *mut u16).write_unaligned((src as *const u16).read_unaligned());
-            *dst = (*dst).add(2);
-        },
-        4 => unsafe {
-            (*dst as *mut u32).write_unaligned((src as *const u32).read_unaligned());
-            *dst = (*dst).add(4);
-        },
-        8 => unsafe {
-            (*dst as *mut u64).write_unaligned((src as *const u64).read_unaligned());
-            *dst = (*dst).add(8);
-        },
-        _ => unsafe {
-            core::ptr::copy_nonoverlapping(src, *dst, width);
-            *dst = (*dst).add(width);
-        },
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        match width {
+            1 => (*dst).write(src.read()),
+            2 => (*dst)
+                .cast::<u16>()
+                .write_unaligned(src.cast::<u16>().read_unaligned()),
+            4 => (*dst)
+                .cast::<u32>()
+                .write_unaligned(src.cast::<u32>().read_unaligned()),
+            8 => (*dst)
+                .cast::<u64>()
+                .write_unaligned(src.cast::<u64>().read_unaligned()),
+            _ => core::ptr::copy_nonoverlapping(src, *dst, width),
+        }
+        *dst = (*dst).add(width);
     }
 }
