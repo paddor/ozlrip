@@ -162,8 +162,15 @@ pub struct Limits {
     pub max_dictionaries: usize,
     /// Largest total size of all loaded dictionary bundles.
     pub max_dictionary_bytes: usize,
-    /// Largest ratio of decoded bytes to frame bytes.
+    /// Largest ratio of decoded bytes to frame bytes, for decoded output
+    /// above `expansion_ratio_exempt_bytes`.
     pub max_expansion_ratio: usize,
+    /// Largest decoded output that `max_expansion_ratio` does not apply to.
+    ///
+    /// Very compressible data, such as constant numbers or repeated text,
+    /// can decode to far more than the ratio allows. Outputs up to this size
+    /// decode anyway; the reservation they allow stays small.
+    pub expansion_ratio_exempt_bytes: usize,
 }
 
 impl Limits {
@@ -183,6 +190,7 @@ impl Limits {
             max_dictionaries: 1024,
             max_dictionary_bytes: 64 * 1024 * 1024,
             max_expansion_ratio: 256,
+            expansion_ratio_exempt_bytes: 1024 * 1024,
         }
     }
 
@@ -202,6 +210,7 @@ impl Limits {
             max_dictionaries: 64,
             max_dictionary_bytes: 16 * 1024 * 1024,
             max_expansion_ratio: 64,
+            expansion_ratio_exempt_bytes: 256 * 1024,
         }
     }
 }

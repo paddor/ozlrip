@@ -115,6 +115,27 @@ fn zstd_chunk_overrunning_declared_size_fails_before_later_chunks() {
     assert_eq!(err.kind(), ErrorKind::Malformed);
 }
 
+/// Outputs up to `expansion_ratio_exempt_bytes` decode whatever their
+/// expansion ratio; one byte more is held to the ratio again.
+#[cfg(feature = "zstd")]
+#[test]
+fn outputs_up_to_the_exempt_size_skip_the_expansion_ratio() {
+    let exempt = ozlrip::Limits::default().expansion_ratio_exempt_bytes;
+    for (len, fits) in [(exempt, true), (exempt + 1, false)] {
+        let payload = vec![0u8; len];
+        let frame = FrameBuilder::new(21)
+            .serial_output(len)
+            .chunk(zstd_chunk(&payload))
+            .build();
+        assert!(len > frame.len() * ozlrip::Limits::default().max_expansion_ratio);
+
+        match ozlrip::decode(&frame) {
+            Ok(decoded) => assert!(fits && decoded == payload, "{len} bytes"),
+            Err(err) => assert!(!fits && err.kind() == ErrorKind::LimitExceeded, "{err}"),
+        }
+    }
+}
+
 /// Single-zstd frames enforce the expansion ratio exactly, in the fast path
 /// and in the plan-based path (a comment disables the fast path).
 #[cfg(feature = "zstd")]
@@ -141,6 +162,7 @@ fn single_zstd_frame_enforces_exact_expansion_ratio() {
             .unwrap();
 
         let mut limits = ozlrip::Limits::strict();
+        limits.expansion_ratio_exempt_bytes = 0;
         limits.max_expansion_ratio = ratio;
         let err = ozlrip::decode_with_options(&frame, limits.into()).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::LimitExceeded, "comment {comment:?}");
@@ -163,6 +185,7 @@ fn string_lengths_of_all_outputs_share_the_expansion_ratio() {
         .build();
     // Each output's 400 length bytes fit the ratio; all 1600 do not.
     let mut limits = ozlrip::Limits::strict();
+    limits.expansion_ratio_exempt_bytes = 0;
     limits.max_expansion_ratio = 400usize.div_ceil(frame.len());
     assert!(1600 > frame.len() * limits.max_expansion_ratio);
 

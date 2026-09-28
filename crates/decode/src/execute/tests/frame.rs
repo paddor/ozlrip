@@ -149,6 +149,7 @@ fn enforces_expansion_ratio_without_mutating_destination() {
     let mut output = vec![1, 2];
     let mut limits = Limits::default();
     limits.max_expansion_ratio = 0;
+    limits.expansion_ratio_exempt_bytes = 0;
 
     let err = decode_plan(&input, &plan, &mut output, limits).unwrap_err();
 

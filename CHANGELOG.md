@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `Limits::expansion_ratio_exempt_bytes`: decoded outputs up to this
+  size skip `max_expansion_ratio` (1 MiB strict, 256 KiB paranoid). Very
+  compressible data compresses past the default ratio of 256, so frames
+  that upstream writes for 24 KB of constant numbers or 320 KB of repeated
+  text failed with `LimitExceeded`.
 - Document every public item; the crates warn on missing docs. The crate
   docs list the entry points and the cargo features.
 - Track PivCo-Huffman in the feature compatibility manifest, backed by a

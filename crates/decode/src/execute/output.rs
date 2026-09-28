@@ -138,8 +138,11 @@ pub(super) fn declared_output_size(plan: &FramePlan, index: usize) -> Result<usi
 }
 
 /// Fails if `declared` output bytes exceed the expansion ratio of a frame of
-/// `encoded_size` bytes.
+/// `encoded_size` bytes. Outputs up to the exempt size always pass.
 pub(super) fn check_expansion(declared: usize, encoded_size: usize, limits: Limits) -> Result<()> {
+    if declared <= limits.expansion_ratio_exempt_bytes {
+        return Ok(());
+    }
     let max_expanded = encoded_size
         .checked_mul(limits.max_expansion_ratio)
         .ok_or_else(|| {

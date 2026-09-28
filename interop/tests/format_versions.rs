@@ -3,7 +3,7 @@
 //! every frame to its input.
 
 use openzl_shim::{CompressOptions, Graph, Input, Node, compress_pipeline};
-use ozlrip::{Limits, Options, Output};
+use ozlrip::Output;
 
 const GRAPHS: [Graph; 12] = [
     Graph::Generic,
@@ -211,11 +211,6 @@ fn pipelines(output: &Output) -> Vec<(Vec<Node>, Graph)> {
 
 #[test]
 fn every_format_version_decodes() {
-    // Constant inputs compress far past the default expansion ratio.
-    let mut limits = Limits::default();
-    limits.max_expansion_ratio = 1 << 24;
-    let options = Options::from(limits);
-
     let mut frames = 0;
     let mut failures = Vec::new();
     for version in openzl_shim::min_format_version()..=openzl_shim::max_format_version() {
@@ -235,7 +230,7 @@ fn every_format_version_decodes() {
                     continue;
                 };
                 frames += 1;
-                match ozlrip::decode_outputs_with_options(&frame, options) {
+                match ozlrip::decode_outputs(&frame) {
                     Ok(outputs) if outputs == [expected.clone()] => {}
                     Ok(_) => failures.push(format!(
                         "v{version} {nodes:?} {graph:?} {name}: wrong output"
