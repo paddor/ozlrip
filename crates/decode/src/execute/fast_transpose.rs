@@ -29,7 +29,6 @@ pub(super) fn write_transpose_split_output(
 #[inline(always)]
 fn write_lanes(inputs: &[StreamInput<'_>], output_len: usize, output: &mut Vec<u8>) {
     debug_assert!(output.is_empty());
-    debug_assert!(output.capacity() >= output_len);
     match inputs {
         [lane0, lane1] => {
             write_2(lane0.bytes, lane1.bytes, output);
@@ -168,17 +167,25 @@ fn write_8_safe(
 #[inline(always)]
 fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
-    debug_assert_eq!(lane1.len(), len);
-    unsafe {
-        let dst = output.as_mut_ptr();
-        let src0 = lane0.as_ptr();
-        let src1 = lane1.as_ptr();
-        for index in 0..len {
+    assert!(lane1.len() == len, "transpose lanes differ in length");
+    let total = len.checked_mul(2).expect("transpose output size overflows");
+    output.clear();
+    output.reserve(total);
+    let dst = output.as_mut_ptr();
+    let src0 = lane0.as_ptr();
+    let src1 = lane1.as_ptr();
+    for index in 0..len {
+        // SAFETY: every lane holds `len` bytes, and element `index` ends at
+        // `(index + 1) * 2 <= total`, within the room `reserve` made.
+        unsafe {
             let out = dst.add(index * 2);
             out.write(src0.add(index).read());
             out.add(1).write(src1.add(index).read());
         }
-        output.set_len(len * 2);
+    }
+    // SAFETY: the loop initialized all `total` bytes.
+    unsafe {
+        output.set_len(total);
     }
 }
 
@@ -190,23 +197,32 @@ fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
 #[inline(always)]
 fn write_4(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
-    debug_assert_eq!(lane1.len(), len);
-    debug_assert_eq!(lane2.len(), len);
-    debug_assert_eq!(lane3.len(), len);
-    unsafe {
-        let dst = output.as_mut_ptr();
-        let src0 = lane0.as_ptr();
-        let src1 = lane1.as_ptr();
-        let src2 = lane2.as_ptr();
-        let src3 = lane3.as_ptr();
-        for index in 0..len {
+    assert!(
+        lane1.len() == len && lane2.len() == len && lane3.len() == len,
+        "transpose lanes differ in length"
+    );
+    let total = len.checked_mul(4).expect("transpose output size overflows");
+    output.clear();
+    output.reserve(total);
+    let dst = output.as_mut_ptr();
+    let src0 = lane0.as_ptr();
+    let src1 = lane1.as_ptr();
+    let src2 = lane2.as_ptr();
+    let src3 = lane3.as_ptr();
+    for index in 0..len {
+        // SAFETY: every lane holds `len` bytes, and element `index` ends at
+        // `(index + 1) * 4 <= total`, within the room `reserve` made.
+        unsafe {
             let out = dst.add(index * 4);
             out.write(src0.add(index).read());
             out.add(1).write(src1.add(index).read());
             out.add(2).write(src2.add(index).read());
             out.add(3).write(src3.add(index).read());
         }
-        output.set_len(len * 4);
+    }
+    // SAFETY: the loop initialized all `total` bytes.
+    unsafe {
+        output.set_len(total);
     }
 }
 
@@ -229,24 +245,32 @@ fn write_8(
     output: &mut Vec<u8>,
 ) {
     let len = lane0.len();
-    debug_assert_eq!(lane1.len(), len);
-    debug_assert_eq!(lane2.len(), len);
-    debug_assert_eq!(lane3.len(), len);
-    debug_assert_eq!(lane4.len(), len);
-    debug_assert_eq!(lane5.len(), len);
-    debug_assert_eq!(lane6.len(), len);
-    debug_assert_eq!(lane7.len(), len);
-    unsafe {
-        let dst = output.as_mut_ptr();
-        let src0 = lane0.as_ptr();
-        let src1 = lane1.as_ptr();
-        let src2 = lane2.as_ptr();
-        let src3 = lane3.as_ptr();
-        let src4 = lane4.as_ptr();
-        let src5 = lane5.as_ptr();
-        let src6 = lane6.as_ptr();
-        let src7 = lane7.as_ptr();
-        for index in 0..len {
+    assert!(
+        lane1.len() == len
+            && lane2.len() == len
+            && lane3.len() == len
+            && lane4.len() == len
+            && lane5.len() == len
+            && lane6.len() == len
+            && lane7.len() == len,
+        "transpose lanes differ in length"
+    );
+    let total = len.checked_mul(8).expect("transpose output size overflows");
+    output.clear();
+    output.reserve(total);
+    let dst = output.as_mut_ptr();
+    let src0 = lane0.as_ptr();
+    let src1 = lane1.as_ptr();
+    let src2 = lane2.as_ptr();
+    let src3 = lane3.as_ptr();
+    let src4 = lane4.as_ptr();
+    let src5 = lane5.as_ptr();
+    let src6 = lane6.as_ptr();
+    let src7 = lane7.as_ptr();
+    for index in 0..len {
+        // SAFETY: every lane holds `len` bytes, and element `index` ends at
+        // `(index + 1) * 8 <= total`, within the room `reserve` made.
+        unsafe {
             let out = dst.add(index * 8);
             out.write(src0.add(index).read());
             out.add(1).write(src1.add(index).read());
@@ -257,6 +281,9 @@ fn write_8(
             out.add(6).write(src6.add(index).read());
             out.add(7).write(src7.add(index).read());
         }
-        output.set_len(len * 8);
+    }
+    // SAFETY: the loop initialized all `total` bytes.
+    unsafe {
+        output.set_len(total);
     }
 }

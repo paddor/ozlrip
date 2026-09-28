@@ -83,6 +83,11 @@ fn decode_u32_node_fast(
     bits: &[u8],
     output_len: usize,
 ) -> Result<OwnedStream> {
+    // The writes below fill 4 bytes per bucket into spare capacity.
+    if buckets.len().checked_mul(4) != Some(output_len) {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("partition output size does not match its buckets"));
+    }
     let mut reader = ForwardBitReader::new(offset_bits);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
@@ -114,7 +119,9 @@ fn decode_u32_node_fast(
             Error::new(ErrorKind::Malformed)
                 .with_detail("partition value exceeds output element width")
         })?;
-        debug_assert!(out_pos + 4 <= output.capacity());
+        // SAFETY: `out_pos` is 4 times the bucket index, so it ends at most
+        // at `output_len = 4 * buckets.len()`, within capacity, and the
+        // length stays 0 until the loop ends.
         unsafe {
             write_u32_le_spare(&mut output, out_pos, value);
         }
@@ -122,8 +129,8 @@ fn decode_u32_node_fast(
     }
 
     debug_assert_eq!(out_pos, output_len);
+    // SAFETY: the loop wrote every 4-byte value in `0..output_len`.
     unsafe {
-        // SAFETY: the loop wrote every 4-byte value in `0..output_len`.
         output.set_len(output_len);
     }
     Ok(OwnedStream {
@@ -134,10 +141,17 @@ fn decode_u32_node_fast(
     })
 }
 
+/// Writes `value` little-endian at `offset` in `output`'s spare capacity.
+///
+/// # Safety
+///
+/// `offset + 4` must be at most `output.capacity()`, and `offset` at least
+/// `output.len()`.
 #[cfg(not(feature = "paranoid"))]
 unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
     debug_assert!(offset + 4 <= output.capacity());
     debug_assert!(output.len() <= offset);
+    // SAFETY: the caller guarantees the 4 bytes lie in spare capacity.
     unsafe {
         core::ptr::write_unaligned(
             output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),

@@ -54,46 +54,48 @@ fn decode_dispatch_n_by_tag_to_output_fast(
 ) -> Result<()> {
     let mut source_positions = vec![0usize; segment_inputs.len()];
     let start_len = output.len();
-    debug_assert!(output.capacity() >= start_len + total_output);
+    // The copies below write into spare capacity for `total_output` bytes.
+    output.reserve(total_output);
     let mut written = 0usize;
-
-    unsafe {
-        let dst_start = output.as_mut_ptr().add(start_len);
-        for segment in 0..segment_count {
-            let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;
-            let size = read_usize_numeric_element(
-                segment_sizes.bytes,
-                segment_sizes.element_width,
-                segment,
-            )?;
-            let input = segment_inputs.get(tag).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
-            })?;
-            let position = source_positions.get_mut(tag).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
-            })?;
-            let end = position
-                .checked_add(size)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            let segment_bytes = input.bytes.get(*position..end).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed)
-                    .with_detail("dispatchN_byTag source stream is truncated")
-            })?;
-            let next_written = written
-                .checked_add(size)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            if next_written > total_output {
-                return Err(Error::new(ErrorKind::Malformed)
-                    .with_detail("dispatchN_byTag output size mismatch"));
-            }
+    for segment in 0..segment_count {
+        let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;
+        let size =
+            read_usize_numeric_element(segment_sizes.bytes, segment_sizes.element_width, segment)?;
+        let input = segment_inputs.get(tag).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
+        })?;
+        let position = source_positions.get_mut(tag).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed).with_detail("dispatchN_byTag tag is out of range")
+        })?;
+        let end = position
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        let segment_bytes = input.bytes.get(*position..end).ok_or_else(|| {
+            Error::new(ErrorKind::Malformed)
+                .with_detail("dispatchN_byTag source stream is truncated")
+        })?;
+        let next_written = written
+            .checked_add(size)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if next_written > total_output {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dispatchN_byTag output size mismatch"));
+        }
+        // SAFETY: `written + size <= total_output`, and `reserve` left room
+        // for `total_output` bytes after `start_len`. The source is another
+        // buffer.
+        unsafe {
             core::ptr::copy_nonoverlapping(
                 segment_bytes.as_ptr(),
-                dst_start.add(written),
+                output.as_mut_ptr().add(start_len + written),
                 segment_bytes.len(),
             );
-            written = next_written;
-            *position = end;
         }
+        written = next_written;
+        *position = end;
+    }
+    // SAFETY: the copies initialized the `written` bytes after `start_len`.
+    unsafe {
         output.set_len(start_len + written);
     }
     Ok(())

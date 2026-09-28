@@ -58,11 +58,11 @@ fn decode_u16_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
     if !input.len().is_multiple_of(2) {
         return false;
     }
-    debug_assert!(output.len() + input.len() <= output.capacity());
+    output.reserve(input.len());
     let start = output.len();
+    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
+    // the input is whole 2-byte chunks, so every write stays in that room.
     unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 2-byte chunks.
         let dst = output.as_mut_ptr().add(start);
         for (index, encoded) in input.as_chunks::<2>().0.iter().enumerate() {
             let value = u16::from_le_bytes(*encoded);
@@ -81,11 +81,11 @@ fn decode_u32_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
     if !input.len().is_multiple_of(4) {
         return false;
     }
-    debug_assert!(output.len() + input.len() <= output.capacity());
+    output.reserve(input.len());
     let start = output.len();
+    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
+    // the input is whole 4-byte chunks, so every write stays in that room.
     unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 4-byte chunks.
         let dst = output.as_mut_ptr().add(start);
         for (index, encoded) in input.as_chunks::<4>().0.iter().enumerate() {
             let value = u32::from_le_bytes(*encoded);
@@ -104,11 +104,11 @@ fn decode_u64_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
     if !input.len().is_multiple_of(8) {
         return false;
     }
-    debug_assert!(output.len() + input.len() <= output.capacity());
+    output.reserve(input.len());
     let start = output.len();
+    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
+    // the input is whole 8-byte chunks, so every write stays in that room.
     unsafe {
-        // SAFETY: the caller reserved `input.len()` bytes in `output` and the
-        // width validation above ensures exact 8-byte chunks.
         let dst = output.as_mut_ptr().add(start);
         for (index, encoded) in input.as_chunks::<8>().0.iter().enumerate() {
             let value = u64::from_le_bytes(*encoded);
