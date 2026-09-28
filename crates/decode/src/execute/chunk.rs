@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 use crate::parse::ChunkPlan;
 use crate::standard;
 
+use super::codecs::decode_zstd_chunk_to_output;
 use super::direct_append::{
     DirectAppendChunk, DirectAppendKind, append_split_by_struct_to_final_splitn,
     direct_append_tail, validate_direct_append_tail, validate_string_to_serial_tail,
@@ -29,7 +30,6 @@ use super::slots::{
     move_stream_to_single_output, recycle_consumed_owned_streams, recycle_stream_slots,
     single_execution_input,
 };
-use super::zstd::decode_zstd_chunk_to_output;
 
 pub(super) fn decode_transform_chunk_with_plan<'a>(
     input: &'a [u8],

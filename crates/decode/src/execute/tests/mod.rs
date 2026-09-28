@@ -1,3 +1,5 @@
+#[cfg(feature = "lz4")]
+use super::codecs::decode_lz4_chunk;
 use super::decode_plan;
 use super::dispatch::decode_dispatch_string_node_to_serial_output;
 use super::dispatch::{decode_dispatch_n_by_tag_node, decode_dispatch_string_node};
@@ -11,8 +13,6 @@ use super::lz::{
     decode_fastlz_deprecated_node, decode_field_lz_node, decode_lz_node, decode_lz_node_to_output,
     decode_rolz_deprecated_node,
 };
-#[cfg(feature = "lz4")]
-use super::lz4::*;
 use super::node::execute_standard_node;
 use super::numeric::{
     QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitunpack_node, decode_constant_fixed_chunk,

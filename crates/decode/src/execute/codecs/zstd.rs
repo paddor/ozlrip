@@ -10,12 +10,12 @@ use crate::parse::FramePlan;
 use crate::{parse::SingleZstdFrame, standard};
 
 #[cfg(feature = "zstd")]
-use super::header::require_empty_header;
+use crate::execute::header::require_empty_header;
 #[cfg(feature = "zstd")]
-use super::output::{OutputBudget, size_mismatch, verify_decoded_checksum};
+use crate::execute::output::{OutputBudget, size_mismatch, verify_decoded_checksum};
 #[cfg(feature = "zstd")]
-use super::{elements::read_var_u64, runtime::DecodeScratch};
-use super::{runtime::StandardNodeContext, streams::OwnedStream};
+use crate::execute::{elements::read_var_u64, runtime::DecodeScratch};
+use crate::execute::{runtime::StandardNodeContext, streams::OwnedStream};
 
 /// The zstd context in `slot`, created on first use.
 #[cfg(feature = "zstd")]
@@ -71,7 +71,7 @@ pub(crate) fn decode_single_zstd_frame_with_context(
 }
 
 #[cfg(feature = "zstd")]
-pub(super) fn try_decode_single_zstd_into_dst(
+pub(in crate::execute) fn try_decode_single_zstd_into_dst(
     input: &[u8],
     plan: &FramePlan,
     dst: &mut Vec<u8>,
@@ -137,7 +137,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
     clippy::unnecessary_wraps,
     reason = "the zstd-disabled shim keeps the same fallible signature as the zstd implementation"
 )]
-pub(super) fn try_decode_single_zstd_into_dst(
+pub(in crate::execute) fn try_decode_single_zstd_into_dst(
     _input: &[u8],
     _plan: &FramePlan,
     _dst: &mut Vec<u8>,
@@ -150,7 +150,7 @@ pub(super) fn try_decode_single_zstd_into_dst(
 #[cfg(feature = "zstd")]
 /// Decodes a zstd node. The deprecated `zstd_fixed` node outputs records of
 /// the width its input states; `zstd` outputs bytes.
-pub(super) fn decode_zstd_chunk(
+pub(in crate::execute) fn decode_zstd_chunk(
     stored: &[u8],
     header: &[u8],
     dict_index: Option<u32>,
@@ -194,7 +194,7 @@ pub(super) fn decode_zstd_chunk(
 }
 
 #[cfg(feature = "zstd")]
-pub(super) fn decode_zstd_chunk_to_output(
+pub(in crate::execute) fn decode_zstd_chunk_to_output(
     stored: &[u8],
     header: &[u8],
     dict_index: Option<u32>,
@@ -342,7 +342,7 @@ fn map_zstd_error(err: &zrip_core::DecompressError) -> Error {
 }
 
 #[cfg(not(feature = "zstd"))]
-pub(super) fn decode_zstd_chunk(
+pub(in crate::execute) fn decode_zstd_chunk(
     _stored: &[u8],
     _header: &[u8],
     _dict_index: Option<u32>,
@@ -353,7 +353,7 @@ pub(super) fn decode_zstd_chunk(
 }
 
 #[cfg(not(feature = "zstd"))]
-pub(super) fn decode_zstd_chunk_to_output(
+pub(in crate::execute) fn decode_zstd_chunk_to_output(
     _stored: &[u8],
     _header: &[u8],
     _dict_index: Option<u32>,

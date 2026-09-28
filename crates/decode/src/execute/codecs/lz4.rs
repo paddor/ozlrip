@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 #[cfg(feature = "lz4")]
-use super::elements::read_var_u64;
+use crate::execute::elements::read_var_u64;
 #[cfg(feature = "lz4")]
-use super::output::check_output_len;
+use crate::execute::output::check_output_len;
 
 /// Most bytes one LZ4 block byte can decode to. A match sequence spends a
 /// token and a 2-byte offset on at most 19 bytes, and each length extension
@@ -16,7 +16,11 @@ use super::output::check_output_len;
 pub(super) const LZ4_MAX_EXPANSION: usize = 255;
 
 #[cfg(feature = "lz4")]
-pub(super) fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
+pub(in crate::execute) fn decode_lz4_chunk(
+    stored: &[u8],
+    header: &[u8],
+    limits: Limits,
+) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
     check_output_len(decoded_size, limits)?;
     if decoded_size > stored.len().saturating_mul(LZ4_MAX_EXPANSION) {
@@ -34,7 +38,11 @@ pub(super) fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> 
 }
 
 #[cfg(not(feature = "lz4"))]
-pub(super) fn decode_lz4_chunk(_stored: &[u8], _header: &[u8], _limits: Limits) -> Result<Vec<u8>> {
+pub(in crate::execute) fn decode_lz4_chunk(
+    _stored: &[u8],
+    _header: &[u8],
+    _limits: Limits,
+) -> Result<Vec<u8>> {
     Err(Error::new(ErrorKind::Unsupported).with_detail("lz4 support is disabled"))
 }
 

@@ -5,6 +5,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 use smallvec::{SmallVec, smallvec};
 
+use super::codecs::{decode_lz4_chunk, decode_zstd_chunk};
 use super::layout::{
     decode_bitsplit_node, decode_concat_node, decode_flatpack_node, decode_float_deconstruct_node,
     decode_merge_sorted_node, decode_mux_lengths_node, decode_sentinel_node,
@@ -12,7 +13,6 @@ use super::layout::{
     decode_tokenize_fixed_node, decode_transpose_node, decode_transpose_split_node,
     is_transpose_split,
 };
-use super::lz4::decode_lz4_chunk;
 use super::streams::{OwnedStream, StreamInput};
 use super::strings::{
     decode_concat_string_node, decode_interleave_string_node, decode_prefix_node,
@@ -37,7 +37,6 @@ use super::{
         decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
     },
     runtime::StandardNodeContext,
-    zstd::decode_zstd_chunk,
 };
 
 #[expect(

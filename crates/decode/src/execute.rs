@@ -8,6 +8,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use crate::info::FrameValueType;
 
 mod chunk;
+mod codecs;
 mod direct_append;
 mod dispatch;
 mod elements;
@@ -15,7 +16,6 @@ mod entropy;
 mod header;
 mod layout;
 mod lz;
-mod lz4;
 mod node;
 mod numeric;
 mod output;
@@ -25,17 +25,16 @@ mod runtime;
 mod slots;
 mod streams;
 mod strings;
-mod zstd;
 
 use chunk::{decode_transform_chunk_appending, decode_transform_chunk_with_plan};
+use codecs::try_decode_single_zstd_into_dst;
+#[cfg(feature = "zstd")]
+pub(crate) use codecs::{decode_single_zstd_frame_with_context, zstd_context};
 use direct_append::{DirectAppendChunk, direct_append_tail};
 use output::{DecodedChunk, OutputBudget, verify_decoded_checksum};
 pub(crate) use outputs::{DecodedOutput, decode_outputs_with_context};
 use plan::build_chunk_execution_plan;
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
-use zstd::try_decode_single_zstd_into_dst;
-#[cfg(feature = "zstd")]
-pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
 
 #[cfg(test)]
 pub(crate) fn decode_plan(
