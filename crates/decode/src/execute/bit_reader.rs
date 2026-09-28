@@ -51,6 +51,12 @@ impl<'a> ForwardBitReader<'a> {
     }
 
     /// Reads up to 56 bits.
+    #[expect(
+        clippy::inline_always,
+        reason = "profiled: when LLVM outlines this from read_u64, quantize and \
+                  partition decoding lose 3-4% (lorem-serial-sample, era5)"
+    )]
+    #[inline(always)]
     fn take(&mut self, bits: u32) -> Result<u64> {
         debug_assert!(bits <= 56);
         if self.available < bits {
@@ -72,6 +78,12 @@ impl<'a> ForwardBitReader<'a> {
         clippy::cast_possible_truncation,
         reason = "take masks the value to at most 32 bits"
     )]
+    #[expect(
+        clippy::inline_always,
+        reason = "profiled: quantize reads one value per element; outlined, era5 \
+                  decodes 3% slower"
+    )]
+    #[inline(always)]
     pub(super) fn read_u32(&mut self, bits: u8) -> Result<u32> {
         debug_assert!(bits <= 32);
         Ok(self.take(u32::from(bits))? as u32)
