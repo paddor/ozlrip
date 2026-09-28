@@ -30,14 +30,7 @@ pub(super) unsafe fn append_wide_header_pattern(
     sources: &mut [DispatchStringSource<'_>],
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let mut positions = sources
-        .iter()
-        .map(|source| source.position)
-        .collect::<Vec<_>>();
-    let mut byte_positions = sources
-        .iter()
-        .map(|source| source.byte_position)
-        .collect::<Vec<_>>();
+    let (mut positions, mut byte_positions) = source_positions(sources);
     let mut out_pos = output.len();
     check_output_capacity(sources, output)?;
     let output_ptr = output.as_mut_ptr();
@@ -105,6 +98,10 @@ pub(super) unsafe fn append_wide_header_pattern(
 /// `sources[..4]` must be whole with `rows` strings each, and `sources[4]`
 /// whole with `rows * 4` one-byte strings.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the CSV row loop is most of this function; a row helper split out of it measured much slower"
+)]
 pub(super) unsafe fn append_2byte_csv_pattern_rows(
     rows: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -225,6 +222,10 @@ pub(super) unsafe fn append_2byte_csv_fixed_prefix_comma_pattern_rows(
 ///
 /// As for `append_2byte_csv_fixed_prefix_pattern_rows`, or the comma variant when `COMMA_NEWLINE` is set.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the CSV row loop is most of this function; a row helper split out of it measured much slower"
+)]
 unsafe fn append_2byte_csv_fixed_prefix_pattern_rows_impl<const COMMA_NEWLINE: bool>(
     rows: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -339,6 +340,10 @@ unsafe fn append_2byte_csv_fixed_prefix_pattern_rows_impl<const COMMA_NEWLINE: b
 /// `sources[..4]` must be whole with `rows` strings each, and `sources[4]`
 /// whole with `rows * 4 + 1` one-byte strings.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the CSV row loop is most of this function; a row helper split out of it measured much slower"
+)]
 pub(super) unsafe fn append_2byte_csv_header_pattern_rows(
     rows: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -471,6 +476,10 @@ pub(super) unsafe fn append_2byte_csv_fixed_prefix_comma_header_pattern_rows(
 ///
 /// As for `append_2byte_csv_fixed_prefix_header_pattern_rows`, or the comma variant when `COMMA_NEWLINE` is set.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the CSV row loop is most of this function; a row helper split out of it measured much slower"
+)]
 unsafe fn append_2byte_csv_fixed_prefix_header_pattern_rows_impl<const COMMA_NEWLINE: bool>(
     rows: usize,
     sources: &mut [DispatchStringSource<'_>],
@@ -783,6 +792,19 @@ fn check_output_capacity(sources: &[DispatchStringSource<'_>], output: &Vec<u8>)
         );
     }
     Ok(())
+}
+
+/// The string and byte positions of every source.
+#[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "runs once before a hot row loop; keeps the writer's code unchanged"
+)]
+#[inline(always)]
+fn source_positions(sources: &[DispatchStringSource<'_>]) -> (Vec<usize>, Vec<usize>) {
+    let positions = sources.iter().map(|source| source.position).collect();
+    let byte_positions = sources.iter().map(|source| source.byte_position).collect();
+    (positions, byte_positions)
 }
 
 /// The string and byte positions of the five pattern sources.

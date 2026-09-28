@@ -42,6 +42,10 @@ use super::{
     zstd::decode_zstd_chunk,
 };
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat match over every standard node ID; family dispatchers measured 2-5% slower on era5, parquet-canonical and lorem"
+)]
 pub(super) fn execute_standard_node(
     standard_id: u32,
     inputs: &[StreamInput<'_>],

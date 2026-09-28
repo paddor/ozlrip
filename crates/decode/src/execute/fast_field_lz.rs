@@ -11,6 +11,10 @@ use ozlrip_core::{Error, ErrorKind, Result};
     clippy::too_many_arguments,
     reason = "the field-LZ streams stay split, as the node hands them over"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the unchecked field-LZ token loop is most of this function and stays whole"
+)]
 pub(super) fn decode_to_output(
     literals: &[u8],
     tokens: &[u8],
