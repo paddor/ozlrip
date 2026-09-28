@@ -14,7 +14,7 @@ use super::header::require_empty_header;
 #[cfg(feature = "zstd")]
 use super::output::{OutputBudget, size_mismatch, verify_decoded_checksum};
 #[cfg(feature = "zstd")]
-use super::{numeric::read_var_u64, runtime::DecodeScratch};
+use super::{elements::read_var_u64, runtime::DecodeScratch};
 use super::{runtime::StandardNodeContext, streams::OwnedStream};
 
 /// The zstd context in `slot`, created on first use.

@@ -2,14 +2,14 @@ use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::elements::{max_numeric_value, push_numeric_element, read_element};
 use super::header::require_empty_header;
-use super::numeric::{max_numeric_value, push_numeric_element, read_element};
 use super::output::{alloc_output, check_output_len};
 
 use super::{
     conversion::{read_conversion_int_size, validate_conversion_numeric_width},
+    elements::{numeric_element_count, read_var_u64, validate_numeric_stream_width},
     fast_bitpack, fast_delta, fast_zigzag,
-    numeric::{numeric_element_count, read_var_u64, validate_numeric_stream_width},
     runtime::DecodeScratch,
     streams::{OwnedStream, StreamInput},
 };

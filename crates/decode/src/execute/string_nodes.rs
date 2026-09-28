@@ -2,13 +2,13 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::fast_lengths;
-use super::header::require_empty_header;
-use super::layout_nodes::{concat_output_count, read_concat_size};
-use super::numeric::{
+use super::elements::{
     checked_sum_u32, numeric_element_count, read_usize_numeric_element,
     validate_numeric_stream_width,
 };
+use super::fast_lengths;
+use super::header::require_empty_header;
+use super::layout_nodes::{concat_output_count, read_concat_size};
 use super::output::{alloc_output, check_output_len};
 use super::streams::{OwnedStream, StreamInput};
 

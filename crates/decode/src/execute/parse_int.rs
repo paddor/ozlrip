@@ -5,7 +5,7 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use super::header::require_empty_header;
 use super::output::check_output_len;
 use super::{
-    numeric::numeric_element_count,
+    elements::numeric_element_count,
     streams::{OwnedStream, StreamInput},
 };
 

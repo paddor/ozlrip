@@ -14,11 +14,11 @@ use super::dispatch_source::{
 #[cfg(not(feature = "paranoid"))]
 use super::fast_csv;
 use super::{
-    fast_dispatch,
-    numeric::{
+    elements::{
         checked_sum_u32, numeric_element_count, read_usize_numeric_element, require_numeric_width,
         validate_numeric_stream_width,
     },
+    fast_dispatch,
     streams::{OwnedStream, StreamInput},
 };
 

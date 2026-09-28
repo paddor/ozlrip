@@ -16,16 +16,16 @@ use super::entropy::{
     LEGACY_ENTROPY_MAX_DEPTH, decode_fse_symbols, decode_legacy_huffman_block,
     read_legacy_compressed_entropy_header, read_legacy_entropy_header, unpack_legacy_bits,
 };
-#[cfg(not(feature = "paranoid"))]
-use super::{fast_field_lz, fast_lz};
 use super::{
-    numeric::{
+    elements::{
         numeric_element_count, read_usize_numeric_element, read_var_u64, require_numeric_width,
         validate_numeric_stream_width,
     },
     runtime::DecodeScratch,
     streams::{OwnedStream, StreamInput},
 };
+#[cfg(not(feature = "paranoid"))]
+use super::{fast_field_lz, fast_lz};
 
 pub(super) fn decode_lz_node(
     inputs: &[StreamInput<'_>],

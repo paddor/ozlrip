@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 #[cfg(feature = "lz4")]
-use super::numeric::read_var_u64;
+use super::elements::read_var_u64;
 #[cfg(feature = "lz4")]
 use super::output::check_output_len;
 

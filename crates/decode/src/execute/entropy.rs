@@ -14,7 +14,7 @@ use zrip_core::{
 };
 
 use super::{
-    numeric::{numeric_element_count, read_var_u64, require_numeric_width},
+    elements::{numeric_element_count, read_var_u64, require_numeric_width},
     streams::{OwnedStream, StreamInput},
 };
 

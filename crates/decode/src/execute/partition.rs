@@ -2,14 +2,14 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::elements::push_numeric_element;
 use super::header::require_empty_header;
-use super::numeric::push_numeric_element;
 use super::output::check_output_len;
 
 use super::{
     bit_reader::ForwardBitReader,
+    elements::{max_numeric_value, read_var_u64, require_numeric_width},
     fast_partition,
-    numeric::{max_numeric_value, read_var_u64, require_numeric_width},
     streams::{OwnedStream, StreamInput},
 };
 

@@ -7,8 +7,8 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::standard;
 
+use super::elements::{checked_sum_u32, read_var_u64};
 use super::header::require_empty_header;
-use super::numeric::{checked_sum_u32, read_var_u64};
 use super::output::check_output_len;
 use super::streams::StreamInput;
 

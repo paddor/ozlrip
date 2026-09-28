@@ -4,8 +4,8 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::output::alloc_output;
 use super::{
-    numeric::push_numeric_element,
-    numeric::{numeric_element_count, read_usize_numeric_element},
+    elements::push_numeric_element,
+    elements::{numeric_element_count, read_usize_numeric_element},
     streams::{OwnedStream, StreamInput},
 };
 

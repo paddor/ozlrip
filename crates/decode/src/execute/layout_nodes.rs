@@ -3,11 +3,11 @@ use alloc::{vec, vec::Vec};
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::header::require_empty_header;
-use super::numeric::{
+use super::elements::{
     max_numeric_value, numeric_element_count, read_numeric_element, read_u32_element,
     read_usize_numeric_element, read_var_u64, validate_numeric_stream_width, write_numeric_element,
 };
+use super::header::require_empty_header;
 use super::output::{alloc_output, check_output_len, zeroed_output};
 use super::runtime::DecodeScratch;
 use super::split_struct::split_by_struct_output_len;

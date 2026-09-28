@@ -1,3 +1,6 @@
+//! Reading and writing the fixed-width little-endian elements of numeric
+//! streams, and varints in node headers.
+
 use alloc::{format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Result};
