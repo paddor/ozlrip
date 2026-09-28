@@ -307,6 +307,13 @@ fn decode_lz_sequences(
     output: &mut Vec<u8>,
     output_base: usize,
 ) -> Result<()> {
+    // Matches are copied into spare capacity up to `output_limit`.
+    #[cfg(not(feature = "paranoid"))]
+    if output.len() != output_base || output.capacity() < output_limit {
+        return Err(
+            Error::new(ErrorKind::InvalidGraph).with_detail("lz output spare capacity is invalid")
+        );
+    }
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
     for sequence in sequences {
@@ -349,6 +356,19 @@ fn decode_lz_sequences(
                 Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
             );
         }
+        #[cfg(not(feature = "paranoid"))]
+        if match_len <= match_offset {
+            // SAFETY: `output` holds `out_pos` bytes and has capacity
+            // `output_limit`, checked before the loop. The source starts
+            // `match_offset <= out_pos - output_base` bytes back and ends at or
+            // before `out_pos`, and `out_match_end <= output_limit`.
+            unsafe {
+                fast_lz::append_nonoverlapping_match(output, out_pos - match_offset, match_len);
+            }
+        } else {
+            append_lz_match(output, out_pos, match_offset, match_len);
+        }
+        #[cfg(feature = "paranoid")]
         append_lz_match(output, out_pos, match_offset, match_len);
         out_pos = out_match_end;
     }
@@ -375,14 +395,7 @@ fn append_lz_match(output: &mut Vec<u8>, out_pos: usize, match_offset: usize, ma
     debug_assert_eq!(output.len(), out_pos);
     let src_start = out_pos - match_offset;
     if match_len <= match_offset {
-        #[cfg(not(feature = "paranoid"))]
-        {
-            fast_lz::append_nonoverlapping_match(output, src_start, match_len);
-        }
-        #[cfg(feature = "paranoid")]
-        {
-            output.extend_from_within(src_start..src_start + match_len);
-        }
+        output.extend_from_within(src_start..src_start + match_len);
         return;
     }
 

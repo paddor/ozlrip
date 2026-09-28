@@ -1,10 +1,4 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-#![allow(
-    clippy::inline_always,
-    clippy::needless_range_loop,
-    clippy::too_many_arguments,
-    reason = "profiled LZ fast paths keep validated stream arguments split and indexed"
-)]
 
 #[cfg(not(feature = "paranoid"))]
 use alloc::vec::Vec;
@@ -13,6 +7,10 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Result};
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the LZ streams stay split, as the node hands them over"
+)]
 pub(super) fn decode_u8_u16_u16_to_output(
     literals: &[u8],
     offsets: &[u8],
@@ -43,6 +41,8 @@ pub(super) fn decode_u8_u16_u16_to_output(
         output_base,
     )?;
 
+    // SAFETY: both validations passed for these streams, and `output` has
+    // length `output_base` and capacity `output_limit`, checked above.
     unsafe {
         write_lz_unchecked(
             literals,
@@ -79,7 +79,13 @@ fn validate_lengths(
     Ok(())
 }
 
+/// Checks every literal and match range the sequences describe, so
+/// `write_lz_unchecked` can copy without checks.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "the sequence index addresses streams of different widths"
+)]
 fn validate_lz_ranges(
     literals: &[u8],
     offsets: &[u8],
@@ -145,12 +151,29 @@ fn validate_lz_ranges(
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled: called for every sequence in both LZ loops"
+)]
 #[inline(always)]
 fn read_u16_usize(bytes: &[u8], offset: usize) -> usize {
     usize::from(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
 }
 
+/// Writes the sequences to `output[output_base..output_limit]` and sets the
+/// length to `output_limit`.
+///
+/// # Safety
+///
+/// `validate_lengths` and `validate_lz_ranges` must have accepted these
+/// streams with these `output_base` and `output_limit`. `output.len()` must
+/// be `output_base` and `output.capacity()` at least `output_limit`.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    reason = "the LZ streams stay split and the sequence index addresses all of them"
+)]
 unsafe fn write_lz_unchecked(
     literals: &[u8],
     offsets: &[u8],
@@ -171,9 +194,6 @@ unsafe fn write_lz_unchecked(
     let mut pending_lit_start = 0usize;
     let mut pending_out_start = output_base;
     let mut pending_lit_len = 0usize;
-    unsafe {
-        output.set_len(output_limit);
-    }
 
     for sequence in 0..sequence_count {
         let length_offset = sequence * 2;
@@ -188,6 +208,10 @@ unsafe fn write_lz_unchecked(
             continue;
         }
 
+        // SAFETY: the validated literal ranges keep
+        // `pending_lit_start + pending_lit_len` within `literals` and
+        // `pending_out_start + pending_lit_len` at most `output_limit`, which
+        // is within capacity. `literals` is not `output`'s buffer.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 literal_ptr.add(pending_lit_start),
@@ -198,6 +222,9 @@ unsafe fn write_lz_unchecked(
         pending_lit_start = lit_pos;
         pending_lit_len = 0;
 
+        // SAFETY: the offset is in `1..=out_pos - output_base`, so the source
+        // starts in bytes written above, and `out_pos + match_len` is at most
+        // `output_limit`.
         unsafe {
             copy_lz_match(
                 output_ptr.add(out_pos - match_offset),
@@ -210,6 +237,8 @@ unsafe fn write_lz_unchecked(
     }
 
     let remaining_literals = literals.len() - lit_pos;
+    // SAFETY: validation checked that the remaining literals end the output
+    // exactly at `output_limit`.
     unsafe {
         core::ptr::copy_nonoverlapping(
             literal_ptr.add(pending_lit_start),
@@ -217,28 +246,54 @@ unsafe fn write_lz_unchecked(
             pending_lit_len + remaining_literals,
         );
     }
+    // SAFETY: every byte in `output_base..output_limit` was written above,
+    // and the capacity is at least `output_limit`.
+    unsafe {
+        output.set_len(output_limit);
+    }
 }
 
+/// Copies `len` bytes forward one at a time, so a match that overlaps its
+/// own output repeats the pattern.
+///
+/// # Safety
+///
+/// `src` must be valid for `len` reads and `dst` for `len` writes, with
+/// `src` before `dst` in the same buffer.
 #[cfg(not(feature = "paranoid"))]
 unsafe fn copy_lz_match(src: *const u8, dst: *mut u8, len: usize) {
     for index in 0..len {
+        // SAFETY: `index < len`; the caller guarantees both ranges.
         unsafe {
             *dst.add(index) = *src.add(index);
         }
     }
 }
 
+/// Appends `output[src_start..src_start + match_len]` to `output`.
+///
+/// # Safety
+///
+/// `src_start + match_len` must be at most `output.len()`, and the spare
+/// capacity must hold `match_len` bytes.
 #[cfg(not(feature = "paranoid"))]
-pub(super) fn append_nonoverlapping_match(
+#[expect(
+    clippy::inline_always,
+    reason = "profiled: called for every match in the LZ loop"
+)]
+#[inline(always)]
+pub(super) unsafe fn append_nonoverlapping_match(
     output: &mut Vec<u8>,
     src_start: usize,
     match_len: usize,
 ) {
     let out_pos = output.len();
-    debug_assert!(src_start <= out_pos);
     debug_assert!(src_start + match_len <= out_pos);
-    debug_assert!(output.capacity() >= out_pos + match_len);
+    debug_assert!(match_len <= output.capacity() - out_pos);
 
+    // SAFETY: the source lies in the initialized `..out_pos` and the
+    // destination starts at `out_pos`, so they do not overlap. The caller
+    // guarantees the spare capacity.
     unsafe {
         let ptr = output.as_mut_ptr();
         core::ptr::copy_nonoverlapping(ptr.add(src_start), ptr.add(out_pos), match_len);
@@ -304,7 +359,8 @@ mod tests {
         let mut output = b"abcdef".to_vec();
         output.reserve_exact(3);
 
-        append_nonoverlapping_match(&mut output, 2, 3);
+        // SAFETY: `2 + 3 <= 6` and `reserve_exact` made room for 3 bytes.
+        unsafe { append_nonoverlapping_match(&mut output, 2, 3) };
 
         assert_eq!(output, b"abcdefcde");
     }
