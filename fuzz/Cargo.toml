@@ -202,3 +202,10 @@ path = "fuzz_targets/decode_reuse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_csv_dispatch"
+path = "fuzz_targets/decode_csv_dispatch.rs"
+test = false
+doc = false
+bench = false

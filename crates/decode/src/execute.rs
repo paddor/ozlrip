@@ -87,6 +87,8 @@ use zstd::{decode_zstd_chunk, decode_zstd_chunk_to_output, try_decode_single_zst
 #[cfg(test)]
 mod convert_be_corpus;
 #[cfg(test)]
+mod dispatch_csv_tests;
+#[cfg(test)]
 mod parse_int_corpus;
 #[cfg(test)]
 mod sparse_num_corpus;

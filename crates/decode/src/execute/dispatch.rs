@@ -174,6 +174,30 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
     limits: Limits,
     output: &mut Vec<u8>,
 ) -> Result<()> {
+    decode_dispatch_string_to_serial(
+        inputs,
+        variable_inputs,
+        header,
+        format_version,
+        limits,
+        output,
+        true,
+    )
+}
+
+/// `allow_fast: false` decodes CSV shapes through the generic loop, so tests
+/// can compare it with the fast paths.
+pub(super) fn decode_dispatch_string_to_serial(
+    inputs: &[StreamInput<'_>],
+    variable_inputs: u32,
+    header: &[u8],
+    format_version: u32,
+    limits: Limits,
+    output: &mut Vec<u8>,
+    allow_fast: bool,
+) -> Result<()> {
+    #[cfg(feature = "paranoid")]
+    let _ = allow_fast;
     if !header.is_empty() {
         return Err(Error::new(ErrorKind::Unsupported)
             .with_detail("dispatch_string headers are unsupported"));
@@ -249,7 +273,8 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
         }
         2 => {
             #[cfg(not(feature = "paranoid"))]
-            if sources.len() > 6
+            if allow_fast
+                && sources.len() > 6
                 && append_dispatched_string_2byte_csv_wide_header_pattern_fast(
                     indices.bytes,
                     &mut sources,
@@ -260,21 +285,25 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
             }
             if sources.len() == 5 {
                 #[cfg(not(feature = "paranoid"))]
-                if append_dispatched_string_2byte_csv_pattern_fast(
-                    indices.bytes,
-                    &mut sources,
-                    output,
-                )? {
+                if allow_fast
+                    && append_dispatched_string_2byte_csv_pattern_fast(
+                        indices.bytes,
+                        &mut sources,
+                        output,
+                    )?
+                {
                     return Ok(());
                 }
                 append_dispatched_string_2byte_csv_pattern(indices.bytes, &mut sources, output)?;
             } else if sources.len() == 6 {
                 #[cfg(not(feature = "paranoid"))]
-                if append_dispatched_string_2byte_csv_header_pattern_fast(
-                    indices.bytes,
-                    &mut sources,
-                    output,
-                )? {
+                if allow_fast
+                    && append_dispatched_string_2byte_csv_header_pattern_fast(
+                        indices.bytes,
+                        &mut sources,
+                        output,
+                    )?
+                {
                     return Ok(());
                 }
                 for source in indices.bytes.as_chunks::<2>().0 {
