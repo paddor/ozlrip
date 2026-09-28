@@ -2,6 +2,8 @@ use alloc::{format, vec::Vec};
 
 use crate::{dict::DictionaryStore, standard};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use super::output::check_output_len;
 use smallvec::{SmallVec, smallvec};
 
 use super::layout_nodes::{
@@ -65,11 +67,7 @@ pub(super) fn try_execute_single_input_splitn_node(
             Error::new(ErrorKind::Malformed).with_detail("splitn input has partial element")
         );
     }
-    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(input.bytes.len(), limits)?;
     let output_width = if node.standard_id == standard::SPLITN_ID {
         1
     } else {
@@ -184,11 +182,7 @@ pub(super) fn byte_preserving_conversion_output_width(
         return Err(Error::new(ErrorKind::InvalidGraph)
             .with_detail("single-input transform received the wrong input count"));
     }
-    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(input.bytes.len(), limits)?;
     Ok(Some(output_width))
 }
 

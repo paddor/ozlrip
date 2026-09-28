@@ -1,6 +1,8 @@
 use alloc::{format, vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use super::output::{alloc_output, check_output_len};
 use zrip_core::{
     bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
     fse::{
@@ -46,16 +48,7 @@ pub(super) fn decode_fse_ncount_node(
         .len()
         .checked_mul(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("fse_ncount allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "fse_ncount allocation failed")?;
     for count in distribution {
         output.extend_from_slice(&count.to_le_bytes());
     }
@@ -342,11 +335,7 @@ fn checked_legacy_entropy_output_len(
     let output_len = decoded_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     Ok(output_len)
 }
 
@@ -721,11 +710,7 @@ pub(super) fn decode_fse_v2_node(
     }
 
     let parsed = parse_fse_v2_header(header)?;
-    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(parsed.output_len, limits)?;
 
     let mut distribution = Vec::new();
     distribution
@@ -997,11 +982,7 @@ pub(super) fn decode_huffman_v2_node(
         );
     }
     let parsed = parse_huffman_v2_header(header)?;
-    if parsed.output_len > limits.max_decoded_bytes || parsed.output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(parsed.output_len, limits)?;
     let (table, table_log) = build_complete_huffman_decode_table(weights.bytes)?;
     let decoded = if parsed.x4 {
         decode::decode_4_streams(&table, table_log, bits.bytes, parsed.output_len)
@@ -1033,11 +1014,7 @@ pub(super) fn decode_huffman_struct_v2_node(
         .output_len
         .checked_mul(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_bytes > limits.max_decoded_bytes || output_bytes > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_bytes, limits)?;
 
     let (table, table_log) = build_large_huffman_decode_table(weights.bytes)?;
     let mut output = Vec::new();

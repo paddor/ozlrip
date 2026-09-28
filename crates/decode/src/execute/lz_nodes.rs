@@ -1,6 +1,8 @@
 use alloc::{boxed::Box, format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use super::output::check_output_len;
 use zrip_core::{
     bitstream::{reader::BitReader, reader_reverse::ReverseBitReader},
     fse::table_builder::{build_decode_table, parse_fse_table_description},
@@ -69,11 +71,7 @@ fn validate_lz_node(
     let output_len = usize::try_from(output_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("lz output size is too large")
     })?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     Ok((output_len, sequence_count))
 }
 
@@ -1885,11 +1883,7 @@ fn parse_deprecated_lz_stored_stream<'a>(
     .map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("deprecated lz output size is too large")
     })?;
-    if decoded_size > limits.max_decoded_bytes || decoded_size > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(decoded_size, limits)?;
     Ok((decoded_size, &source.bytes[4..]))
 }
 
@@ -2303,11 +2297,7 @@ fn field_lz_output_capacity(
     let output_capacity = output_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_capacity > limits.max_decoded_bytes || output_capacity > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_capacity, limits)?;
     Ok(output_capacity)
 }
 
@@ -2353,11 +2343,7 @@ pub(super) fn decode_field_lz_node_to_output(
     let output_capacity = output_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_capacity > limits.max_decoded_bytes || output_capacity > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_capacity, limits)?;
     let output_limit = output_base
         .checked_add(output_capacity)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;

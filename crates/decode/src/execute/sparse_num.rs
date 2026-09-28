@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::output::alloc_output;
 use super::{
     OwnedStream, StreamInput, numeric::push_numeric_element, numeric_element_count,
     read_usize_numeric_element,
@@ -54,16 +55,7 @@ pub(super) fn decode_node(
     let output_len = output_elements
         .checked_mul(values.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("sparse_num allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "sparse_num allocation failed")?;
     for index in 0..value_count {
         let distance = read_usize_numeric_element(distances.bytes, distances.element_width, index)?;
         append_run(&mut output, dominant, distance, values.element_width)?;

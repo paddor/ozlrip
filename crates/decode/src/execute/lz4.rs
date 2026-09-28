@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 #[cfg(feature = "lz4")]
+use super::output::check_output_len;
+#[cfg(feature = "lz4")]
 use crate::varint::read_var_u64;
 
 /// Most bytes one LZ4 block byte can decode to. A match sequence spends a
@@ -16,11 +18,7 @@ pub(super) const LZ4_MAX_EXPANSION: usize = 255;
 #[cfg(feature = "lz4")]
 pub(super) fn decode_lz4_chunk(stored: &[u8], header: &[u8], limits: Limits) -> Result<Vec<u8>> {
     let decoded_size = read_single_varint_header(header)?;
-    if decoded_size > limits.max_decoded_bytes || decoded_size > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(decoded_size, limits)?;
     if decoded_size > stored.len().saturating_mul(LZ4_MAX_EXPANSION) {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("lz4 decoded size exceeds the block's maximum expansion"));

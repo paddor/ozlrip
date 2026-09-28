@@ -3,6 +3,7 @@ use alloc::{format, vec::Vec};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::numeric::{max_numeric_value, push_numeric_element, read_element};
+use super::output::{alloc_output, check_output_len};
 
 use super::{
     DecodeScratch, OwnedStream, StreamInput, fast_bitpack, fast_delta, fast_zigzag,
@@ -50,11 +51,7 @@ fn decode_bitpack_chunk(
         .elements
         .checked_mul(parsed.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     let mut output = scratch.take_byte_buffer(output_len, "bitpack allocation failed")?;
     fast_bitpack::unpack_lsb_bits(
         stored,
@@ -162,11 +159,7 @@ fn decode_constant_typed_chunk(
     let output_len = output_elements
         .checked_mul(stored.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     let mut output = scratch.take_byte_buffer(output_len, "constant allocation failed")?;
     repeat_constant_element(stored.bytes, output_len, &mut output);
     Ok(OwnedStream::pooled(output, stored.element_width))
@@ -217,12 +210,7 @@ fn decode_big_endian_numeric_conversion(
     limits: Limits,
 ) -> Result<OwnedStream> {
     validate_conversion_numeric_width(element_width)?;
-    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
-    {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(stored.bytes.len(), limits)?;
     if !stored.bytes.len().is_multiple_of(element_width) {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("numeric stream has partial element")
@@ -258,16 +246,7 @@ pub(super) fn decode_zigzag_numeric_chunk(
             Error::new(ErrorKind::Malformed).with_detail("zigzag input has partial element")
         );
     }
-    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
-    {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("zigzag allocation failed")
-    })?;
+    let mut output = alloc_output(stored.bytes.len(), limits, "zigzag allocation failed")?;
     fast_zigzag::decode_numeric(stored.bytes, stored.element_width, &mut output);
     Ok(OwnedStream {
         bytes: output,
@@ -303,11 +282,7 @@ pub(super) fn decode_delta_node(
     let output_len = output_elements
         .checked_mul(stored.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     let mut output = scratch.take_byte_buffer(output_len, "delta allocation failed")?;
     if output_elements == 0 {
         return Ok(OwnedStream {
@@ -335,17 +310,7 @@ pub(super) fn decode_divide_by_node(
     validate_numeric_stream_width(stored.element_width, "divide_by input")?;
     numeric_element_count(stored.bytes, stored.element_width)?;
     let divisor = parse_divide_by_divisor(header, stored.element_width)?;
-    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
-    {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(stored.bytes.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("divide_by allocation failed")
-    })?;
+    let mut output = alloc_output(stored.bytes.len(), limits, "divide_by allocation failed")?;
     let max_value = max_numeric_value(stored.element_width)?;
     for element in stored.bytes.chunks_exact(stored.element_width) {
         let quotient = read_element(element);
@@ -383,12 +348,7 @@ pub(super) fn decode_dedup_num_node(
     }
     validate_numeric_stream_width(stored.element_width, "dedup_num input")?;
     numeric_element_count(stored.bytes, stored.element_width)?;
-    if stored.bytes.len() > limits.max_decoded_bytes || stored.bytes.len() > limits.max_buffer_bytes
-    {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(stored.bytes.len(), limits)?;
     let total_buffer_bytes = stored
         .bytes
         .len()
@@ -451,11 +411,7 @@ pub(super) fn decode_bitunpack_serial8_chunk(
     let output_len = bit_count.checked_add(7).ok_or_else(|| {
         Error::new(ErrorKind::IntegerOverflow).with_detail("bitunpack size overflowed")
     })? / 8;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     if bits < 8 {
         let limit = 1u16 << bits;
         if stored.iter().any(|&value| u16::from(value) >= limit) {
@@ -519,15 +475,7 @@ pub(super) fn decode_range_pack_serial8_chunk(
             );
         }
     };
-    if stored.len() > limits.max_decoded_bytes || stored.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(stored.len()).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("range_pack allocation failed")
-    })?;
+    let mut output = alloc_output(stored.len(), limits, "range_pack allocation failed")?;
     for &value in stored {
         let decoded = value.checked_add(min_value).ok_or_else(|| {
             Error::new(ErrorKind::Malformed).with_detail("range_pack value overflowed")

@@ -9,6 +9,7 @@ use super::numeric::{
     max_numeric_value, numeric_element_count, read_numeric_element, read_u32_element,
     read_usize_numeric_element, validate_numeric_stream_width, write_numeric_element,
 };
+use super::output::{alloc_output, check_output_len};
 use super::streams::{OwnedStream, StreamInput};
 use super::{fast_split_struct, fast_tokenize, fast_transpose};
 
@@ -53,11 +54,7 @@ pub(super) fn decode_concat_node(
         let output_bytes = output_elements
             .checked_mul(concatenated.element_width)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if output_bytes > limits.max_decoded_bytes || output_bytes > limits.max_buffer_bytes {
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
+        check_output_len(output_bytes, limits)?;
         let next_elements = consumed_elements
             .checked_add(output_elements)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -154,11 +151,7 @@ pub(super) fn decode_transpose_node(
             .with_detail("transpose input size is not a multiple of width"));
     }
     let output_len = source.bytes.len();
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
 
     let source_elements = source.bytes.len() / source_width;
     let output_width = if source_elements == 0 {
@@ -203,11 +196,7 @@ pub(super) fn decode_transpose_split_node(
     let output_len = lane_len.checked_mul(width).ok_or_else(|| {
         Error::new(ErrorKind::IntegerOverflow).with_detail("transpose size overflowed")
     })?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     for lane in inputs {
         if lane.bytes.len() != lane_len {
             return Err(Error::new(ErrorKind::Malformed)
@@ -293,16 +282,7 @@ pub(super) fn decode_float_deconstruct_node(
     let output_len = elements
         .checked_mul(output_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("float_deconstruct allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "float_deconstruct allocation failed")?;
     match element_type {
         FloatDeconstructType::Float32 => {
             decode_float32_deconstruct(sign_frac.bytes, exponent.bytes, &mut output);
@@ -425,11 +405,7 @@ pub(super) fn decode_merge_sorted_node(
     let output_len = output_elements
         .checked_mul(4)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
 
     let mut starts = Vec::new();
     starts.try_reserve_exact(sizes.len()).map_err(|_| {
@@ -531,15 +507,7 @@ pub(super) fn decode_sentinel_node(
     let output_len = value_count
         .checked_mul(exceptions.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("sentinel allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "sentinel allocation failed")?;
     output.resize(output_len, 0);
     let mut exception_index = 0usize;
     for value_index in 0..value_count {
@@ -595,15 +563,7 @@ pub(super) fn decode_flatpack_serial(
     }
     let bits = flatpack_bits(alphabet.len());
     let output_len = flatpack_output_len(bits, packed)?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("flatpack allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "flatpack allocation failed")?;
 
     let mask = (1usize << bits) - 1;
     let mut packed_index = 0usize;
@@ -723,16 +683,7 @@ pub(super) fn decode_splitn_typed_node(
             Error::new(ErrorKind::IntegerOverflow).with_detail("splitn size overflowed")
         })?;
     }
-    if total_len > limits.max_decoded_bytes || total_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(total_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
-    })?;
+    let mut output = alloc_output(total_len, limits, "splitn allocation failed")?;
     for input in inputs {
         output.extend_from_slice(input.bytes);
     }
@@ -780,15 +731,7 @@ pub(super) fn decode_split_by_struct_node(
             .with_detail("split_by_struct input count does not match node shape"));
     }
     let output_len = split_by_struct_output_len(inputs)?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("split_by_struct allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "split_by_struct allocation failed")?;
     append_split_by_struct_output(inputs, limits, &mut output)?;
     Ok(OwnedStream {
         bytes: output,
@@ -843,11 +786,7 @@ pub(super) fn append_split_by_struct_output(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let output_len = split_by_struct_output_len(inputs)?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     let required_capacity = output
         .len()
         .checked_add(output_len)
@@ -910,11 +849,7 @@ pub(super) fn decode_mux_lengths_node(
         .len()
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
 
     if element_width == 2 {
         return decode_mux_lengths_u16(
@@ -1160,15 +1095,7 @@ pub(super) fn decode_bitsplit_node(
     let output_len = element_count
         .checked_mul(output_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("bitsplit allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "bitsplit allocation failed")?;
     output.resize(output_len, 0);
 
     for element in 0..element_count {
@@ -1224,11 +1151,7 @@ pub(super) fn decode_tokenize_fixed_node(
     let output_len = output_elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
     if alphabet_size == 0 && output_elements != 0 {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail("tokenize_fixed alphabet is empty")

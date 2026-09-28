@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::output::{alloc_output, check_output_len};
+
 #[cfg(not(feature = "paranoid"))]
 use super::fast_csv;
 use super::{
@@ -80,15 +82,7 @@ pub(super) fn decode_dispatch_string_node(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("dispatch_string index count does not match string count"));
     }
-    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-    let mut output = Vec::new();
-    output.try_reserve_exact(total_bytes).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("dispatch output allocation failed")
-    })?;
+    let mut output = alloc_output(total_bytes, limits, "dispatch output allocation failed")?;
     let mut output_lengths = Vec::new();
     output_lengths.try_reserve_exact(index_count).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dispatch length allocation failed")
@@ -244,11 +238,7 @@ pub(super) fn decode_dispatch_string_node_to_serial_output(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("dispatch_string index count does not match string count"));
     }
-    if total_bytes > limits.max_decoded_bytes || total_bytes > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(total_bytes, limits)?;
     output.try_reserve_exact(total_bytes).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("dispatch output allocation failed")
     })?;
@@ -944,11 +934,7 @@ pub(super) fn decode_dispatch_n_by_tag_node(
             .checked_add(input.bytes.len())
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     }
-    if total_output > limits.max_decoded_bytes || total_output > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(total_output, limits)?;
 
     for segment in 0..segment_count {
         let tag = read_usize_numeric_element(tags.bytes, tags.element_width, segment)?;

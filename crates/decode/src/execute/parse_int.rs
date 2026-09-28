@@ -2,6 +2,7 @@ use alloc::{string::ToString, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+use super::output::check_output_len;
 use super::{OwnedStream, StreamInput, numeric_element_count};
 
 pub(super) fn decode_node(
@@ -36,11 +37,7 @@ pub(super) fn decode_node(
             .len()
             .checked_add(text.len())
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if new_len > limits.max_decoded_bytes || new_len > limits.max_buffer_bytes {
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
+        check_output_len(new_len, limits)?;
         lengths.push(len);
         output.try_reserve_exact(text.len()).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("parse_int output allocation failed")

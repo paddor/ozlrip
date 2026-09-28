@@ -8,6 +8,7 @@ use super::numeric::{
     checked_sum_u32, numeric_element_count, read_usize_numeric_element,
     validate_numeric_stream_width,
 };
+use super::output::{alloc_output, check_output_len};
 use super::streams::{OwnedStream, StreamInput};
 
 pub(super) fn decode_concat_string_node(
@@ -54,11 +55,7 @@ pub(super) fn decode_concat_string_node(
         }
         let output_lengths = &string_lengths[consumed_elements..next_elements];
         let output_bytes = checked_sum_u32(output_lengths)?;
-        if output_bytes > limits.max_decoded_bytes || output_bytes > limits.max_buffer_bytes {
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
+        check_output_len(output_bytes, limits)?;
         let next_bytes = consumed_bytes
             .checked_add(output_bytes)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -133,11 +130,7 @@ pub(super) fn decode_interleave_string_node(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("interleave_string lengths do not sum to content size"));
     }
-    if input.bytes.len() > limits.max_decoded_bytes || input.bytes.len() > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(input.bytes.len(), limits)?;
 
     let strings_per_output = string_lengths.len() / output_count;
     let mut byte_counts = Vec::new();
@@ -160,15 +153,7 @@ pub(super) fn decode_interleave_string_node(
         Error::new(ErrorKind::LimitExceeded).with_detail("interleave output allocation failed")
     })?;
     for &byte_count in &byte_counts {
-        if byte_count > limits.max_decoded_bytes || byte_count > limits.max_buffer_bytes {
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(byte_count).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("interleave allocation failed")
-        })?;
+        let bytes = alloc_output(byte_count, limits, "interleave allocation failed")?;
         let mut lengths = Vec::new();
         lengths.try_reserve_exact(strings_per_output).map_err(|_| {
             Error::new(ErrorKind::LimitExceeded).with_detail("interleave length allocation failed")
@@ -367,16 +352,7 @@ pub(super) fn decode_prefix_node(
         })?);
         previous_len = current_len;
     }
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("prefix allocation failed")
-    })?;
+    let mut output = alloc_output(output_len, limits, "prefix allocation failed")?;
     let mut suffix_offset = 0usize;
     let mut previous_start = 0usize;
     let mut previous_len = 0usize;
@@ -486,16 +462,7 @@ pub(super) fn decode_tokenize_string_node(
             .checked_add(token_len)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     }
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
-
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("tokenize_string allocation failed")
-    })?;
+    let mut bytes = alloc_output(output_len, limits, "tokenize_string allocation failed")?;
     let mut lengths = Vec::new();
     lengths.try_reserve_exact(output_elements).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("tokenize_string length allocation failed")

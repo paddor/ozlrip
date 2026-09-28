@@ -18,6 +18,30 @@ impl DecodedChunk<'_> {
     }
 }
 
+/// Fails if a node output of `len` bytes would exceed the decode limits.
+#[inline]
+pub(super) fn check_output_len(len: usize, limits: Limits) -> Result<()> {
+    if len > limits.max_decoded_bytes || len > limits.max_buffer_bytes {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
+        );
+    }
+    Ok(())
+}
+
+/// An empty buffer with room for a node output of `len` bytes, after
+/// checking `len` against the decode limits. `detail` describes a failed
+/// allocation.
+#[inline]
+pub(super) fn alloc_output(len: usize, limits: Limits, detail: &'static str) -> Result<Vec<u8>> {
+    check_output_len(len, limits)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| Error::new(ErrorKind::LimitExceeded).with_detail(detail))?;
+    Ok(output)
+}
+
 /// Tracks one frame output against the size its header declares.
 ///
 /// Built before anything is reserved or written, so a tiny frame that
@@ -56,11 +80,7 @@ impl OutputBudget {
     }
 
     pub(super) fn new(declared: usize, encoded_size: usize, limits: Limits) -> Result<Self> {
-        if declared > limits.max_decoded_bytes || declared > limits.max_buffer_bytes {
-            return Err(
-                Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-            );
-        }
+        check_output_len(declared, limits)?;
         let max_expanded = encoded_size
             .checked_mul(limits.max_expansion_ratio)
             .ok_or_else(|| {

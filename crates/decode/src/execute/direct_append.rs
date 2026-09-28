@@ -7,6 +7,7 @@ use super::layout_nodes::{append_split_by_struct_output, split_by_struct_output_
 use super::node::{
     byte_preserving_conversion_output_width, is_byte_preserving_conversion, node_header,
 };
+use super::output::check_output_len;
 use super::plan::{ChunkExecutionPlan, NodeExecutionPlan};
 use super::streams::{StreamInput, StreamSlot};
 
@@ -219,11 +220,7 @@ pub(super) fn append_split_by_struct_to_final_splitn(
             .checked_add(len)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     }
-    if total_len > limits.max_decoded_bytes || total_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(total_len, limits)?;
     dst.try_reserve_exact(total_len).map_err(|_| {
         Error::new(ErrorKind::LimitExceeded).with_detail("splitn allocation failed")
     })?;

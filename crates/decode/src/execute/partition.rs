@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::numeric::push_numeric_element;
+use super::output::check_output_len;
 
 use super::{
     OwnedStream, StreamInput, fast_partition, max_numeric_value, read_var_u64,
@@ -135,11 +136,7 @@ pub(super) fn decode_quantize_node(
         .len()
         .checked_mul(4)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
 
     let mut base_table = [0u32; 256];
     let mut bit_table = [u8::MAX; 256];
@@ -296,11 +293,7 @@ pub(super) fn decode_partition_node(
         .len()
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_len > limits.max_decoded_bytes || output_len > limits.max_buffer_bytes {
-        return Err(
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
-        );
-    }
+    check_output_len(output_len, limits)?;
 
     let bases = partition_bases(&params)?;
     let bits = partition_bits(&params)?;
