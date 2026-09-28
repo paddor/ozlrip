@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `frame_size`, the size of the frame at the start of a buffer that may
+  continue past it, as upstream `ZL_getCompressedSize` reports it. It reads
+  the frame and chunk headers but checks neither checksums nor the node
+  graph. An interop test matches upstream on every prefix of frames in
+  every format version.
 - Add `decode_outputs`, which decodes every frame output with its type as an
   `Output`: serial bytes, structs, little-endian numerics, or strings with
   their lengths. `Decoder::decode_outputs_into` and `decode_outputs_into`

@@ -50,6 +50,7 @@ unsafe extern "C" {
         written: *mut usize,
     ) -> c_int;
     fn ozlrip_shim_compress_bound(total_input_size: usize) -> usize;
+    fn ozlrip_shim_compressed_size(src: *const c_void, src_size: usize, size: *mut usize) -> c_int;
 }
 
 /// Error from the OpenZL C library, with its context string.
@@ -95,6 +96,14 @@ pub fn max_format_version() -> u32 {
 pub fn default_format_version() -> u32 {
     // SAFETY: pure getter.
     unsafe { ozlrip_shim_default_format_version() }
+}
+
+/// Size of the frame at the start of `bytes`, from `ZL_getCompressedSize`.
+pub fn compressed_size(bytes: &[u8]) -> Result<usize, Error> {
+    let mut size = 0usize;
+    // SAFETY: `bytes` is valid for its length for the whole call.
+    check(unsafe { ozlrip_shim_compressed_size(bytes.as_ptr().cast(), bytes.len(), &mut size) })?;
+    Ok(size)
 }
 
 /// Reusable OpenZL decompression context.

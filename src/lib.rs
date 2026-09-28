@@ -22,6 +22,6 @@ pub use ozlrip_core::{Error, ErrorKind, Limits, Result};
 pub use ozlrip_decode::{
     Decoder, FrameInfo, FrameValueType, Options, Output, decode, decode_into,
     decode_into_with_options, decode_outputs, decode_outputs_into,
-    decode_outputs_into_with_options, decode_outputs_with_options, decode_with_options, inspect,
-    inspect_with_options,
+    decode_outputs_into_with_options, decode_outputs_with_options, decode_with_options, frame_size,
+    frame_size_with_options, inspect, inspect_with_options,
 };

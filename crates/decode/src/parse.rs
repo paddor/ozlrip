@@ -64,7 +64,29 @@ pub(crate) fn parse_frame(
     verify_compressed: bool,
 ) -> Result<FramePlan> {
     check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
+    let plan = scan_frame(input, limits, verify_compressed)?;
+    let end = plan.info.frame_bytes;
+    if end != input.len() {
+        return Err(
+            Error::at(ErrorKind::Malformed, end).with_detail("trailing bytes after OpenZL frame")
+        );
+    }
+    validate_frame_plan(&plan, limits)?;
+    Ok(plan)
+}
 
+/// Size of the frame at the start of `input`, which may continue past it,
+/// as upstream `ZL_getCompressedSize` reports it: header and chunk headers
+/// are parsed, checksums and the node graph are not checked.
+pub(crate) fn frame_size(input: &[u8], limits: Limits) -> Result<usize> {
+    let size = scan_frame(input, limits, false)?.info.frame_bytes;
+    check_limit(size, limits.max_frame_bytes, "max_frame_bytes")?;
+    Ok(size)
+}
+
+/// Reads the frame at the start of `input` up to its end, which is
+/// `info.frame_bytes`. The node graph is not validated.
+fn scan_frame(input: &[u8], limits: Limits, verify_compressed: bool) -> Result<FramePlan> {
     let mut reader = Reader::new(input);
     let magic = reader.read_u32_le()?;
     let format_version = format_version_from_magic(magic)?;
@@ -111,14 +133,10 @@ pub(crate) fn parse_frame(
         limits,
         verify_compressed,
     )?;
-    if !reader.is_empty() {
-        return Err(Error::at(ErrorKind::Malformed, reader.offset())
-            .with_detail("trailing bytes after OpenZL frame"));
-    }
 
     let info = FramePlanInfo {
         format_version,
-        frame_bytes: input.len(),
+        frame_bytes: reader.offset(),
         header_bytes,
         decoded_bytes: output_sizes.decoded_bytes,
         chunks: chunk_scan.summary.chunks,
@@ -135,12 +153,10 @@ pub(crate) fn parse_frame(
         comment,
         dictionary_bundle_id,
     };
-    let plan = FramePlan {
+    Ok(FramePlan {
         info,
         chunks: chunk_scan.chunks,
-    };
-    validate_frame_plan(&plan, limits)?;
-    Ok(plan)
+    })
 }
 
 #[derive(Clone, Debug)]

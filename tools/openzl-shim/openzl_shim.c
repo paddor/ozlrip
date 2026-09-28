@@ -111,6 +111,24 @@ int ozlrip_shim_dctx_disable_checksums(ZL_DCtx* dctx)
     return 0;
 }
 
+int ozlrip_shim_compressed_size(const void* src, size_t src_size, size_t* size)
+{
+    ZL_Report const report = ZL_getCompressedSize(src, src_size);
+    if (ZL_isError(report)) {
+        int const code         = (int)ZL_errorCode(report);
+        const char* const name = ZL_ErrorCode_toString((ZL_ErrorCode)code);
+        snprintf(
+                OZLRIP_SHIM_LAST_ERROR,
+                sizeof(OZLRIP_SHIM_LAST_ERROR),
+                "ZL_getCompressedSize: code=%d %s",
+                code,
+                name ? name : "<null>");
+        return code;
+    }
+    *size = ZL_validResult(report);
+    return 0;
+}
+
 int ozlrip_shim_decompress_serial(
         ZL_DCtx* dctx,
         void* dst,

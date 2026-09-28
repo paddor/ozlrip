@@ -281,6 +281,22 @@ pub fn decode_outputs_into_with_options(
     Decoder::with_options(options).decode_outputs_into(input, outputs)
 }
 
+/// Size of the OpenZL frame at the start of `input`, using
+/// [`Options::default`]. `input` may continue past the frame, for example
+/// with more frames.
+///
+/// Like upstream `ZL_getCompressedSize`, this reads the frame and chunk
+/// headers but checks neither checksums nor the node graph.
+pub fn frame_size(input: &[u8]) -> Result<usize> {
+    frame_size_with_options(input, Options::default())
+}
+
+/// Size of the OpenZL frame at the start of `input`, using explicit options.
+/// The limits apply to the frame, not to all of `input`.
+pub fn frame_size_with_options(input: &[u8], options: Options) -> Result<usize> {
+    parse::frame_size(input, options.limits)
+}
+
 /// Parses and validates frame metadata using [`Options::default`].
 pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
     inspect_with_options(input, Options::default())

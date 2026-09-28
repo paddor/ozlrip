@@ -213,3 +213,40 @@ fn frame_prefixes_are_accepted_like_upstream() {
         }
     }
 }
+
+/// `frame_size` agrees with upstream `ZL_getCompressedSize` on every prefix
+/// of upstream frames, with and without bytes after the frame.
+#[test]
+fn frame_size_matches_upstream() {
+    let text = text_input();
+    for version in openzl_shim::min_format_version()..=openzl_shim::max_format_version() {
+        for input in [&b""[..], b"abc", &text[..300]] {
+            for graph in [Graph::Store, Graph::Zstd] {
+                let options = CompressOptions {
+                    graph,
+                    format_version: version,
+                    ..CompressOptions::default()
+                };
+                let Ok(frame) = compress(&[Input::Serial(input)], options) else {
+                    continue;
+                };
+                for tail in [&b""[..], b"\0\x07tail"] {
+                    let data = [frame.as_slice(), tail].concat();
+                    for len in 0..=data.len() {
+                        let prefix = &data[..len];
+                        let upstream = openzl_shim::compressed_size(prefix).ok();
+                        let ours = ozlrip::frame_size(prefix).ok();
+                        assert_eq!(
+                            ours,
+                            upstream,
+                            "v{version} {graph:?} input {} tail {} prefix {len}",
+                            input.len(),
+                            tail.len()
+                        );
+                    }
+                    assert_eq!(ozlrip::frame_size(&data).unwrap(), frame.len());
+                }
+            }
+        }
+    }
+}

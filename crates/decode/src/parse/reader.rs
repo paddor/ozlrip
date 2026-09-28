@@ -170,6 +170,7 @@ impl<'a> Reader<'a> {
         self.offset
     }
 
+    #[cfg(feature = "zstd")]
     pub(super) const fn is_empty(&self) -> bool {
         self.offset >= self.bytes.len()
     }
