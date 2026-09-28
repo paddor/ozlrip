@@ -1,12 +1,10 @@
 use alloc::vec::Vec;
 
 use crate::standard;
-use ozlrip_core::{Error, ErrorKind, Limits, Result};
+use ozlrip_core::{Error, ErrorKind, Result};
 
-use super::output::check_output_len;
 use smallvec::{SmallVec, smallvec};
 
-use super::conversion::{byte_preserving_conversion_output_width, is_byte_preserving_conversion};
 use super::layout_nodes::{
     decode_bitsplit_node, decode_concat_node, decode_flatpack_node, decode_float_deconstruct_node,
     decode_merge_sorted_node, decode_mux_lengths_node, decode_sentinel_node,
@@ -15,11 +13,7 @@ use super::layout_nodes::{
     is_transpose_split,
 };
 use super::lz4::decode_lz4_chunk;
-use super::plan::NodeExecutionPlan;
-use super::streams::{
-    LiveBytes, OwnedStream, StreamInput, StreamSlot, move_stream_to_single_output,
-    single_execution_input,
-};
+use super::streams::{OwnedStream, StreamInput};
 use super::string_nodes::{
     decode_concat_string_node, decode_interleave_string_node, decode_prefix_node,
     decode_separate_string_components_node, decode_tokenize_string_node,
@@ -47,67 +41,6 @@ use super::{
     runtime::StandardNodeContext,
     zstd::decode_zstd_chunk,
 };
-
-pub(super) fn try_execute_single_input_splitn_node(
-    streams: &mut [StreamSlot<'_>],
-    node: &NodeExecutionPlan,
-    header: &[u8],
-    limits: Limits,
-    live: &mut LiveBytes,
-) -> Result<bool> {
-    if !matches!(
-        node.standard_id,
-        standard::SPLITN_ID | standard::SPLITN_STRUCT_ID | standard::SPLITN_NUM_ID
-    ) || node.input_count != 1
-    {
-        return Ok(false);
-    }
-    if !header.is_empty() {
-        return Err(
-            Error::new(ErrorKind::Unsupported).with_detail("splitn headers are unsupported")
-        );
-    }
-
-    let input = single_execution_input(streams, node.input_start)?;
-    if input.element_width == 0 {
-        return Err(Error::new(ErrorKind::InvalidType).with_detail("splitn element width is zero"));
-    }
-    if !input.bytes.len().is_multiple_of(input.element_width) {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("splitn input has partial element")
-        );
-    }
-    check_output_len(input.bytes.len(), limits)?;
-    let output_width = if node.standard_id == standard::SPLITN_ID {
-        1
-    } else {
-        input.element_width
-    };
-    move_stream_to_single_output(streams, node, output_width, live)
-}
-
-pub(super) fn try_execute_byte_preserving_conversion_node(
-    streams: &mut [StreamSlot<'_>],
-    node: &NodeExecutionPlan,
-    header: &[u8],
-    limits: Limits,
-    live: &mut LiveBytes,
-) -> Result<bool> {
-    if !is_byte_preserving_conversion(node.standard_id) {
-        return Ok(false);
-    }
-    let Some(output_width) = byte_preserving_conversion_output_width(
-        node.standard_id,
-        node.input_count,
-        single_execution_input(streams, node.input_start)?,
-        header,
-        limits,
-    )?
-    else {
-        return Ok(false);
-    };
-    move_stream_to_single_output(streams, node, output_width, live)
-}
 
 pub(super) fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[u8]> {
     let end = start

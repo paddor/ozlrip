@@ -2,13 +2,13 @@ use alloc::vec::Vec;
 
 #[cfg(test)]
 use crate::dict::DictionaryStore;
-use crate::{parse::FramePlan, standard};
+use crate::parse::FramePlan;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::info::FrameValueType;
-use smallvec::SmallVec;
 
 mod bit_reader;
+mod chunk;
 mod conversion;
 mod direct_append;
 mod dispatch;
@@ -45,29 +45,15 @@ mod streams;
 mod string_nodes;
 mod zstd;
 
-use direct_append::{
-    DirectAppendChunk, DirectAppendKind, append_split_by_struct_to_final_splitn,
-    direct_append_tail, validate_direct_append_tail, validate_string_to_serial_tail,
-};
-use dispatch::decode_dispatch_string_node_to_serial_output;
-use lz_nodes::{decode_field_lz_node_to_output, decode_lz_node_to_output};
-use node::{
-    execute_standard_node, node_header, one_typed, single_input, single_stream,
-    try_execute_byte_preserving_conversion_node, try_execute_single_input_splitn_node,
-};
-use numeric_nodes::decode_dedup_num_node;
+use chunk::{decode_transform_chunk_appending, decode_transform_chunk_with_plan};
+use direct_append::{DirectAppendChunk, direct_append_tail};
 use output::{DecodedChunk, OutputBudget, verify_decoded_checksum};
 pub(crate) use outputs::{DecodedOutput, decode_outputs_with_context};
-use plan::{ChunkExecutionPlan, NodeExecutionPlan, build_chunk_execution_plan};
-use runtime::StandardNodeContext;
+use plan::build_chunk_execution_plan;
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
-use streams::{
-    LiveBytes, StreamSlot, collect_node_inputs, initialize_stream_slots,
-    recycle_consumed_owned_streams,
-};
+use zstd::try_decode_single_zstd_into_dst;
 #[cfg(feature = "zstd")]
 pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
-use zstd::{decode_zstd_chunk_to_output, try_decode_single_zstd_into_dst};
 
 #[cfg(test)]
 mod convert_be_corpus;
@@ -335,243 +321,6 @@ fn stored_only_chunk<'a>(input: &'a [u8], chunk: &crate::parse::ChunkPlan) -> Re
             .with_detail("stored-output chunk contains multiple stored streams"));
     }
     range.as_slice(input)
-}
-
-fn decode_transform_chunk_with_plan<'a>(
-    input: &'a [u8],
-    chunk: &crate::parse::ChunkPlan,
-    plan: &ChunkExecutionPlan,
-    format_version: u32,
-    limits: Limits,
-    dictionary_bundle_id: Option<&[u8]>,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<DecodedChunk<'a>> {
-    let mut streams = run_chunk(
-        input,
-        chunk,
-        plan,
-        format_version,
-        limits,
-        dictionary_bundle_id,
-        runtime,
-    )?;
-    let final_index = streams.len().checked_sub(1).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidGraph).with_detail("transform chunk has no output stream")
-    })?;
-    match streams.swap_remove(final_index) {
-        StreamSlot::Borrowed(stream) => Ok(DecodedChunk::Borrowed(stream.bytes)),
-        StreamSlot::Owned(stream) => Ok(DecodedChunk::Owned(stream.bytes)),
-        StreamSlot::Empty => {
-            Err(Error::new(ErrorKind::InvalidGraph).with_detail("final output stream is missing"))
-        }
-    }
-}
-
-/// Runs a chunk's nodes and returns every stream slot: the stored streams
-/// and the streams the nodes regenerated.
-fn run_chunk<'a>(
-    input: &'a [u8],
-    chunk: &crate::parse::ChunkPlan,
-    plan: &ChunkExecutionPlan,
-    format_version: u32,
-    limits: Limits,
-    dictionary_bundle_id: Option<&[u8]>,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<Vec<StreamSlot<'a>>> {
-    let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
-    let mut live = LiveBytes::new(limits);
-    let transform_headers = chunk.transform_header_range().as_slice(input)?;
-    let mut ctx = StandardNodeContext {
-        format_version,
-        limits,
-        scratch: &mut *runtime.scratch,
-        dictionary_bundle_id,
-        dict_store: &mut *runtime.dict_store,
-        #[cfg(feature = "zstd")]
-        zstd: &mut *runtime.zstd,
-    };
-
-    for node in &plan.nodes {
-        let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
-    }
-    Ok(streams)
-}
-
-/// Executes one node: the splitn and conversion shortcuts, or a node decoder
-/// whose outputs fill their stream slots. Consumed owned inputs go back to
-/// the scratch pool.
-fn execute_node(
-    streams: &mut [StreamSlot<'_>],
-    node: &NodeExecutionPlan,
-    header: &[u8],
-    ctx: &mut StandardNodeContext<'_>,
-    live: &mut LiveBytes,
-) -> Result<()> {
-    if try_execute_single_input_splitn_node(streams, node, header, ctx.limits, live)? {
-        return Ok(());
-    }
-    if try_execute_byte_preserving_conversion_node(streams, node, header, ctx.limits, live)? {
-        return Ok(());
-    }
-
-    let inputs = collect_node_inputs(streams, node.input_start, node.input_count)?;
-    let outputs = if node.standard_id == standard::SPARSE_NUM_ID {
-        one_typed(sparse_num::decode_node(&inputs, header, ctx.limits))?
-    } else if node.standard_id == standard::DEDUP_NUM_ID {
-        SmallVec::from_vec(decode_dedup_num_node(
-            single_stream(&inputs)?,
-            header,
-            node.output_targets.len(),
-            ctx.limits,
-        )?)
-    } else {
-        execute_standard_node(
-            node.standard_id,
-            &inputs,
-            node.variable_inputs,
-            node.output_targets.len(),
-            node.dict_index,
-            header,
-            ctx,
-        )?
-    };
-    drop(inputs);
-    recycle_consumed_owned_streams(
-        streams,
-        node.input_start,
-        node.input_count,
-        ctx.scratch,
-        live,
-    )?;
-    if outputs.len() != node.output_targets.len() {
-        return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("node output count does not match graph"));
-    }
-    for (output, &output_target) in outputs.into_iter().zip(node.output_targets.iter()) {
-        let target = streams.get_mut(output_target).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidGraph).with_detail("node output target is out of bounds")
-        })?;
-        if !matches!(target, StreamSlot::Empty) {
-            return Err(Error::new(ErrorKind::InvalidGraph)
-                .with_detail("node output overwrites an existing stream"));
-        }
-        live.add(&output)?;
-        *target = StreamSlot::Owned(output);
-    }
-    Ok(())
-}
-
-/// `max_output` caps what the tail may append; it is the rest of the frame's
-/// declared output.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "direct-append decode needs the chunk, frame context, output cap and runtime"
-)]
-fn decode_transform_chunk_appending(
-    input: &[u8],
-    chunk: DirectAppendChunk<'_>,
-    format_version: u32,
-    limits: Limits,
-    max_output: usize,
-    dst: &mut Vec<u8>,
-    dictionary_bundle_id: Option<&[u8]>,
-    runtime: &mut DecodeRuntime<'_>,
-) -> Result<usize> {
-    let plan = chunk.execution;
-    let chunk = chunk.chunk;
-    let append_tail = direct_append_tail(plan).ok_or_else(|| {
-        Error::new(ErrorKind::InvalidGraph).with_detail("chunk is not direct-appendable")
-    })?;
-    let mut streams = initialize_stream_slots(input, chunk, &plan.regen_targets)?;
-    let mut live = LiveBytes::new(limits);
-    let transform_headers = chunk.transform_header_range().as_slice(input)?;
-    let mut ctx = StandardNodeContext {
-        format_version,
-        limits,
-        scratch: &mut *runtime.scratch,
-        dictionary_bundle_id,
-        dict_store: &mut *runtime.dict_store,
-        #[cfg(feature = "zstd")]
-        zstd: &mut *runtime.zstd,
-    };
-
-    for (node_index, node) in plan.nodes.iter().enumerate() {
-        let header = node_header(transform_headers, node.header_start, node.header_size)?;
-        if node_index == append_tail.start {
-            let inputs = collect_node_inputs(&streams, node.input_start, node.input_count)?;
-            let output_start = dst.len();
-            let element_width = match append_tail.kind {
-                DirectAppendKind::Lz => {
-                    decode_lz_node_to_output(&inputs, header, limits, dst, output_start)?;
-                    1
-                }
-                DirectAppendKind::FieldLz => {
-                    decode_field_lz_node_to_output(&inputs, header, limits, dst, output_start)?
-                }
-                DirectAppendKind::Zstd => {
-                    decode_zstd_chunk_to_output(
-                        single_input(&inputs)?,
-                        header,
-                        node.dict_index,
-                        &mut ctx,
-                        max_output,
-                        dst,
-                    )?;
-                    1
-                }
-                DirectAppendKind::DispatchStringToSerial => {
-                    decode_dispatch_string_node_to_serial_output(
-                        &inputs,
-                        node.variable_inputs,
-                        header,
-                        format_version,
-                        limits,
-                        dst,
-                    )?;
-                    1
-                }
-                DirectAppendKind::SplitByStructToSplitN => {
-                    append_split_by_struct_to_final_splitn(
-                        &streams,
-                        &inputs,
-                        node,
-                        &plan.nodes[node_index + 1..],
-                        transform_headers,
-                        limits,
-                        dst,
-                    )?;
-                    1
-                }
-            };
-            drop(inputs);
-            match append_tail.kind {
-                DirectAppendKind::Lz | DirectAppendKind::FieldLz | DirectAppendKind::Zstd => {
-                    validate_direct_append_tail(
-                        &plan.nodes[node_index + 1..],
-                        transform_headers,
-                        element_width,
-                        &dst[output_start..],
-                        limits,
-                    )?;
-                }
-                DirectAppendKind::DispatchStringToSerial => validate_string_to_serial_tail(
-                    &plan.nodes[node_index + 1..],
-                    transform_headers,
-                )?,
-                DirectAppendKind::SplitByStructToSplitN => {}
-            }
-            for slot in streams {
-                if let StreamSlot::Owned(stream) = slot {
-                    ctx.scratch.recycle_owned_stream(stream);
-                }
-            }
-            return Ok(dst.len() - output_start);
-        }
-        execute_node(&mut streams, node, header, &mut ctx, &mut live)?;
-    }
-
-    Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
 }
 
 #[cfg(test)]

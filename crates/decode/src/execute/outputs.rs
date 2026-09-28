@@ -14,7 +14,7 @@ use crate::standard;
 use super::output::{OutputBudget, check_expansion, check_output_len, declared_output_size};
 use super::plan::{ChunkExecutionPlan, build_chunk_execution_plan};
 use super::streams::StreamSlot;
-use super::{decode_plan_with_context, run_chunk, runtime::DecodeRuntime};
+use super::{chunk::run_chunk, decode_plan_with_context, runtime::DecodeRuntime};
 
 /// One decoded frame output. The buffers are reused across decodes.
 #[derive(Debug, Default)]
