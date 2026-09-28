@@ -197,16 +197,20 @@ fn feature_enabled(value: &str) -> bool {
 }
 
 fn error_case(name: &str) -> ErrorCase {
-    match name {
+    unsupported_case(name)
+        .or_else(|| truncated_case(name))
+        .or_else(|| malformed_case(name))
+        .or_else(|| limit_case(name))
+        .or_else(|| structure_case(name))
+        .or_else(|| checksum_case(name))
+        .unwrap_or_else(|| panic!("unknown error taxonomy case: {name}"))
+}
+
+/// Cases for features the decoder does not support.
+fn unsupported_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
         "unknown-magic" => decode_case(b"not-openzl".to_vec(), Options::default()),
-        "unsupported-format-version" => inspect_case(
-            {
-                let mut input = Vec::new();
-                input.extend_from_slice(&magic(255));
-                input
-            },
-            Options::default(),
-        ),
+        "unsupported-format-version" => inspect_case(magic_frame(255, &[]), Options::default()),
         "unknown-output-size" => decode_case(unknown_size_frame(), Options::default()),
         "custom-transform" => decode_case(custom_transform_frame(), Options::default()),
         "zigzag-header" => decode_case(
@@ -215,6 +219,14 @@ fn error_case(name: &str) -> ErrorCase {
         ),
         "custom-dictionary-materializer" => dictionary_case(dictionary_bundle(ZSTD_ID, true)),
         "external-dictionary-materializer" => dictionary_case(dictionary_bundle(LZ4_ID, false)),
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Cases whose input ends before a required field.
+fn truncated_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
         "truncated-magic" => inspect_case(vec![0xd7, 0xb1], Options::default()),
         "generated-truncated-output-size-varint" => {
             inspect_case(truncated_output_size_varint_frame(), Options::default())
@@ -240,35 +252,29 @@ fn error_case(name: &str) -> ErrorCase {
         "generated-truncated-encoded-checksum" => {
             inspect_case(truncated_encoded_checksum_frame(), Options::default())
         }
-        "zero-output-count" => inspect_case(
-            {
-                let mut input = Vec::new();
-                input.extend_from_slice(&magic(21));
-                input.push(0);
-                input.push(0);
-                input
-            },
-            Options::default(),
-        ),
         "truncated-dictionary-bundle" => {
             dictionary_case(BUNDLE_INFO_MAGIC.to_le_bytes()[..2].to_vec())
         }
-        "missing-eof-marker" => decode_case(
-            {
-                let mut input = stored_serial_frame(&[7, 8, 9]);
-                input.pop();
-                input
-            },
-            Options::default(),
-        ),
-        "stored-output-size-mismatch" => decode_case(
-            {
-                let mut input = stored_serial_frame(&[7, 8, 9]);
-                input[6] = 5;
-                input
-            },
-            Options::default(),
-        ),
+        "missing-eof-marker" => {
+            let mut input = stored_serial_frame(&[7, 8, 9]);
+            input.pop();
+            decode_case(input, Options::default())
+        }
+        "header-only-frame" => inspect_case(magic_frame(21, &[0, 1, 1]), Options::default()),
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Cases with structurally invalid frame or bundle contents.
+fn malformed_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
+        "zero-output-count" => inspect_case(magic_frame(21, &[0, 0]), Options::default()),
+        "stored-output-size-mismatch" => {
+            let mut input = stored_serial_frame(&[7, 8, 9]);
+            input[6] = 5;
+            decode_case(input, Options::default())
+        }
         "generated-trailing-after-eof" => {
             inspect_case(trailing_after_eof_frame(), Options::default())
         }
@@ -277,85 +283,6 @@ fn error_case(name: &str) -> ErrorCase {
             Options::default(),
         ),
         "bad-dictionary-bundle-magic" => dictionary_case([0xff, 0xff, 0xff, 0xff].to_vec()),
-        "frame-byte-limit" => inspect_case(
-            stored_serial_frame(&[7, 8, 9]),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_frame_bytes = 3;
-                limits
-            }),
-        ),
-        "decoded-byte-limit" => decode_case(
-            stored_serial_frame(&[7, 8, 9]),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_decoded_bytes = 2;
-                limits
-            }),
-        ),
-        "stored-stream-byte-limit" => decode_case(
-            stored_serial_frame(&[7, 8, 9]),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_stored_stream_bytes = 2;
-                limits
-            }),
-        ),
-        "output-count-limit" => inspect_case(
-            stored_serial_frame(&[]),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_streams = 0;
-                limits
-            }),
-        ),
-        "transform-header-byte-limit" => inspect_case(
-            standard_transform_serial_frame(21, 22, &[1, 2, 3], 3, &[99]),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_transform_header_bytes = 0;
-                limits
-            }),
-        ),
-        "invalid-graph-node-input" => {
-            inspect_case(invalid_graph_node_input_frame(), Options::default())
-        }
-        "generated-duplicate-regen-distance" => {
-            inspect_case(duplicate_regen_distance_frame(), Options::default())
-        }
-        "invalid-output-type" => inspect_case(
-            {
-                let mut input = Vec::new();
-                input.extend_from_slice(&magic(14));
-                input.push(4);
-                input
-            },
-            Options::default(),
-        ),
-        "stored-stream-size-overflow" => inspect_case(
-            stored_stream_size_overflow_frame(),
-            Options::from({
-                let mut limits = Limits::default();
-                limits.max_stored_stream_bytes = usize::MAX;
-                limits.max_buffer_bytes = usize::MAX;
-                limits.max_decoded_bytes = usize::MAX;
-                limits
-            }),
-        ),
-        "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
-        "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
-        "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
-        "header-only-frame" => inspect_case(
-            {
-                let mut input = Vec::new();
-                input.extend_from_slice(&magic(21));
-                input.push(0);
-                input.push(1);
-                input.push(1);
-                input
-            },
-            Options::default(),
-        ),
         "lz4-declared-size-beyond-expansion" => {
             // A 3-byte block cannot decode to more than 3 * 255 bytes.
             let decoded_len = 3 * 255 + 1;
@@ -366,6 +293,68 @@ fn error_case(name: &str) -> ErrorCase {
                 Options::default(),
             )
         }
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Cases that exceed one configured decoder limit.
+fn limit_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
+        "frame-byte-limit" => inspect_case(
+            stored_serial_frame(&[7, 8, 9]),
+            limits_with(|limits| limits.max_frame_bytes = 3),
+        ),
+        "decoded-byte-limit" => decode_case(
+            stored_serial_frame(&[7, 8, 9]),
+            limits_with(|limits| limits.max_decoded_bytes = 2),
+        ),
+        "stored-stream-byte-limit" => decode_case(
+            stored_serial_frame(&[7, 8, 9]),
+            limits_with(|limits| limits.max_stored_stream_bytes = 2),
+        ),
+        "output-count-limit" => inspect_case(
+            stored_serial_frame(&[]),
+            limits_with(|limits| limits.max_streams = 0),
+        ),
+        "transform-header-byte-limit" => inspect_case(
+            standard_transform_serial_frame(21, 22, &[1, 2, 3], 3, &[99]),
+            limits_with(|limits| limits.max_transform_header_bytes = 0),
+        ),
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Cases with an invalid graph, an invalid stream type, or a size overflow.
+fn structure_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
+        "invalid-graph-node-input" => {
+            inspect_case(invalid_graph_node_input_frame(), Options::default())
+        }
+        "generated-duplicate-regen-distance" => {
+            inspect_case(duplicate_regen_distance_frame(), Options::default())
+        }
+        "invalid-output-type" => inspect_case(magic_frame(14, &[4]), Options::default()),
+        "stored-stream-size-overflow" => inspect_case(
+            stored_stream_size_overflow_frame(),
+            limits_with(|limits| {
+                limits.max_stored_stream_bytes = usize::MAX;
+                limits.max_buffer_bytes = usize::MAX;
+                limits.max_decoded_bytes = usize::MAX;
+            }),
+        ),
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Cases with checksum mismatches, including the legacy v20 checksum layout.
+fn checksum_case(name: &str) -> Option<ErrorCase> {
+    let case = match name {
+        "bad-header-checksum" => inspect_case(bad_header_checksum_frame(), Options::default()),
+        "bad-encoded-checksum" => inspect_case(bad_encoded_checksum_frame(), Options::default()),
+        "bad-decoded-checksum" => decode_case(bad_decoded_checksum_frame(), Options::default()),
         "legacy-bad-encoded-checksum" => {
             let mut input = legacy_checksum_frame(false, true);
             *input.last_mut().unwrap() ^= 1;
@@ -386,8 +375,21 @@ fn error_case(name: &str) -> ErrorCase {
             input.push(0);
             inspect_case(input, Options::default())
         }
-        _ => panic!("unknown error taxonomy case: {name}"),
-    }
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Returns the magic for `version` followed by `bytes`.
+fn magic_frame(version: u32, bytes: &[u8]) -> Vec<u8> {
+    [&magic(version), bytes].concat()
+}
+
+/// Returns options with default limits changed by `update`.
+fn limits_with(update: impl FnOnce(&mut Limits)) -> Options {
+    let mut limits = Limits::default();
+    update(&mut limits);
+    Options::from(limits)
 }
 
 fn truncated_output_size_varint_frame() -> Vec<u8> {

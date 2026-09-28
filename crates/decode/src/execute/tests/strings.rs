@@ -215,157 +215,49 @@ fn decodes_dispatch_string_csv_pattern_to_serial_output() {
 
 #[test]
 fn decodes_dispatch_string_csv_header_pattern_to_serial_output() {
-    let header_pattern = [5u16; 7]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let row_pattern = [4u16, 0, 4, 1, 4, 2, 4, 3]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let trailing_delimiter = 4u16.to_le_bytes();
-    let indices = [
-        header_pattern.as_slice(),
-        row_pattern.as_slice(),
-        row_pattern.as_slice(),
-        trailing_delimiter.as_slice(),
-    ]
-    .concat();
-    let first_lengths = [2, 2];
-    let second_lengths = [1, 2];
-    let third_lengths = [2, 1];
-    let fourth_lengths = [1, 3];
+    let row_pattern = [4u16, 0, 4, 1, 4, 2, 4, 3];
+    let indices = le_u16_stream(&[&[5; 7], &row_pattern, &row_pattern, &[4]]);
     let delimiter_lengths = [1; 9];
     let header_lengths = [1; 7];
-    let mut output = b"pre".to_vec();
 
-    decode_dispatch_string_node_to_serial_output(
+    let output = dispatch_strings_to_serial(
         &[
-            StreamInput {
-                bytes: &indices,
-                element_width: 2,
-                string_lengths: None,
-            },
-            StreamInput {
-                bytes: b"aaBB",
-                element_width: 1,
-                string_lengths: Some(&first_lengths),
-            },
-            StreamInput {
-                bytes: b"xYZ",
-                element_width: 1,
-                string_lengths: Some(&second_lengths),
-            },
-            StreamInput {
-                bytes: b"12q",
-                element_width: 1,
-                string_lengths: Some(&third_lengths),
-            },
-            StreamInput {
-                bytes: b"kLMN",
-                element_width: 1,
-                string_lengths: Some(&fourth_lengths),
-            },
-            StreamInput {
-                bytes: b"\n,,;\n,,;\n",
-                element_width: 1,
-                string_lengths: Some(&delimiter_lengths),
-            },
-            StreamInput {
-                bytes: b"ABCDEFG",
-                element_width: 1,
-                string_lengths: Some(&header_lengths),
-            },
+            index_input(&indices),
+            string_input(b"aaBB", &[2, 2]),
+            string_input(b"xYZ", &[1, 2]),
+            string_input(b"12q", &[2, 1]),
+            string_input(b"kLMN", &[1, 3]),
+            string_input(b"\n,,;\n,,;\n", &delimiter_lengths),
+            string_input(b"ABCDEFG", &header_lengths),
         ],
         6,
-        &[],
-        21,
-        Limits::default(),
-        &mut output,
-    )
-    .unwrap();
+    );
 
     assert_eq!(output, b"preABCDEFG\naa,x,12;k\nBB,YZ,q;LMN\n");
 }
 
 #[test]
 fn decodes_dispatch_string_csv_wide_header_pattern_to_serial_output() {
-    let header_pattern = [7u16; 11]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let row_pattern = [6u16, 0, 6, 1, 6, 2, 6, 3, 6, 4, 6, 5]
-        .into_iter()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let trailing_delimiter = 6u16.to_le_bytes();
-    let indices = [
-        header_pattern.as_slice(),
-        row_pattern.as_slice(),
-        row_pattern.as_slice(),
-        trailing_delimiter.as_slice(),
-    ]
-    .concat();
+    let row_pattern = [6u16, 0, 6, 1, 6, 2, 6, 3, 6, 4, 6, 5];
+    let indices = le_u16_stream(&[&[7; 11], &row_pattern, &row_pattern, &[6]]);
     let field_lengths = [[1, 2], [2, 1], [1, 1], [3, 1], [1, 2], [2, 3]];
     let delimiter_lengths = [1; 13];
     let header_lengths = [1; 11];
-    let mut output = b"pre".to_vec();
 
-    decode_dispatch_string_node_to_serial_output(
+    let output = dispatch_strings_to_serial(
         &[
-            StreamInput {
-                bytes: &indices,
-                element_width: 2,
-                string_lengths: None,
-            },
-            StreamInput {
-                bytes: b"aAA",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[0]),
-            },
-            StreamInput {
-                bytes: b"bbB",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[1]),
-            },
-            StreamInput {
-                bytes: b"cd",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[2]),
-            },
-            StreamInput {
-                bytes: b"eeeF",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[3]),
-            },
-            StreamInput {
-                bytes: b"gHH",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[4]),
-            },
-            StreamInput {
-                bytes: b"ijKLM",
-                element_width: 1,
-                string_lengths: Some(&field_lengths[5]),
-            },
-            StreamInput {
-                bytes: b"\n,,,,,\n,,,,,\n",
-                element_width: 1,
-                string_lengths: Some(&delimiter_lengths),
-            },
-            StreamInput {
-                bytes: b"A,B,C,D,E,F",
-                element_width: 1,
-                string_lengths: Some(&header_lengths),
-            },
+            index_input(&indices),
+            string_input(b"aAA", &field_lengths[0]),
+            string_input(b"bbB", &field_lengths[1]),
+            string_input(b"cd", &field_lengths[2]),
+            string_input(b"eeeF", &field_lengths[3]),
+            string_input(b"gHH", &field_lengths[4]),
+            string_input(b"ijKLM", &field_lengths[5]),
+            string_input(b"\n,,,,,\n,,,,,\n", &delimiter_lengths),
+            string_input(b"A,B,C,D,E,F", &header_lengths),
         ],
         8,
-        &[],
-        21,
-        Limits::default(),
-        &mut output,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
         output,
@@ -381,15 +273,12 @@ fn decodes_dispatch_string_pums_style_wide_header_pattern_to_serial_output() {
     let header_source = DATA_SOURCES + 1;
     let header_fields = sources * 2 - 1;
 
-    let mut indices = Vec::new();
-    for _ in 0..header_fields {
-        indices.extend_from_slice(&header_source.to_le_bytes());
-    }
+    let mut index_values = vec![header_source; header_fields];
     for source in 0..DATA_SOURCES {
-        indices.extend_from_slice(&delimiter_source.to_le_bytes());
-        indices.extend_from_slice(&source.to_le_bytes());
+        index_values.extend([delimiter_source, source]);
     }
-    indices.extend_from_slice(&delimiter_source.to_le_bytes());
+    index_values.push(delimiter_source);
+    let indices = le_u16_stream(&[&index_values]);
 
     let field_lengths = vec![[2u32]; sources];
     let field_bytes = (0..sources)
@@ -408,29 +297,12 @@ fn decodes_dispatch_string_pums_style_wide_header_pattern_to_serial_output() {
         .map(|field| b'A' + u8::try_from(field % 26).unwrap())
         .collect::<Vec<_>>();
 
-    let mut inputs = Vec::with_capacity(sources + 3);
-    inputs.push(StreamInput {
-        bytes: &indices,
-        element_width: 2,
-        string_lengths: None,
-    });
-    for source in 0..sources {
-        inputs.push(StreamInput {
-            bytes: &field_bytes[source],
-            element_width: 1,
-            string_lengths: Some(&field_lengths[source]),
-        });
+    let mut inputs = vec![index_input(&indices)];
+    for (bytes, lengths) in field_bytes.iter().zip(&field_lengths) {
+        inputs.push(string_input(bytes, lengths));
     }
-    inputs.push(StreamInput {
-        bytes: &delimiter_bytes,
-        element_width: 1,
-        string_lengths: Some(&delimiter_lengths),
-    });
-    inputs.push(StreamInput {
-        bytes: &header_bytes,
-        element_width: 1,
-        string_lengths: Some(&header_lengths),
-    });
+    inputs.push(string_input(&delimiter_bytes, &delimiter_lengths));
+    inputs.push(string_input(&header_bytes, &header_lengths));
 
     let mut expected = b"pre".to_vec();
     expected.extend_from_slice(&header_bytes);
@@ -443,18 +315,52 @@ fn decodes_dispatch_string_pums_style_wide_header_pattern_to_serial_output() {
     }
     expected.push(b'\n');
 
+    let output = dispatch_strings_to_serial(&inputs, u32::from(DATA_SOURCES) + 2);
+
+    assert_eq!(output, expected);
+}
+
+/// Concatenates `u16` values from all parts as little-endian bytes.
+fn le_u16_stream(parts: &[&[u16]]) -> Vec<u8> {
+    parts
+        .iter()
+        .flat_map(|part| part.iter())
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// Builds a dispatch index input with `u16` elements.
+fn index_input(bytes: &[u8]) -> StreamInput<'_> {
+    StreamInput {
+        bytes,
+        element_width: 2,
+        string_lengths: None,
+    }
+}
+
+/// Builds a string input with one-byte elements.
+fn string_input<'a>(bytes: &'a [u8], string_lengths: &'a [u32]) -> StreamInput<'a> {
+    StreamInput {
+        bytes,
+        element_width: 1,
+        string_lengths: Some(string_lengths),
+    }
+}
+
+/// Runs the v21 dispatch string node into a serial output that starts with
+/// `pre` and returns that output.
+fn dispatch_strings_to_serial(inputs: &[StreamInput<'_>], variable_inputs: u32) -> Vec<u8> {
     let mut output = b"pre".to_vec();
     decode_dispatch_string_node_to_serial_output(
-        &inputs,
-        u32::from(DATA_SOURCES) + 2,
+        inputs,
+        variable_inputs,
         &[],
         21,
         Limits::default(),
         &mut output,
     )
     .unwrap();
-
-    assert_eq!(output, expected);
+    output
 }
 
 #[test]

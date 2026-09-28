@@ -80,54 +80,65 @@ fn standard_graph_serial_frame_with_distances(
         &mut input,
         u64::try_from(logical_stored_streams.len()).unwrap(),
     );
-    push_bitpacked_u32(&mut input, &vec![0; nodes.len()], 1);
+    push_graph_nodes(&mut input, version, nodes);
+    let regenerated = nodes.iter().map(|node| node.outputs).sum::<usize>();
+    assert_eq!(regen_distances.len(), regenerated);
+    let distance_bits = bits_needed(regenerated + logical_stored_streams.len());
+    push_bitpacked_u32(&mut input, regen_distances, distance_bits);
+    push_graph_payloads(&mut input, nodes, logical_stored_streams);
+    input
+}
+
+/// Writes the per-node graph fields: transform types (all standard), transform
+/// ids, header sizes, variable input counts and output counts.
+fn push_graph_nodes(input: &mut Vec<u8>, version: u32, nodes: &[StandardGraphNode<'_>]) {
+    push_bitpacked_u32(input, &vec![0; nodes.len()], 1);
     push_bitpacked_u32(
-        &mut input,
+        input,
         &nodes
             .iter()
             .map(|node| node.transform_id)
             .collect::<Vec<_>>(),
         if version < 24 { 6 } else { 7 },
     );
-    push_bitpacked_u32(
-        &mut input,
-        &nodes
-            .iter()
-            .map(|node| u32::from(!node.header.is_empty()))
-            .collect::<Vec<_>>(),
-        1,
-    );
-    for node in nodes.iter().filter(|node| !node.header.is_empty()) {
-        push_var_u64(&mut input, u64::try_from(node.header.len() - 1).unwrap());
+    push_optional_node_values(input, nodes, |node| {
+        (!node.header.is_empty()).then(|| u64::try_from(node.header.len() - 1).unwrap())
+    });
+    push_optional_node_values(input, nodes, |node| {
+        (node.variable_inputs != 0).then(|| u64::from(node.variable_inputs - 1))
+    });
+    push_optional_node_values(input, nodes, |node| {
+        (node.outputs != 1).then(|| u64::try_from(node.outputs - 2).unwrap())
+    });
+}
+
+/// Writes one presence bit per node, then a varint for each node that has a
+/// value.
+fn push_optional_node_values(
+    input: &mut Vec<u8>,
+    nodes: &[StandardGraphNode<'_>],
+    value: impl Fn(&StandardGraphNode<'_>) -> Option<u64>,
+) {
+    let values = nodes.iter().map(value).collect::<Vec<_>>();
+    let present = values
+        .iter()
+        .map(|value| u32::from(value.is_some()))
+        .collect::<Vec<_>>();
+    push_bitpacked_u32(input, &present, 1);
+    for value in values.into_iter().flatten() {
+        push_var_u64(input, value);
     }
-    push_bitpacked_u32(
-        &mut input,
-        &nodes
-            .iter()
-            .map(|node| u32::from(node.variable_inputs != 0))
-            .collect::<Vec<_>>(),
-        1,
-    );
-    for node in nodes.iter().filter(|node| node.variable_inputs != 0) {
-        push_var_u64(&mut input, u64::from(node.variable_inputs - 1));
-    }
-    push_bitpacked_u32(
-        &mut input,
-        &nodes
-            .iter()
-            .map(|node| u32::from(node.outputs != 1))
-            .collect::<Vec<_>>(),
-        1,
-    );
-    for node in nodes.iter().filter(|node| node.outputs != 1) {
-        push_var_u64(&mut input, u64::try_from(node.outputs - 2).unwrap());
-    }
-    let regenerated = nodes.iter().map(|node| node.outputs).sum::<usize>();
-    assert_eq!(regen_distances.len(), regenerated);
-    let distance_bits = bits_needed(regenerated + logical_stored_streams.len());
-    push_bitpacked_u32(&mut input, regen_distances, distance_bits);
+}
+
+/// Writes the stored stream sizes, the node headers, the stored stream bytes
+/// and the end marker. Stored streams go in reverse logical order.
+fn push_graph_payloads(
+    input: &mut Vec<u8>,
+    nodes: &[StandardGraphNode<'_>],
+    logical_stored_streams: &[&[u8]],
+) {
     for stream in logical_stored_streams.iter().rev() {
-        push_var_u64(&mut input, u64::try_from(stream.len()).unwrap());
+        push_var_u64(input, u64::try_from(stream.len()).unwrap());
     }
     for node in nodes {
         input.extend_from_slice(node.header);
@@ -136,7 +147,6 @@ fn standard_graph_serial_frame_with_distances(
         input.extend_from_slice(stream);
     }
     input.push(0);
-    input
 }
 
 fn legacy_entropy_raw_payload(payload: &[u8], element_width: usize) -> Vec<u8> {

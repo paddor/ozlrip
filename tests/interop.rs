@@ -255,174 +255,132 @@ struct FeatureCompatibilityRow<'a> {
 }
 
 fn supported_interop_cases() -> Vec<InteropCase> {
+    [
+        byte_interop_cases(),
+        csv_interop_cases(),
+        integer_interop_cases(),
+        sao_interop_cases(),
+        text_and_chunked_interop_cases(),
+        parquet_and_sddl2_interop_cases(),
+        getting_started_csv_interop_cases(),
+        ml_selector_interop_cases(),
+        zstd_interop_cases(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Serial and `u8` cases over small inline inputs and upstream samples.
+fn byte_interop_cases() -> Vec<InteropCase> {
     vec![
-        InteropCase {
-            name: "serial-small",
-            input: InteropInput::Inline(b"openzl interop serial fixture\n".to_vec()),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-serial-quick-brown-fox",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/quick_brown_fox.txt"),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-serial-binary",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/binary_sample.bin"),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "u8-ramp",
-            input: InteropInput::Inline((0..=31).collect()),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-u8-random",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/random_u8.bin"),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-u8-sequential",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/sequential_u8.bin"),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-u8-repeated",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u8/repeated_u8.bin"),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-csv-experiments",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_experiments.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-csv-timeseries",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/input_timeseries.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-csv-output-neighbors",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/output_neighbors.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-tbl-supplier",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/tbl/supplier_trunc.tbl"),
-            profile: "csv",
-            profile_arg: Some("|"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "i8-signed",
-            input: InteropInput::Inline(
-                [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
-                    .into_iter()
-                    .map(i8::cast_unsigned)
-                    .collect(),
-            ),
-            profile: "i8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-u16-ramp",
-            input: InteropInput::Inline(le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX])),
-            profile: "le-u16",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-i16-signed",
-            input: InteropInput::Inline(le_bytes([0i16, -1, 1, i16::MIN, i16::MAX, -1024, 1024])),
-            profile: "le-i16",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-u16-zigzag",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/u16/zigzag_1000.bin"),
-            profile: "le-u16",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-u32-ramp",
-            input: InteropInput::Inline(le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX])),
-            profile: "le-u32",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-i32-signed",
-            input: InteropInput::Inline(le_bytes([
-                0i32,
-                -1,
-                1,
-                i32::MIN,
-                i32::MAX,
-                -65_536,
-                65_536,
-            ])),
-            profile: "le-i32",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-u64-ramp",
-            input: InteropInput::Inline(le_bytes([
-                0u64,
-                1,
-                255,
-                65_536,
-                u64::from(u32::MAX),
-                u64::MAX,
-            ])),
-            profile: "le-u64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-i64-signed",
-            input: InteropInput::Inline(le_bytes([
+        InteropCase::inline(
+            "serial-small",
+            "serial",
+            b"openzl interop serial fixture\n".to_vec(),
+        ),
+        InteropCase::upstream(
+            "upstream-serial-quick-brown-fox",
+            "serial",
+            "cli/tests/sample_files/serial/quick_brown_fox.txt",
+        ),
+        InteropCase::upstream(
+            "upstream-serial-binary",
+            "serial",
+            "cli/tests/sample_files/serial/binary_sample.bin",
+        ),
+        InteropCase::inline("u8-ramp", "u8", (0..=31).collect()),
+        InteropCase::upstream(
+            "upstream-u8-random",
+            "u8",
+            "cli/tests/sample_files/u8/random_u8.bin",
+        ),
+        InteropCase::upstream(
+            "upstream-u8-sequential",
+            "u8",
+            "cli/tests/sample_files/u8/sequential_u8.bin",
+        ),
+        InteropCase::upstream(
+            "upstream-u8-repeated",
+            "u8",
+            "cli/tests/sample_files/u8/repeated_u8.bin",
+        ),
+    ]
+}
+
+/// CSV profile cases over upstream CSV and TBL samples.
+fn csv_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase::upstream(
+            "upstream-csv-experiments",
+            "csv",
+            "cli/tests/sample_files/csv/input_experiments.csv",
+        ),
+        InteropCase::upstream(
+            "upstream-csv-timeseries",
+            "csv",
+            "cli/tests/sample_files/csv/input_timeseries.csv",
+        )
+        .args(&["--chunk-size", "1M"]),
+        InteropCase::upstream(
+            "upstream-csv-output-neighbors",
+            "csv",
+            "cli/tests/sample_files/csv/output_neighbors.csv",
+        ),
+        InteropCase::upstream(
+            "upstream-tbl-supplier",
+            "csv",
+            "cli/tests/sample_files/tbl/supplier_trunc.tbl",
+        )
+        .profile_arg("|"),
+    ]
+}
+
+/// Fixed-width integer profile cases.
+fn integer_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase::inline(
+            "i8-signed",
+            "i8",
+            [0i8, -1, 1, -2, 2, 63, -64, 100, -100]
+                .into_iter()
+                .map(i8::cast_unsigned)
+                .collect(),
+        ),
+        InteropCase::inline(
+            "le-u16-ramp",
+            "le-u16",
+            le_bytes([0u16, 1, 2, 255, 256, 1024, u16::MAX]),
+        ),
+        InteropCase::inline(
+            "le-i16-signed",
+            "le-i16",
+            le_bytes([0i16, -1, 1, i16::MIN, i16::MAX, -1024, 1024]),
+        ),
+        InteropCase::upstream(
+            "upstream-u16-zigzag",
+            "le-u16",
+            "cli/tests/sample_files/u16/zigzag_1000.bin",
+        ),
+        InteropCase::inline(
+            "le-u32-ramp",
+            "le-u32",
+            le_bytes([0u32, 1, 255, 256, 65_535, 65_536, u32::MAX]),
+        ),
+        InteropCase::inline(
+            "le-i32-signed",
+            "le-i32",
+            le_bytes([0i32, -1, 1, i32::MIN, i32::MAX, -65_536, 65_536]),
+        ),
+        InteropCase::inline(
+            "le-u64-ramp",
+            "le-u64",
+            le_bytes([0u64, 1, 255, 65_536, u64::from(u32::MAX), u64::MAX]),
+        ),
+        InteropCase::inline(
+            "le-i64-signed",
+            "le-i64",
+            le_bytes([
                 0i64,
                 -1,
                 1,
@@ -430,375 +388,248 @@ fn supported_interop_cases() -> Vec<InteropCase> {
                 i64::MAX,
                 -4_294_967_296,
                 4_294_967_296,
-            ])),
-            profile: "le-i64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-synthetic",
-            input: InteropInput::Inline(sao_synthetic()),
-            profile: "sao",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-sddl2-synthetic",
-            input: InteropInput::Inline(sao_synthetic()),
-            profile: "sddl2",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-full-sddl2-synthetic",
-            input: InteropInput::Inline(sao_full_synthetic()),
-            profile: "sddl2",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_full.sddl"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-sddl1-synthetic",
-            input: InteropInput::Inline(sao_synthetic()),
-            profile: "sddl",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-full-sddl1-synthetic",
-            input: InteropInput::Inline(sao_full_synthetic()),
-            profile: "sddl",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl"),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-sddl1-synthetic-forced-graph",
-            input: InteropInput::Inline(sao_synthetic()),
-            profile: "sddl",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl"),
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "sao-full-sddl1-synthetic-forced-graph",
-            input: InteropInput::Inline(sao_full_synthetic()),
-            profile: "sddl",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl"),
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-serial-repeated-string",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/serial/repeated_string.txt"),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ace-newlines-serial",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ace/newlines.txt"),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "serial-pivco-words-1m",
-            input: InteropInput::Inline(random_words(1 << 20)),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "serial-chunked-2m",
-            input: InteropInput::Inline(sequential_bytes(2_000_000)),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            relaxed_limits: true,
-        },
-        InteropCase {
-            name: "u8-chunked-2m",
-            input: InteropInput::Inline(sequential_bytes(2_000_000)),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &["--chunk-size", "1M"],
-            relaxed_limits: true,
-        },
-        InteropCase {
-            name: "getting-started-era5-i32",
-            input: InteropInput::UpstreamFile(
-                "examples/getting_started/sample_inputs/era5_ints.bin",
-            ),
-            profile: "le-i32",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: true,
-        },
-        InteropCase {
-            name: "getting-started-lorem-ipsum",
-            input: InteropInput::UpstreamFile(
-                "examples/getting_started/sample_inputs/lorem_ipsum.txt",
-            ),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-parquet-simple",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/parquet/simple.parquet"),
-            profile: "parquet",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: true,
-        },
-        InteropCase {
-            name: "upstream-parquet-nested",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/parquet/nested.parquet"),
-            profile: "parquet",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: true,
-        },
-        InteropCase {
-            name: "upstream-sddl2-sample-0",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_0.bin"),
-            profile: "sddl2",
-            profile_arg: Some(
-                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
-            ),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-sddl2-sample-1",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_1.bin"),
-            profile: "sddl2",
-            profile_arg: Some(
-                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
-            ),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-sddl2-sample-2",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_2.bin"),
-            profile: "sddl2",
-            profile_arg: Some(
-                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
-            ),
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-sddl2-sample-2-forced-graph",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/sddl2/sample_2.bin"),
-            profile: "sddl2",
-            profile_arg: Some(
-                "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl",
-            ),
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-sddl2-asm-sao-silesia-forced-graph",
-            input: InteropInput::UpstreamFile("examples/sddl2_asm/sao_silesia.bin"),
-            profile: "sddl2",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "getting-started-csv-0001",
-            input: InteropInput::UpstreamFile(
+            ]),
+        ),
+    ]
+}
+
+/// SAO profile and SDDL cases over synthetic SAO records.
+fn sao_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase::inline("sao-synthetic", "sao", sao_synthetic()),
+        InteropCase::inline("sao-sddl2-synthetic", "sddl2", sao_synthetic())
+            .profile_arg("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
+        InteropCase::inline("sao-full-sddl2-synthetic", "sddl2", sao_full_synthetic())
+            .profile_arg("tmp/openzl-upstream/examples/sddl2/sao_full.sddl"),
+        InteropCase::inline("sao-sddl1-synthetic", "sddl", sao_synthetic())
+            .profile_arg("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl"),
+        InteropCase::inline("sao-full-sddl1-synthetic", "sddl", sao_full_synthetic())
+            .profile_arg("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl"),
+        InteropCase::inline("sao-sddl1-synthetic-forced-graph", "sddl", sao_synthetic())
+            .profile_arg("tmp/openzl-upstream/examples/sddl/sao_silesia.oldv1.sddl")
+            .args(&["--no-store-on-expansion"]),
+        InteropCase::inline(
+            "sao-full-sddl1-synthetic-forced-graph",
+            "sddl",
+            sao_full_synthetic(),
+        )
+        .profile_arg("tmp/openzl-upstream/examples/sddl/sao_full.oldv1.sddl")
+        .args(&["--no-store-on-expansion"]),
+    ]
+}
+
+/// Text inputs, large literal sections, and multi-chunk frames.
+fn text_and_chunked_interop_cases() -> Vec<InteropCase> {
+    vec![
+        InteropCase::upstream(
+            "upstream-serial-repeated-string",
+            "serial",
+            "cli/tests/sample_files/serial/repeated_string.txt",
+        ),
+        InteropCase::upstream(
+            "upstream-ace-newlines-serial",
+            "serial",
+            "cli/tests/sample_files/ace/newlines.txt",
+        ),
+        InteropCase::inline("serial-pivco-words-1m", "serial", random_words(1 << 20)),
+        InteropCase::inline("serial-chunked-2m", "serial", sequential_bytes(2_000_000))
+            .args(&["--chunk-size", "1M"])
+            .relaxed(),
+        InteropCase::inline("u8-chunked-2m", "u8", sequential_bytes(2_000_000))
+            .args(&["--chunk-size", "1M"])
+            .relaxed(),
+        InteropCase::upstream(
+            "getting-started-era5-i32",
+            "le-i32",
+            "examples/getting_started/sample_inputs/era5_ints.bin",
+        )
+        .relaxed(),
+        InteropCase::upstream(
+            "getting-started-lorem-ipsum",
+            "serial",
+            "examples/getting_started/sample_inputs/lorem_ipsum.txt",
+        ),
+    ]
+}
+
+/// Parquet profile cases and SDDL2 cases over upstream samples.
+fn parquet_and_sddl2_interop_cases() -> Vec<InteropCase> {
+    const SIMPLE_DESCRIPTION: &str =
+        "tmp/openzl-upstream/cli/tests/profile_files/sddl2/simple_description.sddl";
+    vec![
+        InteropCase::upstream(
+            "upstream-parquet-simple",
+            "parquet",
+            "cli/tests/sample_files/parquet/simple.parquet",
+        )
+        .relaxed(),
+        InteropCase::upstream(
+            "upstream-parquet-nested",
+            "parquet",
+            "cli/tests/sample_files/parquet/nested.parquet",
+        )
+        .relaxed(),
+        InteropCase::upstream(
+            "upstream-sddl2-sample-0",
+            "sddl2",
+            "cli/tests/sample_files/sddl2/sample_0.bin",
+        )
+        .profile_arg(SIMPLE_DESCRIPTION),
+        InteropCase::upstream(
+            "upstream-sddl2-sample-1",
+            "sddl2",
+            "cli/tests/sample_files/sddl2/sample_1.bin",
+        )
+        .profile_arg(SIMPLE_DESCRIPTION),
+        InteropCase::upstream(
+            "upstream-sddl2-sample-2",
+            "sddl2",
+            "cli/tests/sample_files/sddl2/sample_2.bin",
+        )
+        .profile_arg(SIMPLE_DESCRIPTION),
+        InteropCase::upstream(
+            "upstream-sddl2-sample-2-forced-graph",
+            "sddl2",
+            "cli/tests/sample_files/sddl2/sample_2.bin",
+        )
+        .profile_arg(SIMPLE_DESCRIPTION)
+        .args(&["--no-store-on-expansion"]),
+        InteropCase::upstream(
+            "upstream-sddl2-asm-sao-silesia-forced-graph",
+            "sddl2",
+            "examples/sddl2_asm/sao_silesia.bin",
+        )
+        .profile_arg("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl")
+        .args(&["--no-store-on-expansion"]),
+    ]
+}
+
+/// CSV profile cases over the getting-started CSV samples.
+fn getting_started_csv_interop_cases() -> Vec<InteropCase> {
+    upstream_cases(
+        "csv",
+        &[
+            (
+                "getting-started-csv-0001",
                 "examples/getting_started/sample_inputs/csv_samples/0001.csv",
             ),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "getting-started-csv-0002",
-            input: InteropInput::UpstreamFile(
+            (
+                "getting-started-csv-0002",
                 "examples/getting_started/sample_inputs/csv_samples/0002.csv",
             ),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "getting-started-csv-0003",
-            input: InteropInput::UpstreamFile(
+            (
+                "getting-started-csv-0003",
                 "examples/getting_started/sample_inputs/csv_samples/0003.csv",
             ),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ml-selector-64-0",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ml_selector/ml_sel_num_64_0"),
-            profile: "numeric-ml-selector-64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ml-selector-64-1",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ml_selector/ml_sel_num_64_1"),
-            profile: "numeric-ml-selector-64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ml-selector-64-2",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ml_selector/ml_sel_num_64_2"),
-            profile: "numeric-ml-selector-64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ml-selector-64-3",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ml_selector/ml_sel_num_64_3"),
-            profile: "numeric-ml-selector-64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-ml-selector-64-4",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/ml_selector/ml_sel_num_64_4"),
-            profile: "numeric-ml-selector-64",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-0",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/0.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-1",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/1.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-2",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/2.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-3",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/3.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-4",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/4.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-5",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/5.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-6",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/6.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-7",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/7.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-8",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/8.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "upstream-zstd-profile-9",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/zstd_dict/9.txt"),
-            profile: "zstd",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-    ]
+        ],
+    )
+}
+
+/// Numeric ML selector profile cases over upstream samples.
+fn ml_selector_interop_cases() -> Vec<InteropCase> {
+    upstream_cases(
+        "numeric-ml-selector-64",
+        &[
+            (
+                "upstream-ml-selector-64-0",
+                "cli/tests/sample_files/ml_selector/ml_sel_num_64_0",
+            ),
+            (
+                "upstream-ml-selector-64-1",
+                "cli/tests/sample_files/ml_selector/ml_sel_num_64_1",
+            ),
+            (
+                "upstream-ml-selector-64-2",
+                "cli/tests/sample_files/ml_selector/ml_sel_num_64_2",
+            ),
+            (
+                "upstream-ml-selector-64-3",
+                "cli/tests/sample_files/ml_selector/ml_sel_num_64_3",
+            ),
+            (
+                "upstream-ml-selector-64-4",
+                "cli/tests/sample_files/ml_selector/ml_sel_num_64_4",
+            ),
+        ],
+    )
+}
+
+/// Zstd profile cases over the upstream zstd dictionary samples.
+fn zstd_interop_cases() -> Vec<InteropCase> {
+    upstream_cases(
+        "zstd",
+        &[
+            (
+                "upstream-zstd-profile-0",
+                "cli/tests/sample_files/zstd_dict/0.txt",
+            ),
+            (
+                "upstream-zstd-profile-1",
+                "cli/tests/sample_files/zstd_dict/1.txt",
+            ),
+            (
+                "upstream-zstd-profile-2",
+                "cli/tests/sample_files/zstd_dict/2.txt",
+            ),
+            (
+                "upstream-zstd-profile-3",
+                "cli/tests/sample_files/zstd_dict/3.txt",
+            ),
+            (
+                "upstream-zstd-profile-4",
+                "cli/tests/sample_files/zstd_dict/4.txt",
+            ),
+            (
+                "upstream-zstd-profile-5",
+                "cli/tests/sample_files/zstd_dict/5.txt",
+            ),
+            (
+                "upstream-zstd-profile-6",
+                "cli/tests/sample_files/zstd_dict/6.txt",
+            ),
+            (
+                "upstream-zstd-profile-7",
+                "cli/tests/sample_files/zstd_dict/7.txt",
+            ),
+            (
+                "upstream-zstd-profile-8",
+                "cli/tests/sample_files/zstd_dict/8.txt",
+            ),
+            (
+                "upstream-zstd-profile-9",
+                "cli/tests/sample_files/zstd_dict/9.txt",
+            ),
+        ],
+    )
+}
+
+/// Builds one upstream sample case per `(name, path)` pair, all with the same
+/// profile and default arguments.
+fn upstream_cases(
+    profile: &'static str,
+    samples: &[(&'static str, &'static str)],
+) -> Vec<InteropCase> {
+    samples
+        .iter()
+        .map(|&(name, path)| InteropCase::upstream(name, profile, path))
+        .collect()
 }
 
 fn release_smoke_interop_cases() -> Vec<InteropCase> {
     vec![
-        InteropCase {
-            name: "serial-small",
-            input: InteropInput::Inline(b"openzl release smoke serial fixture\n".to_vec()),
-            profile: "serial",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "u8-small",
-            input: InteropInput::Inline((0..=63).collect()),
-            profile: "u8",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "le-u32-small",
-            input: InteropInput::Inline(
-                (0u32..64)
-                    .flat_map(|value| (value * 7 + 3).to_le_bytes())
-                    .collect(),
-            ),
-            profile: "le-u32",
-            profile_arg: None,
-            extra_args: &[],
-            relaxed_limits: false,
-        },
+        InteropCase::inline(
+            "serial-small",
+            "serial",
+            b"openzl release smoke serial fixture\n".to_vec(),
+        ),
+        InteropCase::inline("u8-small", "u8", (0..=63).collect()),
+        InteropCase::inline(
+            "le-u32-small",
+            "le-u32",
+            (0u32..64)
+                .flat_map(|value| (value * 7 + 3).to_le_bytes())
+                .collect(),
+        ),
     ]
 }
 
@@ -817,32 +648,25 @@ fn zli_profiles(zli: &Path) -> Vec<String> {
 
 fn discovery_interop_cases() -> Vec<InteropCase> {
     vec![
-        InteropCase {
-            name: "discovery-csv-output-neighbors",
-            input: InteropInput::UpstreamFile("cli/tests/sample_files/csv/output_neighbors.csv"),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "discovery-sddl2-asm-sao-silesia",
-            input: InteropInput::UpstreamFile("examples/sddl2_asm/sao_silesia.bin"),
-            profile: "sddl2",
-            profile_arg: Some("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl"),
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
-        InteropCase {
-            name: "discovery-csv-pums-0001",
-            input: InteropInput::UpstreamFile(
-                "examples/getting_started/sample_inputs/csv_samples/0001.csv",
-            ),
-            profile: "csv",
-            profile_arg: None,
-            extra_args: &["--no-store-on-expansion"],
-            relaxed_limits: false,
-        },
+        InteropCase::upstream(
+            "discovery-csv-output-neighbors",
+            "csv",
+            "cli/tests/sample_files/csv/output_neighbors.csv",
+        )
+        .args(&["--no-store-on-expansion"]),
+        InteropCase::upstream(
+            "discovery-sddl2-asm-sao-silesia",
+            "sddl2",
+            "examples/sddl2_asm/sao_silesia.bin",
+        )
+        .profile_arg("tmp/openzl-upstream/examples/sddl2/sao_silesia.sddl")
+        .args(&["--no-store-on-expansion"]),
+        InteropCase::upstream(
+            "discovery-csv-pums-0001",
+            "csv",
+            "examples/getting_started/sample_inputs/csv_samples/0001.csv",
+        )
+        .args(&["--no-store-on-expansion"]),
     ]
 }
 
@@ -977,6 +801,48 @@ struct InteropCase {
 }
 
 impl InteropCase {
+    /// Builds a case that compresses inline bytes with default arguments.
+    fn inline(name: &'static str, profile: &'static str, bytes: Vec<u8>) -> Self {
+        Self::new(name, profile, InteropInput::Inline(bytes))
+    }
+
+    /// Builds a case that compresses an upstream sample file with default
+    /// arguments. The path is relative to the upstream checkout.
+    fn upstream(name: &'static str, profile: &'static str, path: &'static str) -> Self {
+        Self::new(name, profile, InteropInput::UpstreamFile(path))
+    }
+
+    /// Builds a case with no profile argument, no extra arguments, and default
+    /// limits.
+    fn new(name: &'static str, profile: &'static str, input: InteropInput) -> Self {
+        Self {
+            name,
+            input,
+            profile,
+            profile_arg: None,
+            extra_args: &[],
+            relaxed_limits: false,
+        }
+    }
+
+    /// Sets the `--profile-arg` value.
+    fn profile_arg(mut self, profile_arg: &'static str) -> Self {
+        self.profile_arg = Some(profile_arg);
+        self
+    }
+
+    /// Sets extra arguments for `zli compress`.
+    fn args(mut self, extra_args: &'static [&'static str]) -> Self {
+        self.extra_args = extra_args;
+        self
+    }
+
+    /// Decodes with relaxed limits for large outputs.
+    fn relaxed(mut self) -> Self {
+        self.relaxed_limits = true;
+        self
+    }
+
     fn limits(&self) -> ozlrip::Limits {
         if self.relaxed_limits {
             {

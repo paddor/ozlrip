@@ -1,5 +1,4 @@
 use super::*;
-use alloc::vec;
 use ozlrip_test_support::{Chunk, FrameBuilder, OutputType};
 use ozlrip_test_support::{magic, push_bitpacked_u32, push_var_u64};
 
@@ -786,92 +785,116 @@ fn rejects_dict_index_bit_width_above_bundle_limit_encoding() {
 
 #[test]
 fn rejects_committed_section_truncations_in_representative_frames() {
-    let stored = {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(21));
-        input.push(0);
-        input.push(1);
-        input.push(4);
-        input.push(1);
-        input.push(1);
-        input.push(3);
-        input.extend_from_slice(&[1, 2, 3]);
-        input.push(0);
-        input
-    };
-    let transform = {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(21));
-        input.push(0);
-        input.push(1);
-        input.push(4);
-        input.push(2);
-        input.push(1);
-        input.push(0);
-        input.push(22);
-        input.push(0);
-        input.push(0);
-        input.push(0);
-        input.push(0);
-        input.push(3);
-        input.extend_from_slice(&[1, 2, 3]);
-        input.push(0);
-        input
-    };
-    let comment = {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(22));
-        input.push(1 << 2);
-        input.push(1);
-        input.push(4);
-        input.push(3);
-        input.extend_from_slice(b"abc");
-        input.push(0);
-        input
-    };
-    let bundle = {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(25));
-        input.push(1 << 3);
-        input.push(2);
-        input.extend_from_slice(&[1, 2]);
-        input.push(1);
-        input.push(4);
-        input.push(0);
-        input
-    };
-    let mut frames = vec![(stored, 8), (transform, 8)];
-    {
-        let mut input = Vec::new();
-        input.extend_from_slice(&magic(21));
-        input.push(1 << 1);
-        input.push(1);
-        input.push(4);
-        let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
-        input.push(header_checksum);
-        input.push(1);
-        input.push(1);
-        input.push(3);
-        input.extend_from_slice(&[1, 2, 3]);
-        let checksum_start = 8;
-        let checksum = (xxhash_rust::xxh3::xxh3_64(&input[checksum_start..]) & 0xffff_ffff) as u32;
-        input.extend_from_slice(&checksum.to_le_bytes());
-        input.push(0);
-        frames.push((input, 9));
-    }
+    let frames = [
+        (truncation_stored_frame(), 8),
+        (truncation_transform_frame(), 8),
+        (truncation_checksummed_frame(), 9),
+    ];
 
     for (input, first_truncated_len) in frames {
         inspect_frame(&input, Limits::default(), true).unwrap();
         assert_truncations_fail(&input, first_truncated_len);
     }
+}
+
+#[test]
+fn rejects_truncated_comment_section() {
+    let comment = truncation_comment_frame();
 
     inspect_frame(&comment, Limits::default(), true).unwrap();
     let err = inspect_frame(&comment[..comment.len() - 1], Limits::default(), true).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Truncated);
+}
+
+#[test]
+fn rejects_truncated_bundle_section() {
+    let bundle = truncation_bundle_frame();
 
     inspect_frame(&bundle, Limits::default(), true).unwrap();
     let err = inspect_frame(&bundle[..bundle.len() - 1], Limits::default(), true).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Truncated);
+}
+
+/// A v21 frame with one stored serial stream.
+fn truncation_stored_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(4);
+    input.push(1);
+    input.push(1);
+    input.push(3);
+    input.extend_from_slice(&[1, 2, 3]);
+    input.push(0);
+    input
+}
+
+/// A v21 frame with one transform over a stored stream.
+fn truncation_transform_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(0);
+    input.push(1);
+    input.push(4);
+    input.push(2);
+    input.push(1);
+    input.push(0);
+    input.push(22);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(0);
+    input.push(3);
+    input.extend_from_slice(&[1, 2, 3]);
+    input.push(0);
+    input
+}
+
+/// A v22 frame with a comment section.
+fn truncation_comment_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(22));
+    input.push(1 << 2);
+    input.push(1);
+    input.push(4);
+    input.push(3);
+    input.extend_from_slice(b"abc");
+    input.push(0);
+    input
+}
+
+/// A v25 frame with a dictionary bundle section.
+fn truncation_bundle_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(25));
+    input.push(1 << 3);
+    input.push(2);
+    input.extend_from_slice(&[1, 2]);
+    input.push(1);
+    input.push(4);
+    input.push(0);
+    input
+}
+
+/// A v21 frame with header and compressed checksums over one stored stream.
+fn truncation_checksummed_frame() -> Vec<u8> {
+    let mut input = Vec::new();
+    input.extend_from_slice(&magic(21));
+    input.push(1 << 1);
+    input.push(1);
+    input.push(4);
+    let header_checksum = (xxhash_rust::xxh3::xxh3_64(&input) & 0xff) as u8;
+    input.push(header_checksum);
+    input.push(1);
+    input.push(1);
+    input.push(3);
+    input.extend_from_slice(&[1, 2, 3]);
+    let checksum_start = 8;
+    let checksum = (xxhash_rust::xxh3::xxh3_64(&input[checksum_start..]) & 0xffff_ffff) as u32;
+    input.extend_from_slice(&checksum.to_le_bytes());
+    input.push(0);
+    input
 }
 
 #[test]
