@@ -323,9 +323,11 @@ fn pack_lsb_values(values: &[u64], bits: u8) -> Vec<u8> {
 }
 
 mod codecs;
+mod deprecated_lz;
 mod entropy_coding;
 mod frame;
 mod layout;
+mod layout_encodings;
 mod lz;
 mod numbers;
 mod partitions;
