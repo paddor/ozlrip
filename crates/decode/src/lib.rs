@@ -407,6 +407,7 @@ pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo>
 #[cfg(all(test, feature = "zstd"))]
 mod tests {
     use super::*;
+    use alloc::vec;
     use ozlrip_core::ErrorKind;
     use ozlrip_test_support::{magic, push_var_u64};
 
