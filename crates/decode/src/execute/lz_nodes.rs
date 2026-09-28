@@ -2,6 +2,9 @@ use alloc::{boxed::Box, format, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+#[cfg(feature = "paranoid")]
+use crate::arith::{checked_add, checked_mul};
+
 use super::header::require_empty_header;
 use super::output::check_output_len;
 use zrip_core::{
@@ -122,19 +125,7 @@ fn decode_lz_node_to_output_validated(
         && literal_lengths.element_width == 2
         && match_lengths.element_width == 2
     {
-        #[cfg(not(feature = "paranoid"))]
-        return fast_lz::decode_u8_u16_u16_to_output(
-            literals.bytes,
-            offsets.bytes,
-            literal_lengths.bytes,
-            match_lengths.bytes,
-            sequence_count,
-            output_len,
-            output,
-            output_base,
-        );
-        #[cfg(feature = "paranoid")]
-        return decode_lz_u8_u16_u16_to_output_safe(
+        return decode_lz_u8_u16_u16_to_output(
             literals.bytes,
             offsets.bytes,
             literal_lengths.bytes,
@@ -171,6 +162,51 @@ fn decode_lz_node_to_output_validated(
         output,
         output_base,
     )
+}
+
+/// The u8 offset, u16 length layout: the unchecked fast path, or its
+/// checked twin under `paranoid`.
+#[expect(
+    clippy::inline_always,
+    reason = "a thin cfg switch; the callee keeps its own inlining"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the LZ streams stay split, as the node hands them over"
+)]
+#[inline(always)]
+fn decode_lz_u8_u16_u16_to_output(
+    literals: &[u8],
+    offsets: &[u8],
+    literal_lengths: &[u8],
+    match_lengths: &[u8],
+    sequence_count: usize,
+    output_len: usize,
+    output: &mut Vec<u8>,
+    output_base: usize,
+) -> Result<()> {
+    #[cfg(not(feature = "paranoid"))]
+    return fast_lz::decode_u8_u16_u16_to_output(
+        literals,
+        offsets,
+        literal_lengths,
+        match_lengths,
+        sequence_count,
+        output_len,
+        output,
+        output_base,
+    );
+    #[cfg(feature = "paranoid")]
+    return decode_lz_u8_u16_u16_to_output_safe(
+        literals,
+        offsets,
+        literal_lengths,
+        match_lengths,
+        sequence_count,
+        output_len,
+        output,
+        output_base,
+    );
 }
 
 #[inline(never)]
@@ -378,6 +414,23 @@ fn decode_lz_sequences(
         out_pos = out_match_end;
     }
 
+    append_last_lz_literals(output, literals, lit_pos, out_pos, output_limit)
+}
+
+/// Appends the literals after the last sequence, which must end the output
+/// at exactly `output_limit`.
+#[expect(
+    clippy::inline_always,
+    reason = "runs once after the hot sequence loop it was split from"
+)]
+#[inline(always)]
+fn append_last_lz_literals(
+    output: &mut Vec<u8>,
+    literals: &[u8],
+    lit_pos: usize,
+    out_pos: usize,
+    output_limit: usize,
+) -> Result<()> {
     let remaining_literals = literals.get(lit_pos..).ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
     })?;
@@ -964,30 +1017,53 @@ fn decode_fastlz_deprecated_payload(
             )
         };
         append_fastlz_deprecated_literals(&mut literals, &mut output, literal_len, decoded_size)?;
-        if offset < FASTLZ_DEPRECATED_MIN_OFFSET {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("fastlz_deprecated offset is too small"));
-        }
-        if offset > output.len() {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("fastlz_deprecated offset exceeds decoded prefix"));
-        }
-        let match_end = output
-            .len()
-            .checked_add(match_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if match_end > decoded_size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("fastlz_deprecated match length exceeds output size"));
-        }
-        let out_pos = output.len();
-        append_lz_match(&mut output, out_pos, offset, match_len);
+        append_fastlz_deprecated_match(&mut output, offset, match_len, decoded_size)?;
     }
 
     if offsets_pos != payload.offsets.len() || extras_pos != payload.extras.len() {
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("fastlz_deprecated auxiliary stream was not fully consumed"));
     }
+    finish_fastlz_deprecated_output(literals, output, decoded_size)
+}
+
+/// Checks one FastLZ match against the decoded prefix and the output size,
+/// then copies it.
+fn append_fastlz_deprecated_match(
+    output: &mut Vec<u8>,
+    offset: usize,
+    match_len: usize,
+    decoded_size: usize,
+) -> Result<()> {
+    if offset < FASTLZ_DEPRECATED_MIN_OFFSET {
+        return Err(
+            Error::new(ErrorKind::Malformed).with_detail("fastlz_deprecated offset is too small")
+        );
+    }
+    if offset > output.len() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated offset exceeds decoded prefix"));
+    }
+    let match_end = output
+        .len()
+        .checked_add(match_len)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if match_end > decoded_size {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("fastlz_deprecated match length exceeds output size"));
+    }
+    let out_pos = output.len();
+    append_lz_match(output, out_pos, offset, match_len);
+    Ok(())
+}
+
+/// Appends the literals after the last token, which must end the output at
+/// exactly `decoded_size`.
+fn finish_fastlz_deprecated_output(
+    mut literals: LegacyLiteralCursor<'_>,
+    mut output: Vec<u8>,
+    decoded_size: usize,
+) -> Result<Vec<u8>> {
     let remaining_literals = literals.remaining_len()?;
     let output_end = output
         .len()
@@ -1104,32 +1180,11 @@ fn parse_rolz_deprecated_payload(
     payload: &[u8],
     limits: Limits,
 ) -> Result<RolzDeprecatedPayload<'_>> {
-    let header = payload.get(..ROLZ_DEPRECATED_HEADER_LEN).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated header is truncated")
-    })?;
-    let params = parse_rolz_deprecated_params(header)?;
-    let num_literals = usize::try_from(read_deprecated_lz_le_u32(
-        header,
-        7,
-        "rolz_deprecated literals",
-    )?)
-    .map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
-            .with_detail("rolz_deprecated literal count is too large")
-    })?;
-    let num_sequences = usize::try_from(read_deprecated_lz_le_u32(
-        header,
-        11,
-        "rolz_deprecated sequences",
-    )?)
-    .map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded)
-            .with_detail("rolz_deprecated sequence count is too large")
-    })?;
-    if num_sequences > limits.max_buffer_bytes / 16 {
-        return Err(Error::new(ErrorKind::LimitExceeded)
-            .with_detail("rolz_deprecated sequence count exceeds buffer limit"));
-    }
+    let RolzDeprecatedHeader {
+        params,
+        num_literals,
+        num_sequences,
+    } = parse_rolz_deprecated_header(payload, limits)?;
 
     let mut offset = ROLZ_DEPRECATED_HEADER_LEN;
     let literals = parse_rolz_deprecated_literals(payload, &mut offset, num_literals, limits)?;
@@ -1138,19 +1193,8 @@ fn parse_rolz_deprecated_payload(
             .with_detail("rolz_deprecated literal count is invalid"));
     }
 
-    let match_types = decode_deprecated_lz_entropy_payload_to_vec(
-        payload,
-        &mut offset,
-        num_sequences,
-        limits,
-        "rolz_deprecated match types",
-    )?;
-    for &match_type in &match_types {
-        if match_type > ROLZ_DEPRECATED_MATCH_TYPE_REP {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("rolz_deprecated match type is invalid"));
-        }
-    }
+    let match_types =
+        decode_rolz_deprecated_match_types(payload, &mut offset, num_sequences, limits)?;
     let literal_lengths = decode_rolz_deprecated_seq_values(
         payload,
         &mut offset,
@@ -1184,6 +1228,73 @@ fn parse_rolz_deprecated_payload(
         match_lengths,
         match_codes,
     })
+}
+
+/// The fixed-size ROLZ payload header: the parameters and the literal and
+/// sequence counts.
+struct RolzDeprecatedHeader {
+    params: RolzDeprecatedParams,
+    num_literals: usize,
+    num_sequences: usize,
+}
+
+/// Parses the ROLZ payload header and checks the sequence count against the
+/// buffer limit.
+fn parse_rolz_deprecated_header(payload: &[u8], limits: Limits) -> Result<RolzDeprecatedHeader> {
+    let header = payload.get(..ROLZ_DEPRECATED_HEADER_LEN).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated header is truncated")
+    })?;
+    let params = parse_rolz_deprecated_params(header)?;
+    let num_literals = usize::try_from(read_deprecated_lz_le_u32(
+        header,
+        7,
+        "rolz_deprecated literals",
+    )?)
+    .map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated literal count is too large")
+    })?;
+    let num_sequences = usize::try_from(read_deprecated_lz_le_u32(
+        header,
+        11,
+        "rolz_deprecated sequences",
+    )?)
+    .map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated sequence count is too large")
+    })?;
+    if num_sequences > limits.max_buffer_bytes / 16 {
+        return Err(Error::new(ErrorKind::LimitExceeded)
+            .with_detail("rolz_deprecated sequence count exceeds buffer limit"));
+    }
+    Ok(RolzDeprecatedHeader {
+        params,
+        num_literals,
+        num_sequences,
+    })
+}
+
+/// Decodes one match type per sequence and rejects unknown types.
+fn decode_rolz_deprecated_match_types(
+    payload: &[u8],
+    offset: &mut usize,
+    num_sequences: usize,
+    limits: Limits,
+) -> Result<Vec<u8>> {
+    let match_types = decode_deprecated_lz_entropy_payload_to_vec(
+        payload,
+        offset,
+        num_sequences,
+        limits,
+        "rolz_deprecated match types",
+    )?;
+    for &match_type in &match_types {
+        if match_type > ROLZ_DEPRECATED_MATCH_TYPE_REP {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match type is invalid"));
+        }
+    }
+    Ok(match_types)
 }
 
 fn parse_rolz_deprecated_literals<'a>(
@@ -1262,6 +1373,33 @@ fn parse_rolz_deprecated_o1_literals<'a>(
             .with_detail("rolz_deprecated literal clusters exceed buffer limit"));
     }
 
+    let clusters = parse_rolz_deprecated_literal_clusters(
+        payload,
+        offset,
+        num_clusters,
+        num_literals,
+        limits,
+    )?;
+
+    Ok(RolzDeprecatedLiterals::O1(Box::new(
+        RolzDeprecatedO1Literals {
+            max_context,
+            context_to_cluster,
+            clusters,
+            total_len: num_literals,
+        },
+    )))
+}
+
+/// Parses the order-1 literal clusters, each a literal count followed by its
+/// entropy payload. The counts must add up to `num_literals`.
+fn parse_rolz_deprecated_literal_clusters<'a>(
+    payload: &'a [u8],
+    offset: &mut usize,
+    num_clusters: usize,
+    num_literals: usize,
+    limits: Limits,
+) -> Result<Vec<LegacyLiteralPayload<'a>>> {
     let mut clusters = Vec::new();
     clusters.try_reserve_exact(num_clusters).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed)
@@ -1306,15 +1444,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("rolz_deprecated literal cluster count is invalid"));
     }
-
-    Ok(RolzDeprecatedLiterals::O1(Box::new(
-        RolzDeprecatedO1Literals {
-            max_context,
-            context_to_cluster,
-            clusters,
-            total_len: num_literals,
-        },
-    )))
+    Ok(clusters)
 }
 
 fn parse_rolz_deprecated_params(header: &[u8]) -> Result<RolzDeprecatedParams> {
@@ -1346,110 +1476,184 @@ fn decode_rolz_deprecated_payload(
     decoded_size: usize,
     limits: Limits,
 ) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    output.try_reserve_exact(decoded_size).map_err(|_| {
-        Error::new(ErrorKind::AllocationFailed).with_detail("rolz_deprecated allocation failed")
-    })?;
-    let mut literals = RolzDeprecatedLiteralCursor::new(payload.literals);
-    let mut reps = ROLZ_DEPRECATED_INITIAL_REPS;
-    let mut table = if payload
-        .match_types
-        .contains(&ROLZ_DEPRECATED_MATCH_TYPE_ROLZ)
-    {
-        Some(RolzDeprecatedTable::new(payload.params, limits)?)
-    } else {
-        None
-    };
-
+    let mut decoder = RolzDeprecatedDecoder::new(
+        payload.literals,
+        &payload.match_types,
+        payload.params,
+        decoded_size,
+        limits,
+    )?;
     for index in 0..payload.match_types.len() {
-        let literal_start = output.len();
-        append_rolz_deprecated_literals(
-            &mut literals,
-            &mut output,
-            payload.literal_lengths[index],
-            decoded_size,
+        decoder.append_literals(payload.literal_lengths[index])?;
+        decoder.append_match(
+            payload.match_types[index],
+            payload.match_codes[index],
+            payload.match_lengths[index],
         )?;
-        if let Some(table) = table.as_mut() {
-            insert_rolz_deprecated_literals(
-                table,
-                &output,
-                literal_start,
-                payload.literal_lengths[index],
-                payload.params,
-            )?;
-        }
-        let match_type = payload.match_types[index];
-        let match_code = payload.match_codes[index];
-        let match_len = payload.match_lengths[index];
-        let match_start = output.len();
-        let (match_offset, match_len) = if match_type == ROLZ_DEPRECATED_MATCH_TYPE_ROLZ {
-            let table = table
-                .as_ref()
-                .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
-            resolve_rolz_deprecated_rolz_match(
-                table,
-                &output,
-                match_start,
-                match_code,
-                match_len,
-                payload.params,
-            )?
+    }
+    decoder.finish()
+}
+
+/// Decoder state for a ROLZ payload: the output, the literal cursor, the
+/// repeat offsets and the ROLZ table, which exists only if a ROLZ match does.
+struct RolzDeprecatedDecoder<'a> {
+    output: Vec<u8>,
+    literals: RolzDeprecatedLiteralCursor<'a>,
+    reps: [usize; 3],
+    table: Option<RolzDeprecatedTable>,
+    params: RolzDeprecatedParams,
+    decoded_size: usize,
+}
+
+impl<'a> RolzDeprecatedDecoder<'a> {
+    fn new(
+        literals: RolzDeprecatedLiterals<'a>,
+        match_types: &[u8],
+        params: RolzDeprecatedParams,
+        decoded_size: usize,
+        limits: Limits,
+    ) -> Result<Self> {
+        let mut output = Vec::new();
+        output.try_reserve_exact(decoded_size).map_err(|_| {
+            Error::new(ErrorKind::AllocationFailed).with_detail("rolz_deprecated allocation failed")
+        })?;
+        let literals = RolzDeprecatedLiteralCursor::new(literals);
+        let table = if match_types.contains(&ROLZ_DEPRECATED_MATCH_TYPE_ROLZ) {
+            Some(RolzDeprecatedTable::new(params, limits)?)
         } else {
-            resolve_rolz_deprecated_match(match_type, match_code, match_len, payload.params, &reps)?
+            None
         };
-        if match_offset == 0 {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated offset is zero")
-            );
+        Ok(Self {
+            output,
+            literals,
+            reps: ROLZ_DEPRECATED_INITIAL_REPS,
+            table,
+            params,
+            decoded_size,
+        })
+    }
+
+    /// Appends the literals of one sequence and inserts their positions into
+    /// the ROLZ table.
+    fn append_literals(&mut self, len: usize) -> Result<()> {
+        let literal_start = self.output.len();
+        append_rolz_deprecated_literals(
+            &mut self.literals,
+            &mut self.output,
+            len,
+            self.decoded_size,
+        )?;
+        if let Some(table) = self.table.as_mut() {
+            insert_rolz_deprecated_literals(table, &self.output, literal_start, len, self.params)?;
         }
-        if match_offset > output.len() {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("rolz_deprecated offset exceeds decoded prefix"));
-        }
-        let match_end = output
-            .len()
-            .checked_add(match_len)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if match_end > decoded_size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("rolz_deprecated match length exceeds output size"));
-        }
-        update_rolz_deprecated_reps(&mut reps, match_type, match_code, match_offset)?;
+        Ok(())
+    }
+
+    /// Resolves, checks and copies the match of one sequence, then updates
+    /// the repeat offsets and the ROLZ table.
+    fn append_match(&mut self, match_type: u8, match_code: usize, match_len: usize) -> Result<()> {
+        let match_start = self.output.len();
+        let (match_offset, match_len) =
+            self.resolve_match(match_start, match_type, match_code, match_len)?;
+        self.check_match(match_offset, match_len)?;
+        update_rolz_deprecated_reps(&mut self.reps, match_type, match_code, match_offset)?;
         if match_type == ROLZ_DEPRECATED_MATCH_TYPE_ROLZ
-            && let Some(table) = table.as_mut()
+            && let Some(table) = self.table.as_mut()
         {
-            let context = rolz_deprecated_context(&output, match_start, payload.params)?;
+            let context = rolz_deprecated_context(&self.output, match_start, self.params)?;
             table.put(
                 context,
                 rolz_deprecated_output_index(match_start)?,
                 match_len,
             )?;
         }
-        append_lz_match(&mut output, match_start, match_offset, match_len);
+        append_lz_match(&mut self.output, match_start, match_offset, match_len);
         if match_type != ROLZ_DEPRECATED_MATCH_TYPE_ROLZ
-            && let Some(table) = table.as_mut()
+            && let Some(table) = self.table.as_mut()
         {
             insert_rolz_deprecated_lz_match(
                 table,
-                &output,
+                &self.output,
                 match_start,
                 match_len,
-                payload.params,
+                self.params,
             )?;
+        }
+        Ok(())
+    }
+
+    /// The match offset and length: from the ROLZ table for a ROLZ match,
+    /// otherwise from the code and the repeat offsets.
+    fn resolve_match(
+        &self,
+        match_start: usize,
+        match_type: u8,
+        match_code: usize,
+        match_len: usize,
+    ) -> Result<(usize, usize)> {
+        if match_type == ROLZ_DEPRECATED_MATCH_TYPE_ROLZ {
+            let table = self
+                .table
+                .as_ref()
+                .ok_or_else(|| Error::new(ErrorKind::Malformed))?;
+            resolve_rolz_deprecated_rolz_match(
+                table,
+                &self.output,
+                match_start,
+                match_code,
+                match_len,
+                self.params,
+            )
+        } else {
+            resolve_rolz_deprecated_match(
+                match_type,
+                match_code,
+                match_len,
+                self.params,
+                &self.reps,
+            )
         }
     }
 
-    let remaining_literals = literals.remaining_len()?;
-    let output_end = output
-        .len()
-        .checked_add(remaining_literals)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    if output_end != decoded_size {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail("rolz_deprecated output size does not match prefix"));
+    /// Checks a match against the decoded prefix and the output size.
+    fn check_match(&self, match_offset: usize, match_len: usize) -> Result<()> {
+        if match_offset == 0 {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("rolz_deprecated offset is zero")
+            );
+        }
+        if match_offset > self.output.len() {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated offset exceeds decoded prefix"));
+        }
+        let match_end = self
+            .output
+            .len()
+            .checked_add(match_len)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if match_end > self.decoded_size {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated match length exceeds output size"));
+        }
+        Ok(())
     }
-    literals.extend_remaining(&mut output)?;
-    Ok(output)
+
+    /// Appends the literals after the last sequence, which must end the
+    /// output at exactly the decoded size.
+    fn finish(mut self) -> Result<Vec<u8>> {
+        let remaining_literals = self.literals.remaining_len()?;
+        let output_end = self
+            .output
+            .len()
+            .checked_add(remaining_literals)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        if output_end != self.decoded_size {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("rolz_deprecated output size does not match prefix"));
+        }
+        self.literals.extend_remaining(&mut self.output)?;
+        Ok(self.output)
+    }
 }
 
 fn append_rolz_deprecated_literals(
@@ -1713,6 +1917,64 @@ fn decode_rolz_deprecated_seq_values(
         return Ok(values);
     }
 
+    let (bit_size, totals) =
+        read_rolz_deprecated_seq_header(source, offset, num_sequences, transform_name)?;
+
+    let bit_end = (*offset)
+        .checked_add(bit_size)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let bitstream = source.get(*offset..bit_end).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} is truncated"))
+    })?;
+    *offset = bit_end;
+
+    let codes = decode_rolz_deprecated_seq_codes(
+        source,
+        offset,
+        &totals,
+        num_sequences,
+        limits,
+        transform_name,
+    )?;
+
+    let mut reader = ReverseBitReader::new(bitstream)
+        .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
+    let mut positions = [0usize; ROLZ_DEPRECATED_MARKOV_STATES];
+    positions[1..ROLZ_DEPRECATED_MARKOV_STATES]
+        .copy_from_slice(&totals[..(ROLZ_DEPRECATED_MARKOV_STATES - 1)]);
+    let mut state = 0usize;
+    for &match_type in match_types {
+        state = rolz_deprecated_markov_next_state(state, match_type)?;
+        let index = positions[state];
+        if index >= totals[state] {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail(format!("{transform_name} state totals are invalid")));
+        }
+        positions[state] = positions[state]
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        values.push(read_rolz_deprecated_seq_value(
+            &mut reader,
+            codes[index],
+            transform_name,
+        )?);
+    }
+    validate_rolz_deprecated_seq_positions(&positions, &totals, transform_name)?;
+    if reader.bits_remaining() != 0 {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} bitstream has trailing bits")));
+    }
+    Ok(values)
+}
+
+/// Reads the bitstream size and the per-state totals that precede a ROLZ
+/// sequence value stream, and validates the totals.
+fn read_rolz_deprecated_seq_header(
+    source: &[u8],
+    offset: &mut usize,
+    num_sequences: usize,
+    transform_name: &str,
+) -> Result<(usize, [usize; ROLZ_DEPRECATED_MARKOV_STATES])> {
     let bit_size = usize::try_from(read_deprecated_lz_le_u32(source, *offset, transform_name)?)
         .map_err(|_| {
             Error::new(ErrorKind::LimitExceeded)
@@ -1733,15 +1995,19 @@ fn decode_rolz_deprecated_seq_values(
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     }
     validate_rolz_deprecated_seq_totals(&totals, num_sequences, transform_name)?;
+    Ok((bit_size, totals))
+}
 
-    let bit_end = (*offset)
-        .checked_add(bit_size)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let bitstream = source.get(*offset..bit_end).ok_or_else(|| {
-        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} is truncated"))
-    })?;
-    *offset = bit_end;
-
+/// Decodes the value codes, one entropy payload per Markov state. Each
+/// state's codes fill the range its totals give.
+fn decode_rolz_deprecated_seq_codes(
+    source: &[u8],
+    offset: &mut usize,
+    totals: &[usize; ROLZ_DEPRECATED_MARKOV_STATES],
+    num_sequences: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<Vec<u8>> {
     let mut codes = Vec::new();
     codes.try_reserve_exact(num_sequences).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed)
@@ -1760,47 +2026,29 @@ fn decode_rolz_deprecated_seq_values(
         )?;
         codes[begin..end].copy_from_slice(&decoded);
     }
+    Ok(codes)
+}
 
-    let mut reader = ReverseBitReader::new(bitstream)
-        .map_err(|err| Error::new(ErrorKind::Malformed).with_detail(format!("{err}")))?;
-    let mut positions = [0usize; ROLZ_DEPRECATED_MARKOV_STATES];
-    positions[1..ROLZ_DEPRECATED_MARKOV_STATES]
-        .copy_from_slice(&totals[..(ROLZ_DEPRECATED_MARKOV_STATES - 1)]);
-    let mut state = 0usize;
-    for &match_type in match_types {
-        state = rolz_deprecated_markov_next_state(state, match_type)?;
-        let index = positions[state];
-        if index >= totals[state] {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{transform_name} state totals are invalid")));
-        }
-        positions[state] = positions[state]
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let code = usize::from(codes[index]);
-        let base = *ROLZ_DEPRECATED_VALUE_BASE.get(code).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{transform_name} code is invalid"))
-        })?;
-        let bits = *ROLZ_DEPRECATED_VALUE_BITS.get(code).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{transform_name} code is invalid"))
-        })?;
-        let extra = usize::try_from(reader.read_bits(bits).map_err(|err| {
-            Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name}: {err}"))
-        })?)
-        .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
-        values.push(
-            base.checked_add(extra)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?,
-        );
-    }
-    validate_rolz_deprecated_seq_positions(&positions, &totals, transform_name)?;
-    if reader.bits_remaining() != 0 {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{transform_name} bitstream has trailing bits")));
-    }
-    Ok(values)
+/// Reads one sequence value: the base of its code plus the code's extra
+/// bits from the reverse bitstream.
+fn read_rolz_deprecated_seq_value(
+    reader: &mut ReverseBitReader<'_>,
+    code: u8,
+    transform_name: &str,
+) -> Result<usize> {
+    let code = usize::from(code);
+    let base = *ROLZ_DEPRECATED_VALUE_BASE.get(code).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} code is invalid"))
+    })?;
+    let bits = *ROLZ_DEPRECATED_VALUE_BITS.get(code).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} code is invalid"))
+    })?;
+    let extra = usize::try_from(reader.read_bits(bits).map_err(|err| {
+        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name}: {err}"))
+    })?)
+    .map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+    base.checked_add(extra)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))
 }
 
 fn validate_rolz_deprecated_seq_totals(
@@ -1928,39 +2176,20 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
         Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
-    let entropy_type = header & 0x07;
-    if entropy_type == 4 {
-        *offset = (*offset)
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let num_bits = usize::from(header >> 3);
-        let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
-                .with_detail(format!("{transform_name} output size is too large"))
-        })?;
-        return decode_legacy_bit_entropy_payload(
+    match header & 0x07 {
+        4 => parse_legacy_literal_bit_block(
             source,
             offset,
-            decoded_elements,
-            element_width,
-            num_bits,
-            limits,
-            transform_name,
-        )
-        .map(LegacyLiteralPayload::Decoded);
-    }
-    if entropy_type == 1 {
-        return decode_legacy_fse_entropy_payload(
-            source,
-            offset,
+            header,
             element_width,
             limits,
             transform_name,
-        )
-        .map(LegacyLiteralPayload::Decoded);
-    }
-    if entropy_type == 0 {
-        return decode_legacy_huffman_block(
+        ),
+        1 => {
+            decode_legacy_fse_entropy_payload(source, offset, element_width, limits, transform_name)
+                .map(LegacyLiteralPayload::Decoded)
+        }
+        0 => decode_legacy_huffman_block(
             source,
             offset,
             element_width,
@@ -1968,9 +2197,57 @@ fn parse_legacy_literal_entropy_payload_internal<'a>(
             transform_name,
             max_depth,
         )
-        .map(LegacyLiteralPayload::Decoded);
+        .map(LegacyLiteralPayload::Decoded),
+        _ => parse_legacy_literal_sized_block(
+            source,
+            offset,
+            element_width,
+            limits,
+            transform_name,
+            max_depth,
+        ),
     }
+}
 
+/// A bit-packed block: the header byte holds the bit width, then the
+/// element count follows as a varint.
+fn parse_legacy_literal_bit_block<'a>(
+    source: &'a [u8],
+    offset: &mut usize,
+    header: u8,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyLiteralPayload<'a>> {
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let num_bits = usize::from(header >> 3);
+    let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} output size is too large"))
+    })?;
+    decode_legacy_bit_entropy_payload(
+        source,
+        offset,
+        decoded_elements,
+        element_width,
+        num_bits,
+        limits,
+        transform_name,
+    )
+    .map(LegacyLiteralPayload::Decoded)
+}
+
+/// Blocks whose header holds the element count: constant, raw and multi.
+fn parse_legacy_literal_sized_block<'a>(
+    source: &'a [u8],
+    offset: &mut usize,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<LegacyLiteralPayload<'a>> {
     let (entropy_type, decoded_elements) =
         read_legacy_entropy_header(source, offset, transform_name)?;
     match entropy_type {
@@ -2330,6 +2607,7 @@ pub(super) fn decode_field_lz_node_to_output(
     output: &mut Vec<u8>,
     output_base: usize,
 ) -> Result<usize> {
+    let output_capacity = field_lz_output_capacity(inputs, header, limits)?;
     let [
         literals,
         tokens,
@@ -2342,30 +2620,6 @@ pub(super) fn decode_field_lz_node_to_output(
             .with_detail("field_lz input count does not match node shape"));
     };
     let element_width = literals.element_width;
-    if !matches!(element_width, 1 | 2 | 4 | 8) {
-        return Err(
-            Error::new(ErrorKind::InvalidType).with_detail("field_lz literal width is unsupported")
-        );
-    }
-    require_numeric_width(tokens, 2, "field_lz tokens")?;
-    require_numeric_width(offsets, 4, "field_lz offsets")?;
-    require_numeric_width(extra_literal_lengths, 4, "field_lz extra literal lengths")?;
-    require_numeric_width(extra_match_lengths, 4, "field_lz extra match lengths")?;
-
-    let mut header_offset = 0usize;
-    let output_elements = read_var_u64(header, &mut header_offset)?;
-    if header_offset != header.len() {
-        return Err(
-            Error::new(ErrorKind::Malformed).with_detail("field_lz header has trailing bytes")
-        );
-    }
-    let output_elements = usize::try_from(output_elements).map_err(|_| {
-        Error::new(ErrorKind::LimitExceeded).with_detail("field_lz output size is too large")
-    })?;
-    let output_capacity = output_elements
-        .checked_mul(element_width)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    check_output_len(output_capacity, limits)?;
     let output_limit = output_base
         .checked_add(output_capacity)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -2378,127 +2632,171 @@ pub(super) fn decode_field_lz_node_to_output(
     }
 
     #[cfg(not(feature = "paranoid"))]
+    fast_field_lz::decode_to_output(
+        literals.bytes,
+        tokens.bytes,
+        offsets.bytes,
+        extra_literal_lengths.bytes,
+        extra_match_lengths.bytes,
+        element_width,
+        output_capacity,
+        output,
+        output_base,
+    )?;
+    #[cfg(feature = "paranoid")]
     {
-        fast_field_lz::decode_to_output(
-            literals.bytes,
-            tokens.bytes,
+        let mut sequences = FieldLzSequences::new(
             offsets.bytes,
             extra_literal_lengths.bytes,
             extra_match_lengths.bytes,
             element_width,
-            output_capacity,
+        );
+        decode_field_lz_safe(
+            literals.bytes,
+            tokens.bytes,
+            &mut sequences,
+            output_limit,
             output,
             output_base,
         )?;
-        Ok(element_width)
+    }
+    Ok(element_width)
+}
+
+/// Decodes field-LZ tokens with checked appends.
+#[cfg(feature = "paranoid")]
+fn decode_field_lz_safe(
+    literals: &[u8],
+    tokens: &[u8],
+    sequences: &mut FieldLzSequences<'_>,
+    output_limit: usize,
+    output: &mut Vec<u8>,
+    output_base: usize,
+) -> Result<()> {
+    let mut literal_pos = 0usize;
+    for token_bytes in tokens.as_chunks::<2>().0 {
+        let (match_offset, literal_len, match_len) =
+            sequences.next(u16::from_le_bytes(*token_bytes))?;
+        append_field_lz_literals(output, literals, &mut literal_pos, literal_len)?;
+        append_field_lz_match(output, output_base, match_offset, match_len, output_limit)?;
     }
 
-    #[cfg(feature = "paranoid")]
-    {
+    let remaining_literals = literals.get(literal_pos..).ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
+    })?;
+    let final_len = output
+        .len()
+        .checked_add(remaining_literals.len())
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    if final_len > output_limit {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail("field_lz output size exceeds header capacity"));
+    }
+    output.extend_from_slice(remaining_literals);
+    sequences.finish()
+}
+
+/// Turns field-LZ tokens into byte offsets and lengths, reading the offset
+/// and extra length streams and keeping the three repeat offsets.
+#[cfg(feature = "paranoid")]
+struct FieldLzSequences<'a> {
+    reps: [usize; 3],
+    offsets: core::slice::Iter<'a, [u8; 4]>,
+    extra_literal_lengths: core::slice::Iter<'a, [u8; 4]>,
+    extra_match_lengths: core::slice::Iter<'a, [u8; 4]>,
+    element_width: usize,
+    min_match: usize,
+}
+
+#[cfg(feature = "paranoid")]
+impl<'a> FieldLzSequences<'a> {
+    fn new(
+        offsets: &'a [u8],
+        extra_literal_lengths: &'a [u8],
+        extra_match_lengths: &'a [u8],
+        element_width: usize,
+    ) -> Self {
         let min_match = match element_width {
             1 => 4usize,
             2 => 2usize,
             _ => 1usize,
         };
-        let mut reps = [element_width, element_width * 2, element_width * 4];
-        let mut literal_pos = 0usize;
-        let mut offset_values = offsets.bytes.as_chunks::<4>().0.iter();
-        let mut extra_literal_values = extra_literal_lengths.bytes.as_chunks::<4>().0.iter();
-        let mut extra_match_values = extra_match_lengths.bytes.as_chunks::<4>().0.iter();
-
-        for token_bytes in tokens.bytes.as_chunks::<2>().0 {
-            let token = u16::from_le_bytes(*token_bytes);
-            let offset_code = usize::from(token & 0x3);
-            let literal_code = usize::from((token >> 2) & 0x0f);
-            let match_code = usize::from((token >> 6) & 0x0f);
-
-            let match_offset = match offset_code {
-                3 => {
-                    let offset_bytes = offset_values.next().ok_or_else(|| {
-                        Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
-                    })?;
-                    let raw_offset = u32::from_le_bytes(*offset_bytes) as usize;
-                    let byte_offset = raw_offset
-                        .checked_mul(element_width)
-                        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-                    reps[2] = reps[1];
-                    reps[1] = reps[0];
-                    reps[0] = byte_offset;
-                    byte_offset
-                }
-                0 => reps[0],
-                1 => {
-                    let byte_offset = reps[1];
-                    reps.swap(1, 0);
-                    byte_offset
-                }
-                2 => {
-                    let byte_offset = reps[2];
-                    reps[2] = reps[1];
-                    reps[1] = reps[0];
-                    reps[0] = byte_offset;
-                    byte_offset
-                }
-                _ => unreachable!("offset code is masked to two bits"),
-            };
-
-            let mut literal_elements = literal_code;
-            if literal_code == 15 {
-                let extra_bytes = extra_literal_values.next().ok_or_else(|| {
-                    Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
-                })?;
-                let extra = u32::from_le_bytes(*extra_bytes) as usize;
-                literal_elements = literal_elements
-                    .checked_add(extra)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            }
-            let literal_len = literal_elements
-                .checked_mul(element_width)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-
-            let mut match_elements = match_code
-                .checked_add(min_match)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            if match_code == 15 {
-                let extra_bytes = extra_match_values.next().ok_or_else(|| {
-                    Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
-                })?;
-                let extra = u32::from_le_bytes(*extra_bytes) as usize;
-                match_elements = match_elements
-                    .checked_add(extra)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            }
-            let match_len = match_elements
-                .checked_mul(element_width)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-
-            append_field_lz_literals(output, literals.bytes, &mut literal_pos, literal_len)?;
-            append_field_lz_match(output, output_base, match_offset, match_len, output_limit)?;
+        Self {
+            reps: [element_width, element_width * 2, element_width * 4],
+            offsets: offsets.as_chunks::<4>().0.iter(),
+            extra_literal_lengths: extra_literal_lengths.as_chunks::<4>().0.iter(),
+            extra_match_lengths: extra_match_lengths.as_chunks::<4>().0.iter(),
+            element_width,
+            min_match,
         }
+    }
 
-        let remaining_literals = literals.bytes.get(literal_pos..).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("field_lz literal stream is too short")
-        })?;
-        let final_len = output
-            .len()
-            .checked_add(remaining_literals.len())
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if final_len > output_limit {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("field_lz output size exceeds header capacity"));
+    /// The match offset, literal length and match length of one token, in
+    /// bytes.
+    fn next(&mut self, token: u16) -> Result<(usize, usize, usize)> {
+        let match_offset = self.match_offset(usize::from(token & 0x3))?;
+        let literal_code = usize::from((token >> 2) & 0x0f);
+        let literal_elements = if literal_code == 15 {
+            checked_add(literal_code, next_u32(&mut self.extra_literal_lengths)?)?
+        } else {
+            literal_code
+        };
+        let literal_len = checked_mul(literal_elements, self.element_width)?;
+        let match_code = usize::from((token >> 6) & 0x0f);
+        let mut match_elements = checked_add(match_code, self.min_match)?;
+        if match_code == 15 {
+            match_elements = checked_add(match_elements, next_u32(&mut self.extra_match_lengths)?)?;
         }
-        output.extend_from_slice(remaining_literals);
+        let match_len = checked_mul(match_elements, self.element_width)?;
+        Ok((match_offset, literal_len, match_len))
+    }
 
-        if offset_values.len() != 0
-            || extra_literal_values.len() != 0
-            || extra_match_values.len() != 0
+    fn match_offset(&mut self, offset_code: usize) -> Result<usize> {
+        let reps = &mut self.reps;
+        Ok(match offset_code {
+            3 => {
+                let raw_offset = next_u32(&mut self.offsets)?;
+                let byte_offset = checked_mul(raw_offset, self.element_width)?;
+                reps[2] = reps[1];
+                reps[1] = reps[0];
+                reps[0] = byte_offset;
+                byte_offset
+            }
+            0 => reps[0],
+            1 => {
+                let byte_offset = reps[1];
+                reps.swap(1, 0);
+                byte_offset
+            }
+            2 => {
+                let byte_offset = reps[2];
+                reps[2] = reps[1];
+                reps[1] = reps[0];
+                reps[0] = byte_offset;
+                byte_offset
+            }
+            _ => unreachable!("offset code is masked to two bits"),
+        })
+    }
+
+    fn finish(&self) -> Result<()> {
+        if self.offsets.len() != 0
+            || self.extra_literal_lengths.len() != 0
+            || self.extra_match_lengths.len() != 0
         {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("field_lz numeric stream was not fully consumed"));
         }
-
-        Ok(element_width)
+        Ok(())
     }
+}
+
+#[cfg(feature = "paranoid")]
+fn next_u32(values: &mut core::slice::Iter<'_, [u8; 4]>) -> Result<usize> {
+    let bytes = values.next().ok_or_else(|| {
+        Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
+    })?;
+    Ok(u32::from_le_bytes(*bytes) as usize)
 }
 
 #[cfg(feature = "paranoid")]
