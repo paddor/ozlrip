@@ -373,9 +373,8 @@ fn decode_lz_u64(
 
     let owned = decode_lz_node(&inputs, &header, Limits::default());
     let mut output = Vec::new();
-    let appended =
-        lz_nodes::decode_lz_node_to_output(&inputs, &header, Limits::default(), &mut output, 0)
-            .map(|()| output);
+    let appended = decode_lz_node_to_output(&inputs, &header, Limits::default(), &mut output, 0)
+        .map(|()| output);
     [owned, appended]
 }
 

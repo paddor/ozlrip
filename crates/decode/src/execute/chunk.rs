@@ -16,7 +16,7 @@ use super::direct_append::{
 };
 use super::dispatch::decode_dispatch_string_node_to_serial_output;
 use super::header::require_empty_header;
-use super::lz_nodes::{decode_field_lz_node_to_output, decode_lz_node_to_output};
+use super::lz::{decode_field_lz_node_to_output, decode_lz_node_to_output};
 use super::node::{execute_standard_node, one_typed, single_input, single_stream};
 use super::numeric_nodes::decode_dedup_num_node;
 use super::output::{DecodedChunk, check_output_len};

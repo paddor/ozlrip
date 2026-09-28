@@ -25,7 +25,7 @@ use super::{
         decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
         decode_huffman_struct_v2_node, decode_huffman_v2_node,
     },
-    lz_nodes::{
+    lz::{
         decode_fastlz_deprecated_node, decode_field_lz_node, decode_lz_node,
         decode_rolz_deprecated_node,
     },
