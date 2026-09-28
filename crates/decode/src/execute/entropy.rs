@@ -209,51 +209,88 @@ fn decode_legacy_entropy_payload_internal(
         Error::new(ErrorKind::Malformed)
             .with_detail(format!("{transform_name} entropy header is truncated"))
     })?;
-    let entropy_type = header & 0x07;
-    if entropy_type == 4 {
-        *offset = (*offset)
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let num_bits = usize::from(header >> 3);
-        let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded)
-                .with_detail(format!("{transform_name} output size is too large"))
-        })?;
-        return decode_legacy_entropy_bit(
+    match header & 0x07 {
+        4 => decode_legacy_entropy_bit_block(
             source,
             offset,
-            decoded_elements,
+            header,
             element_width,
-            num_bits,
             limits,
             transform_name,
-        );
-    }
-    if entropy_type == 1 {
-        return decode_legacy_entropy_fse(
+        ),
+        1 => decode_legacy_entropy_fse(
             source,
             offset,
             element_width,
             fse_nb_states,
             limits,
             transform_name,
-        );
-    }
-    if entropy_type == 0 {
-        let bytes = decode_legacy_huffman_block(
+        ),
+        0 => {
+            let bytes = decode_legacy_huffman_block(
+                source,
+                offset,
+                element_width,
+                limits,
+                transform_name,
+                max_depth,
+            )?;
+            Ok(LegacyEntropyPayload {
+                decoded_elements: bytes.len() / element_width,
+                bytes,
+            })
+        }
+        _ => decode_legacy_entropy_sized_block(
             source,
             offset,
             element_width,
+            fse_nb_states,
             limits,
             transform_name,
             max_depth,
-        )?;
-        return Ok(LegacyEntropyPayload {
-            decoded_elements: bytes.len() / element_width,
-            bytes,
-        });
+        ),
     }
+}
 
+/// A bit-packed block: the header byte holds the bit width, then the
+/// element count follows as a varint.
+fn decode_legacy_entropy_bit_block(
+    source: &[u8],
+    offset: &mut usize,
+    header: u8,
+    element_width: usize,
+    limits: Limits,
+    transform_name: &str,
+) -> Result<LegacyEntropyPayload> {
+    *offset = (*offset)
+        .checked_add(1)
+        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let num_bits = usize::from(header >> 3);
+    let decoded_elements = usize::try_from(read_var_u64(source, offset)?).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded)
+            .with_detail(format!("{transform_name} output size is too large"))
+    })?;
+    decode_legacy_entropy_bit(
+        source,
+        offset,
+        decoded_elements,
+        element_width,
+        num_bits,
+        limits,
+        transform_name,
+    )
+}
+
+/// Blocks whose header holds the element count: constant, raw and multi.
+fn decode_legacy_entropy_sized_block(
+    source: &[u8],
+    offset: &mut usize,
+    element_width: usize,
+    fse_nb_states: usize,
+    limits: Limits,
+    transform_name: &str,
+    max_depth: usize,
+) -> Result<LegacyEntropyPayload> {
     let (entropy_type, decoded_elements) =
         read_legacy_entropy_header(source, offset, transform_name)?;
     match entropy_type {
@@ -664,9 +701,6 @@ fn decode_legacy_huffman_u16(
     transform_name: &str,
     max_depth: usize,
 ) -> Result<Vec<u8>> {
-    let malformed = |detail: &str| {
-        Error::new(ErrorKind::Malformed).with_detail(format!("{transform_name} {detail}"))
-    };
     let output_len = output_elements
         .checked_mul(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
@@ -675,91 +709,124 @@ fn decode_legacy_huffman_u16(
         Error::new(ErrorKind::AllocationFailed)
             .with_detail(format!("{transform_name} allocation failed"))
     })?;
-    let (&prefix, _) = encoded
-        .split_first()
-        .ok_or_else(|| malformed("huffman block is empty"))?;
-    let mut offset = 1usize;
+    let (&prefix, _) = encoded.split_first().ok_or_else(|| {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} huffman block is empty"))
+    })?;
+    let block = LargeHuffmanBlock {
+        encoded,
+        output_elements,
+        transform_name,
+    };
     match prefix {
         LARGE_HUFFMAN_PREFIX_LITERAL | LARGE_HUFFMAN_PREFIX_CONSTANT => {
-            let count = read_var_u64(encoded, &mut offset)?;
-            if usize::try_from(count).ok() != Some(output_elements) {
-                return Err(malformed("huffman symbol count is invalid"));
-            }
-            let rest = &encoded[offset..];
-            if prefix == LARGE_HUFFMAN_PREFIX_LITERAL {
-                if rest.len() != output_len {
-                    return Err(malformed("huffman literal size is invalid"));
-                }
-                output.extend_from_slice(rest);
-            } else {
-                let [low, high] = *rest else {
-                    return Err(malformed("huffman constant size is invalid"));
-                };
-                for _ in 0..output_elements {
-                    output.extend_from_slice(&[low, high]);
-                }
-            }
+            block.decode_uncoded(prefix, &mut output)?;
         }
-        LARGE_HUFFMAN_PREFIX_HUFFMAN => {
-            let [table_log, low, high] = *encoded
-                .get(offset..offset + 3)
-                .ok_or_else(|| malformed("huffman table header is truncated"))?
-            else {
-                unreachable!("the slice holds three bytes");
-            };
-            offset += 3;
-            if table_log == 0 || table_log > LARGE_HUFFMAN_MAX_TABLE_LOG {
-                return Err(malformed("huffman table log is invalid"));
-            }
-            let symbols = usize::from(u16::from_le_bytes([low, high])) + 1;
-            if max_depth == 0 {
-                return Err(Error::new(ErrorKind::LimitExceeded)
-                    .with_detail(format!("{transform_name} entropy depth exceeds limit")));
-            }
-            let weights = decode_legacy_entropy_payload_internal(
-                encoded,
-                &mut offset,
-                1,
-                LEGACY_ENTROPY_DEFAULT_FSE_STATES,
-                limits,
-                transform_name,
-                max_depth - 1,
-            )?;
-            if weights.decoded_elements != symbols {
-                return Err(malformed("huffman weight count is invalid"));
-            }
-            let (table, derived_log) =
-                build_large_huffman_decode_table(&weights.bytes, transform_name)?;
-            if derived_log != table_log {
-                return Err(malformed("huffman weights are not normalized"));
-            }
-            let x4 = *encoded
-                .get(offset)
-                .ok_or_else(|| malformed("huffman stream layout is missing"))?;
-            let bits = &encoded[offset + 1..];
-            if x4 != 0 {
-                decode_large_huffman_streams_x4(
-                    &table,
-                    table_log,
-                    bits,
-                    output_elements,
-                    &mut output,
-                    transform_name,
-                )?;
-            } else {
-                decode_large_huffman_stream_with_size_prefix(
-                    &table,
-                    table_log,
-                    bits,
-                    output_elements,
-                    &mut output,
-                    transform_name,
-                )?;
-            }
-        }
-        _ => return Err(malformed("huffman block prefix is invalid")),
+        LARGE_HUFFMAN_PREFIX_HUFFMAN => block.decode_coded(limits, max_depth, &mut output)?,
+        _ => return Err(block.malformed("huffman block prefix is invalid")),
     }
     Ok(output)
+}
+
+/// An upstream `ZS_largeHuffmanDecode` block of 16-bit symbols.
+struct LargeHuffmanBlock<'a> {
+    encoded: &'a [u8],
+    output_elements: usize,
+    transform_name: &'a str,
+}
+
+impl LargeHuffmanBlock<'_> {
+    fn malformed(&self, detail: &str) -> Error {
+        Error::new(ErrorKind::Malformed).with_detail(format!("{} {detail}", self.transform_name))
+    }
+
+    /// A literal or constant block: the symbol count, then the symbols or
+    /// the one repeated symbol.
+    fn decode_uncoded(&self, prefix: u8, output: &mut Vec<u8>) -> Result<()> {
+        let (encoded, output_elements) = (self.encoded, self.output_elements);
+        let mut offset = 1usize;
+        let count = read_var_u64(encoded, &mut offset)?;
+        if usize::try_from(count).ok() != Some(output_elements) {
+            return Err(self.malformed("huffman symbol count is invalid"));
+        }
+        let rest = &encoded[offset..];
+        if prefix == LARGE_HUFFMAN_PREFIX_LITERAL {
+            if rest.len() != output_elements * 2 {
+                return Err(self.malformed("huffman literal size is invalid"));
+            }
+            output.extend_from_slice(rest);
+        } else {
+            let [low, high] = *rest else {
+                return Err(self.malformed("huffman constant size is invalid"));
+            };
+            for _ in 0..output_elements {
+                output.extend_from_slice(&[low, high]);
+            }
+        }
+        Ok(())
+    }
+
+    /// A Huffman-coded block: table log, symbol count, nested weights, then
+    /// one or four streams.
+    fn decode_coded(&self, limits: Limits, max_depth: usize, output: &mut Vec<u8>) -> Result<()> {
+        let (encoded, transform_name) = (self.encoded, self.transform_name);
+        let mut offset = 1usize;
+        let [table_log, low, high] = *encoded
+            .get(offset..offset + 3)
+            .ok_or_else(|| self.malformed("huffman table header is truncated"))?
+        else {
+            unreachable!("the slice holds three bytes");
+        };
+        offset += 3;
+        if table_log == 0 || table_log > LARGE_HUFFMAN_MAX_TABLE_LOG {
+            return Err(self.malformed("huffman table log is invalid"));
+        }
+        let symbols = usize::from(u16::from_le_bytes([low, high])) + 1;
+        if max_depth == 0 {
+            return Err(Error::new(ErrorKind::LimitExceeded)
+                .with_detail(format!("{transform_name} entropy depth exceeds limit")));
+        }
+        let weights = decode_legacy_entropy_payload_internal(
+            encoded,
+            &mut offset,
+            1,
+            LEGACY_ENTROPY_DEFAULT_FSE_STATES,
+            limits,
+            transform_name,
+            max_depth - 1,
+        )?;
+        if weights.decoded_elements != symbols {
+            return Err(self.malformed("huffman weight count is invalid"));
+        }
+        let (table, derived_log) =
+            build_large_huffman_decode_table(&weights.bytes, transform_name)?;
+        if derived_log != table_log {
+            return Err(self.malformed("huffman weights are not normalized"));
+        }
+        let x4 = *encoded
+            .get(offset)
+            .ok_or_else(|| self.malformed("huffman stream layout is missing"))?;
+        let bits = &encoded[offset + 1..];
+        if x4 != 0 {
+            decode_large_huffman_streams_x4(
+                &table,
+                table_log,
+                bits,
+                self.output_elements,
+                output,
+                transform_name,
+            )
+        } else {
+            decode_large_huffman_stream_with_size_prefix(
+                &table,
+                table_log,
+                bits,
+                self.output_elements,
+                output,
+                transform_name,
+            )
+        }
+    }
 }
 
 /// Prefixes of upstream's large-alphabet Huffman blocks.
@@ -918,33 +985,30 @@ pub(super) fn unpack_legacy_bits(
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
             bits_read += take;
         }
-        value &= mask;
-        match element_width {
-            1 => bytes.push(u8::try_from(value).map_err(|_| {
-                Error::new(ErrorKind::Malformed)
-                    .with_detail(format!("{transform_name} bit value is too large"))
-            })?),
-            2 => bytes.extend_from_slice(
-                &u16::try_from(value)
-                    .map_err(|_| {
-                        Error::new(ErrorKind::Malformed)
-                            .with_detail(format!("{transform_name} bit value is too large"))
-                    })?
-                    .to_le_bytes(),
-            ),
-            4 => bytes.extend_from_slice(
-                &u32::try_from(value)
-                    .map_err(|_| {
-                        Error::new(ErrorKind::Malformed)
-                            .with_detail(format!("{transform_name} bit value is too large"))
-                    })?
-                    .to_le_bytes(),
-            ),
-            8 => bytes.extend_from_slice(&value.to_le_bytes()),
-            _ => unreachable!("validated element width"),
-        }
+        push_legacy_value(&mut bytes, element_width, value & mask, transform_name)?;
     }
     Ok(bytes)
+}
+
+/// Appends `value` as a little-endian element of `element_width` bytes.
+fn push_legacy_value(
+    bytes: &mut Vec<u8>,
+    element_width: usize,
+    value: u64,
+    transform_name: &str,
+) -> Result<()> {
+    let too_large = || {
+        Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{transform_name} bit value is too large"))
+    };
+    match element_width {
+        1 => bytes.push(u8::try_from(value).map_err(|_| too_large())?),
+        2 => bytes.extend_from_slice(&u16::try_from(value).map_err(|_| too_large())?.to_le_bytes()),
+        4 => bytes.extend_from_slice(&u32::try_from(value).map_err(|_| too_large())?.to_le_bytes()),
+        8 => bytes.extend_from_slice(&value.to_le_bytes()),
+        _ => unreachable!("validated element width"),
+    }
+    Ok(())
 }
 
 fn require_legacy_serial_input(source: StreamInput<'_>, transform_name: &str) -> Result<()> {
@@ -1366,28 +1430,7 @@ fn build_complete_huffman_decode_table(
             Error::new(ErrorKind::Malformed).with_detail(format!("{name} weight count is invalid"))
         );
     }
-    let mut sum = 0u32;
-    let mut non_zero = 0usize;
-    for &weight in weights {
-        if weight > 12 {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail(format!("{name} weight is invalid"))
-            );
-        }
-        if weight != 0 {
-            non_zero = non_zero
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            sum = sum
-                .checked_add(1u32 << (u32::from(weight) - 1))
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-    }
-    if non_zero < 2 || sum == 0 || !sum.is_power_of_two() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{name} weights are not normalized")));
-    }
-    let table_log = u8::try_from(sum.ilog2()).map_err(|_| Error::new(ErrorKind::Malformed))?;
+    let table_log = huffman_table_log(weights, 12, name)?;
     if table_log > 12 {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail(format!("{name} table is too large"))
@@ -1408,6 +1451,52 @@ fn build_complete_huffman_decode_table(
     let max_weight = table_log
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+    let rank_count = huffman_rank_counts(weights, max_weight, name)?;
+    let rank_start = huffman_rank_starts(&rank_count, max_weight)?;
+    let ranks = HuffmanRanks {
+        weights,
+        max_weight,
+        rank_start,
+        name,
+    };
+    ranks.fill(&mut table, table_size, |symbol, num_bits| {
+        let symbol = u8::try_from(symbol).map_err(|_| Error::new(ErrorKind::Malformed))?;
+        Ok(HuffmanDecodeEntry { symbol, num_bits })
+    })?;
+    Ok((table, table_log))
+}
+
+/// Table log of Huffman weights: each nonzero weight `w` takes `2^(w-1)`
+/// entries, and the entries of at least two symbols must add up to a power
+/// of two.
+fn huffman_table_log(weights: &[u8], max_weight: u8, name: &str) -> Result<u8> {
+    let mut sum = 0u64;
+    let mut non_zero = 0usize;
+    for &weight in weights {
+        if weight > max_weight {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail(format!("{name} weight is invalid"))
+            );
+        }
+        if weight != 0 {
+            non_zero = non_zero
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            sum = sum
+                .checked_add(1u64 << (u32::from(weight) - 1))
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        }
+    }
+    if non_zero < 2 || sum == 0 || !sum.is_power_of_two() {
+        return Err(Error::new(ErrorKind::Malformed)
+            .with_detail(format!("{name} weights are not normalized")));
+    }
+    u8::try_from(sum.ilog2()).map_err(|_| Error::new(ErrorKind::Malformed))
+}
+
+/// Number of symbols with each weight, indexed by weight up to
+/// `max_weight`.
+fn huffman_rank_counts(weights: &[u8], max_weight: u8, name: &str) -> Result<Vec<u32>> {
     let mut rank_count = vec![0u32; usize::from(max_weight) + 1];
     for &weight in weights {
         if weight != 0 {
@@ -1420,10 +1509,15 @@ fn build_complete_huffman_decode_table(
                 .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
         }
     }
+    Ok(rank_count)
+}
 
-    let mut rank_start = vec![0u32; usize::from(max_weight) + 1];
+/// First table entry of each weight from 1 to `last_weight`, lighter
+/// weights first.
+fn huffman_rank_starts(rank_count: &[u32], last_weight: u8) -> Result<Vec<u32>> {
+    let mut rank_start = vec![0u32; rank_count.len()];
     let mut cumulative = 0u32;
-    for weight in 1..=max_weight {
+    for weight in 1..=last_weight {
         rank_start[usize::from(weight)] = cumulative;
         cumulative = cumulative
             .checked_add(
@@ -1433,30 +1527,49 @@ fn build_complete_huffman_decode_table(
             )
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     }
+    Ok(rank_start)
+}
 
-    for (symbol, &weight) in weights.iter().enumerate() {
-        if weight == 0 {
-            continue;
+/// Huffman weights and the first free table entry of each weight.
+struct HuffmanRanks<'a> {
+    weights: &'a [u8],
+    max_weight: u8,
+    rank_start: Vec<u32>,
+    name: &'a str,
+}
+
+impl HuffmanRanks<'_> {
+    /// Fills each symbol's entries in `table[..limit]`, built by `entry`
+    /// from the symbol and its code length.
+    fn fill<E: Copy>(
+        mut self,
+        table: &mut [E],
+        limit: usize,
+        entry: impl Fn(usize, u8) -> Result<E>,
+    ) -> Result<()> {
+        for (symbol, &weight) in self.weights.iter().enumerate() {
+            if weight == 0 {
+                continue;
+            }
+            let num_bits = self.max_weight - weight;
+            let entries = 1usize
+                .checked_shl(u32::from(weight) - 1)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            let start = usize::try_from(self.rank_start[usize::from(weight)])
+                .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+            let end = start
+                .checked_add(entries)
+                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+            if end > limit {
+                return Err(Error::new(ErrorKind::Malformed)
+                    .with_detail(format!("{} decode table overflows", self.name)));
+            }
+            self.rank_start[usize::from(weight)] =
+                u32::try_from(end).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+            table[start..end].fill(entry(symbol, num_bits)?);
         }
-        let num_bits = max_weight - weight;
-        let entries = 1usize
-            .checked_shl(u32::from(weight) - 1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let start = usize::try_from(rank_start[usize::from(weight)])
-            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-        let end = start
-            .checked_add(entries)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if end > table_size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{name} decode table overflows")));
-        }
-        rank_start[usize::from(weight)] =
-            u32::try_from(end).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-        let symbol = u8::try_from(symbol).map_err(|_| Error::new(ErrorKind::Malformed))?;
-        table[start..end].fill(HuffmanDecodeEntry { symbol, num_bits });
+        Ok(())
     }
-    Ok((table, table_log))
 }
 
 const LARGE_HUFFMAN_MAX_TABLE_LOG: u8 = 20;
@@ -1476,30 +1589,7 @@ fn build_large_huffman_decode_table(
             Error::new(ErrorKind::Malformed).with_detail(format!("{name} weight count is invalid"))
         );
     }
-
-    let mut sum = 0u64;
-    let mut non_zero = 0usize;
-    for &weight in weights {
-        if weight > LARGE_HUFFMAN_MAX_TABLE_LOG {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail(format!("{name} weight is invalid"))
-            );
-        }
-        if weight != 0 {
-            non_zero = non_zero
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-            sum = sum
-                .checked_add(1u64 << (u32::from(weight) - 1))
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-    }
-    if non_zero < 2 || sum == 0 || !sum.is_power_of_two() {
-        return Err(Error::new(ErrorKind::Malformed)
-            .with_detail(format!("{name} weights are not normalized")));
-    }
-
-    let table_log = u8::try_from(sum.ilog2()).map_err(|_| Error::new(ErrorKind::Malformed))?;
+    let table_log = huffman_table_log(weights, LARGE_HUFFMAN_MAX_TABLE_LOG, name)?;
     if table_log > LARGE_HUFFMAN_MAX_TABLE_LOG {
         return Err(
             Error::new(ErrorKind::Malformed).with_detail(format!("{name} table is too large"))
@@ -1522,54 +1612,18 @@ fn build_large_huffman_decode_table(
     let max_weight = table_log
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut rank_count = vec![0u32; usize::from(max_weight) + 1];
-    for &weight in weights {
-        if weight != 0 {
-            let count = rank_count.get_mut(usize::from(weight)).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed)
-                    .with_detail(format!("{name} weight is out of range"))
-            })?;
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        }
-    }
-
-    let mut rank_start = vec![0u32; usize::from(max_weight) + 1];
-    let mut cumulative = 0u32;
-    for weight in 1..=table_log {
-        rank_start[usize::from(weight)] = cumulative;
-        cumulative = cumulative
-            .checked_add(
-                rank_count[usize::from(weight)]
-                    .checked_mul(1u32 << (u32::from(weight) - 1))
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?,
-            )
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    }
-
-    for (symbol, &weight) in weights.iter().enumerate() {
-        if weight == 0 {
-            continue;
-        }
-        let num_bits = max_weight - weight;
-        let entries = 1usize
-            .checked_shl(u32::from(weight) - 1)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let start = usize::try_from(rank_start[usize::from(weight)])
-            .map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
-        let end = start
-            .checked_add(entries)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        if end > table.len() {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail(format!("{name} decode table overflows")));
-        }
-        rank_start[usize::from(weight)] =
-            u32::try_from(end).map_err(|_| Error::new(ErrorKind::LimitExceeded))?;
+    let rank_count = huffman_rank_counts(weights, max_weight, name)?;
+    let rank_start = huffman_rank_starts(&rank_count, table_log)?;
+    let ranks = HuffmanRanks {
+        weights,
+        max_weight,
+        rank_start,
+        name,
+    };
+    ranks.fill(&mut table, table_size, |symbol, num_bits| {
         let symbol = u16::try_from(symbol).map_err(|_| Error::new(ErrorKind::Malformed))?;
-        table[start..end].fill(LargeHuffmanDecodeEntry { symbol, num_bits });
-    }
+        Ok(LargeHuffmanDecodeEntry { symbol, num_bits })
+    })?;
     Ok((table, table_log))
 }
 
