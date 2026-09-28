@@ -29,78 +29,92 @@ pub(super) fn read_chunks(
 ) -> Result<ChunkScan> {
     let mut summary = ChunkSummary::default();
     let mut chunks = ChunkPlans::new();
-    loop {
-        if format_version >= CHUNK_VERSION_MIN {
-            if reader.peek_byte()? == 0 {
-                let _ = reader.read_byte()?;
-                return Ok(ChunkScan {
-                    summary,
-                    chunks,
-                    flags,
-                });
-            }
-        } else if summary.chunks > 0 {
-            return Ok(ChunkScan {
-                summary,
-                chunks,
-                flags,
-            });
-        }
-
+    while !at_chunks_end(reader, format_version, &summary)? {
         let chunk_start = reader.offset();
         let mut chunk =
             read_chunk_header(reader, format_version, &mut flags, has_bundle_id, limits)?;
-        summary.chunks = checked_add(summary.chunks, 1)?;
-        check_limit(summary.chunks, limits.max_chunks, "max_chunks")?;
-        summary.transforms = checked_add(summary.transforms, chunk.transforms())?;
-        check_limit(summary.transforms, limits.max_nodes, "max_nodes")?;
-        summary.stored_streams = checked_add(summary.stored_streams, chunk.stored_streams())?;
-        check_limit(summary.stored_streams, limits.max_streams, "max_streams")?;
-        summary.regenerated_streams =
-            checked_add(summary.regenerated_streams, chunk.regenerated_streams())?;
-        check_limit(
-            summary.regenerated_streams,
-            limits.max_streams,
-            "max_streams",
-        )?;
-        let payload_start = reader.offset();
-        chunk.set_payload_start(payload_start)?;
-        let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
-        check_limit(
-            chunk.transform_header_bytes,
-            limits.max_transform_header_bytes,
-            "max_transform_header_bytes",
-        )?;
-        check_limit(
-            chunk.stored_stream_bytes,
-            limits.max_stored_stream_bytes,
-            "max_stored_stream_bytes",
-        )?;
-        let _ = reader.read_slice(payload_bytes)?;
-
-        if flags.has_decoded_checksum() {
-            chunk.decoded_checksum = Some(reader.read_u32_le()?);
-        }
-        if flags.has_encoded_checksum() {
-            let checksum_offset = reader.offset();
-            chunk.encoded_checksum = Some(reader.read_u32_le()?);
+        summary.add(&chunk, limits)?;
+        read_chunk_payload(reader, &mut chunk, limits)?;
+        let checksum_start = if format_version >= CHUNK_VERSION_MIN {
+            chunk_start
+        } else {
             // Before v21 the compressed checksum covers the whole frame.
-            let checksum_start = if format_version >= CHUNK_VERSION_MIN {
-                chunk_start
-            } else {
-                0
-            };
-            if verify_compressed {
-                verify_compressed_checksum(
-                    reader.bytes,
-                    checksum_start,
-                    checksum_offset,
-                    chunk.encoded_checksum,
-                )?;
-            }
-        }
+            0
+        };
+        read_chunk_checksums(reader, &mut chunk, flags, checksum_start, verify_compressed)?;
         chunks.push(chunk);
     }
+    Ok(ChunkScan {
+        summary,
+        chunks,
+        flags,
+    })
+}
+
+/// Whether the chunks end here: at the end marker from v21 on, after the
+/// single chunk before.
+fn at_chunks_end(
+    reader: &mut Reader<'_>,
+    format_version: u32,
+    summary: &ChunkSummary,
+) -> Result<bool> {
+    if format_version < CHUNK_VERSION_MIN {
+        return Ok(summary.chunks > 0);
+    }
+    if reader.peek_byte()? != 0 {
+        return Ok(false);
+    }
+    let _ = reader.read_byte()?;
+    Ok(true)
+}
+
+/// Records where the chunk's payload starts and skips it.
+fn read_chunk_payload(
+    reader: &mut Reader<'_>,
+    chunk: &mut ChunkPlan,
+    limits: Limits,
+) -> Result<()> {
+    chunk.set_payload_start(reader.offset())?;
+    let payload_bytes = checked_add(chunk.transform_header_bytes, chunk.stored_stream_bytes)?;
+    check_limit(
+        chunk.transform_header_bytes,
+        limits.max_transform_header_bytes,
+        "max_transform_header_bytes",
+    )?;
+    check_limit(
+        chunk.stored_stream_bytes,
+        limits.max_stored_stream_bytes,
+        "max_stored_stream_bytes",
+    )?;
+    let _ = reader.read_slice(payload_bytes)?;
+    Ok(())
+}
+
+/// Reads the chunk's checksums, and verifies the compressed checksum over
+/// `checksum_start..` when asked to.
+fn read_chunk_checksums(
+    reader: &mut Reader<'_>,
+    chunk: &mut ChunkPlan,
+    flags: FrameFlags,
+    checksum_start: usize,
+    verify_compressed: bool,
+) -> Result<()> {
+    if flags.has_decoded_checksum() {
+        chunk.decoded_checksum = Some(reader.read_u32_le()?);
+    }
+    if flags.has_encoded_checksum() {
+        let checksum_offset = reader.offset();
+        chunk.encoded_checksum = Some(reader.read_u32_le()?);
+        if verify_compressed {
+            verify_compressed_checksum(
+                reader.bytes,
+                checksum_start,
+                checksum_offset,
+                chunk.encoded_checksum,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn read_chunk_header(
@@ -110,6 +124,49 @@ pub(super) fn read_chunk_header(
     has_bundle_id: bool,
     limits: Limits,
 ) -> Result<ChunkPlan> {
+    let (transforms, stored_streams) = read_chunk_counts(reader, format_version, limits)?;
+    if (4..CHUNK_VERSION_MIN).contains(&format_version) {
+        *flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
+    }
+    if transforms == 1 {
+        return read_single_transform_chunk_header(
+            reader,
+            stored_streams,
+            format_version,
+            has_bundle_id,
+            limits,
+        );
+    }
+
+    let has_dict_indexes = format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id;
+    let metadata = NodeMetadata::read(reader, transforms, format_version, has_dict_indexes)?;
+    let regenerated_streams = sum_usize(&metadata.regen_counts)?;
+    check_format_limit(
+        regenerated_streams,
+        runtime_stream_limit(format_version),
+        "streams per chunk",
+    )?;
+    let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
+    let regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
+
+    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams, limits)?;
+    let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
+    let nodes = build_node_plans(&metadata, &regen_distances)?;
+    Ok(ChunkPlan::new(
+        nodes,
+        stored_stream_sizes,
+        metadata.header_bytes,
+        stored_stream_bytes,
+    ))
+}
+
+/// Reads a chunk's transform and stored stream counts and checks them
+/// against the format and the configured limits.
+fn read_chunk_counts(
+    reader: &mut Reader<'_>,
+    format_version: u32,
+    limits: Limits,
+) -> Result<(usize, usize)> {
     let transforms = read_transform_count(reader, format_version)?;
     let stored_streams_u64 = read_count(reader, format_version)?;
     let stored_streams = usize::try_from(stored_streams_u64)
@@ -126,65 +183,69 @@ pub(super) fn read_chunk_header(
     )?;
     check_limit(transforms, limits.max_nodes, "max_nodes")?;
     check_limit(stored_streams, limits.max_streams, "max_streams")?;
+    Ok((transforms, stored_streams))
+}
 
-    if (4..CHUNK_VERSION_MIN).contains(&format_version) {
-        *flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
+/// The per-node fields of a chunk header with several transforms, one
+/// array per field.
+struct NodeMetadata {
+    types: Vec<TransformType>,
+    ids: Vec<u32>,
+    header_sizes: Vec<u32>,
+    header_bytes: usize,
+    variable_outputs: Vec<u32>,
+    regen_counts: Vec<usize>,
+    dict_indexes: SmallVec<[Option<u32>; 2]>,
+}
+
+impl NodeMetadata {
+    fn read(
+        reader: &mut Reader<'_>,
+        transforms: usize,
+        format_version: u32,
+        has_dict_indexes: bool,
+    ) -> Result<Self> {
+        let types = read_transform_types(reader, transforms)?;
+        let ids = read_transform_ids(reader, &types, format_version)?;
+        let header_sizes = read_transform_header_sizes(reader, transforms)?;
+        let header_bytes = sum_u32_as_usize(&header_sizes)?;
+        let variable_outputs = read_variable_outputs(reader, transforms)?;
+        let regen_counts = read_regen_counts(reader, transforms, format_version)?;
+        let dict_indexes = if has_dict_indexes {
+            read_dict_indexes(reader, transforms)?
+        } else {
+            smallvec![None; transforms]
+        };
+        Ok(Self {
+            types,
+            ids,
+            header_sizes,
+            header_bytes,
+            variable_outputs,
+            regen_counts,
+            dict_indexes,
+        })
     }
+}
 
-    if transforms == 1 {
-        return read_single_transform_chunk_header(
-            reader,
-            stored_streams,
-            format_version,
-            has_bundle_id,
-            limits,
-        );
+impl ChunkPlan {
+    fn new(
+        nodes: NodePlans,
+        stored_stream_sizes: StoredStreamSizes,
+        transform_header_bytes: usize,
+        stored_stream_bytes: usize,
+    ) -> Self {
+        Self {
+            nodes,
+            stored_stream_sizes,
+            transform_header_bytes,
+            stored_stream_bytes,
+            transform_header_range: ByteRange::default(),
+            stored_stream_ranges: ByteRanges::new(),
+            decoded_checksum: None,
+            encoded_checksum: None,
+        }
     }
-
-    let transform_types = read_transform_types(reader, transforms)?;
-    let transform_ids = read_transform_ids(reader, &transform_types, format_version)?;
-    let transform_header_sizes = read_transform_header_sizes(reader, transforms)?;
-    let transform_header_bytes = sum_u32_as_usize(&transform_header_sizes)?;
-    let variable_outputs = read_variable_outputs(reader, transforms)?;
-    let regen_counts = read_regen_counts(reader, transforms, format_version)?;
-
-    let dict_indexes = if format_version >= MATERIALIZED_DICT_VERSION_MIN && has_bundle_id {
-        read_dict_indexes(reader, transforms)?
-    } else {
-        smallvec![None; transforms]
-    };
-
-    let regenerated_streams = sum_usize(&regen_counts)?;
-    check_format_limit(
-        regenerated_streams,
-        runtime_stream_limit(format_version),
-        "streams per chunk",
-    )?;
-    let distance_bits = bits_needed(checked_add(regenerated_streams, stored_streams)?);
-    let regen_distances = read_bitpacked_u32(reader, regenerated_streams, distance_bits)?;
-
-    let stored_stream_sizes = read_stored_stream_sizes(reader, stored_streams, limits)?;
-    let stored_stream_bytes = sum_usize(&stored_stream_sizes)?;
-    let nodes = build_node_plans(
-        &transform_types,
-        &transform_ids,
-        &transform_header_sizes,
-        &variable_outputs,
-        &regen_counts,
-        &dict_indexes,
-        &regen_distances,
-    )?;
-
-    Ok(ChunkPlan {
-        nodes,
-        stored_stream_sizes,
-        transform_header_bytes,
-        stored_stream_bytes,
-        transform_header_range: ByteRange::default(),
-        stored_stream_ranges: ByteRanges::new(),
-        decoded_checksum: None,
-        encoded_checksum: None,
-    })
 }
 
 pub(super) fn read_single_transform_chunk_header(
@@ -246,16 +307,12 @@ pub(super) fn read_single_transform_chunk_header(
         dict_index,
     });
 
-    Ok(ChunkPlan {
+    Ok(ChunkPlan::new(
         nodes,
         stored_stream_sizes,
         transform_header_bytes,
         stored_stream_bytes,
-        transform_header_range: ByteRange::default(),
-        stored_stream_ranges: ByteRanges::new(),
-        decoded_checksum: None,
-        encoded_checksum: None,
-    })
+    ))
 }
 
 pub(super) fn read_one_transform_header_size(reader: &mut Reader<'_>) -> Result<u32> {
@@ -323,15 +380,16 @@ pub(super) fn read_one_dict_index(reader: &mut Reader<'_>) -> Result<Option<u32>
     Ok(Some(value))
 }
 
-pub(super) fn build_node_plans(
-    transform_types: &[TransformType],
-    transform_ids: &[u32],
-    transform_header_sizes: &[u32],
-    variable_outputs: &[u32],
-    regen_counts: &[usize],
-    dict_indexes: &[Option<u32>],
-    regen_distances: &[u32],
-) -> Result<NodePlans> {
+fn build_node_plans(metadata: &NodeMetadata, regen_distances: &[u32]) -> Result<NodePlans> {
+    let NodeMetadata {
+        types: transform_types,
+        ids: transform_ids,
+        header_sizes: transform_header_sizes,
+        variable_outputs,
+        regen_counts,
+        dict_indexes,
+        ..
+    } = metadata;
     let transforms = transform_types.len();
     if transform_ids.len() != transforms
         || transform_header_sizes.len() != transforms
@@ -668,6 +726,21 @@ pub(super) struct ChunkSummary {
     pub(super) transforms: usize,
     pub(super) stored_streams: usize,
     pub(super) regenerated_streams: usize,
+}
+
+impl ChunkSummary {
+    /// Counts `chunk` and checks the running totals against the limits.
+    fn add(&mut self, chunk: &ChunkPlan, limits: Limits) -> Result<()> {
+        self.chunks = checked_add(self.chunks, 1)?;
+        check_limit(self.chunks, limits.max_chunks, "max_chunks")?;
+        self.transforms = checked_add(self.transforms, chunk.transforms())?;
+        check_limit(self.transforms, limits.max_nodes, "max_nodes")?;
+        self.stored_streams = checked_add(self.stored_streams, chunk.stored_streams())?;
+        check_limit(self.stored_streams, limits.max_streams, "max_streams")?;
+        self.regenerated_streams =
+            checked_add(self.regenerated_streams, chunk.regenerated_streams())?;
+        check_limit(self.regenerated_streams, limits.max_streams, "max_streams")
+    }
 }
 
 pub(super) struct ChunkScan {

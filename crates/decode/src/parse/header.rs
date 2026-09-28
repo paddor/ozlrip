@@ -112,56 +112,71 @@ pub(super) fn read_output_types(
     types.try_reserve_exact(outputs).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed).with_detail("output type allocation failed")
     })?;
-
     if format_version < 14 {
         types.push(FrameValueType::Serial);
-        return Ok(types);
+    } else if format_version == 14 {
+        types.push(read_v14_output_type(input)?);
+    } else if format_version < CHUNK_VERSION_MIN {
+        read_v15_output_types(reader, input, outputs, &mut types)?;
+    } else {
+        read_v21_output_types(reader, input, outputs, &mut types)?;
     }
+    Ok(types)
+}
 
-    if format_version == 14 {
-        let encoded = *input
-            .get(4)
-            .ok_or_else(|| Error::at(ErrorKind::Truncated, 4))?;
-        if encoded > 3 {
-            return Err(
-                Error::at(ErrorKind::InvalidType, 4).with_detail("invalid OpenZL output type")
-            );
-        }
-        types.push(decode_type(encoded, 4)?);
-        return Ok(types);
+/// v14 frames have one output, typed by the byte after the magic.
+fn read_v14_output_type(input: &[u8]) -> Result<FrameValueType> {
+    let encoded = *input
+        .get(4)
+        .ok_or_else(|| Error::at(ErrorKind::Truncated, 4))?;
+    if encoded > 3 {
+        return Err(Error::at(ErrorKind::InvalidType, 4).with_detail("invalid OpenZL output type"));
     }
+    decode_type(encoded, 4)
+}
 
-    if format_version < CHUNK_VERSION_MIN {
-        let first_token = outputs.min(3);
-        for n in 0..first_token {
-            let shift = checked_mul(n, 2)?;
-            types.push(decode_type((input[4] >> shift) & 3, 4)?);
-        }
-        if outputs > 3 {
-            let limit = outputs.min(5);
-            let token = *input
-                .get(5)
-                .ok_or_else(|| Error::at(ErrorKind::Truncated, 5))?;
-            for n in 3..limit {
-                let shift = checked_mul(n - 3, 2)?;
-                types.push(decode_type((token >> shift) & 3, 5)?);
-            }
-        }
-        if outputs > 5 {
-            read_packed_types(reader, &mut types, outputs, 5)?;
-        }
-        return Ok(types);
+/// v15 to v20: three types in the byte after the magic, two in the next,
+/// then four per byte.
+fn read_v15_output_types(
+    reader: &mut Reader<'_>,
+    input: &[u8],
+    outputs: usize,
+    types: &mut OutputTypes,
+) -> Result<()> {
+    let first_token = outputs.min(3);
+    for n in 0..first_token {
+        let shift = checked_mul(n, 2)?;
+        types.push(decode_type((input[4] >> shift) & 3, 4)?);
     }
+    if outputs > 3 {
+        let limit = outputs.min(5);
+        let token = *input
+            .get(5)
+            .ok_or_else(|| Error::at(ErrorKind::Truncated, 5))?;
+        for n in 3..limit {
+            let shift = checked_mul(n - 3, 2)?;
+            types.push(decode_type((token >> shift) & 3, 5)?);
+        }
+    }
+    if outputs > 5 {
+        read_packed_types(reader, types, outputs, 5)?;
+    }
+    Ok(())
+}
 
-    let token_offset = if outputs <= 14 {
-        reader
+/// v21 and later: up to 14 outputs keep two types in the high bits of the
+/// output count byte, then four types per byte.
+fn read_v21_output_types(
+    reader: &mut Reader<'_>,
+    input: &[u8],
+    outputs: usize,
+    types: &mut OutputTypes,
+) -> Result<()> {
+    if outputs <= 14 {
+        let token_offset = reader
             .offset()
             .checked_sub(1)
-            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?
-    } else {
-        reader.offset()
-    };
-    if outputs <= 14 {
+            .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
         let token = *input
             .get(token_offset)
             .ok_or_else(|| Error::at(ErrorKind::Truncated, token_offset))?;
@@ -171,13 +186,11 @@ pub(super) fn read_output_types(
             types.push(decode_type((token >> shift) & 3, token_offset)?);
         }
         if outputs <= 2 {
-            return Ok(types);
+            return Ok(());
         }
     }
-
     let done = types.len();
-    read_packed_types(reader, &mut types, outputs, done)?;
-    Ok(types)
+    read_packed_types(reader, types, outputs, done)
 }
 
 pub(super) fn read_packed_types(
@@ -225,37 +238,54 @@ pub(super) fn read_output_sizes(
     elements.try_reserve_exact(outputs).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed).with_detail("output element allocation failed")
     })?;
+    let total = if format_version < CHUNK_VERSION_MIN {
+        read_u32_output_sizes(reader, types, limits, &mut sizes, &mut elements)?
+    } else {
+        read_varint_output_sizes(reader, types, limits, &mut sizes, &mut elements)?
+    };
+    Ok(OutputSizes {
+        sizes,
+        elements,
+        decoded_bytes: Some(total),
+    })
+}
 
-    if format_version < CHUNK_VERSION_MIN {
-        let mut total = 0usize;
-        for value_type in types {
-            let size = u64::from(reader.read_u32_le()?);
-            let size_usize = usize::try_from(size)
-                .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-            check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
-            total = checked_add(total, size_usize)?;
-            check_limit(total, limits.max_decoded_bytes, "max_decoded_bytes")?;
-            sizes.push(Some(size));
-            elements.push(match value_type {
-                FrameValueType::Serial => Some(size),
-                FrameValueType::String | FrameValueType::Struct | FrameValueType::Numeric => None,
-            });
-        }
-        return Ok(OutputSizes {
-            sizes,
-            elements,
-            decoded_bytes: Some(total),
+/// Before v21 each output size is a little-endian u32. Returns the total.
+fn read_u32_output_sizes(
+    reader: &mut Reader<'_>,
+    types: &[FrameValueType],
+    limits: Limits,
+    sizes: &mut OutputSizeValues,
+    elements: &mut OutputSizeValues,
+) -> Result<usize> {
+    let mut total = 0usize;
+    for value_type in types {
+        let size = u64::from(reader.read_u32_le()?);
+        add_output_size(&mut total, size, reader.offset(), limits)?;
+        sizes.push(Some(size));
+        elements.push(match value_type {
+            FrameValueType::Serial => Some(size),
+            FrameValueType::String | FrameValueType::Struct | FrameValueType::Numeric => None,
         });
     }
+    Ok(total)
+}
 
-    let first = reader.peek_byte()?;
-    if first == 0 {
+/// From v21 each output size is a varint holding the size plus one, and
+/// string outputs follow with their string counts. Returns the total.
+fn read_varint_output_sizes(
+    reader: &mut Reader<'_>,
+    types: &[FrameValueType],
+    limits: Limits,
+    sizes: &mut OutputSizeValues,
+    elements: &mut OutputSizeValues,
+) -> Result<usize> {
+    if reader.peek_byte()? == 0 {
         return Err(Error::at(ErrorKind::Unsupported, reader.offset())
             .with_detail("unknown OpenZL output sizes are unsupported"));
     }
-
     let mut total = 0usize;
-    for _ in 0..outputs {
+    for _ in types {
         let encoded = reader.read_var_u64()?;
         if encoded == 0 {
             return Err(Error::at(ErrorKind::Malformed, reader.offset())
@@ -264,14 +294,9 @@ pub(super) fn read_output_sizes(
         let size = encoded
             .checked_sub(1)
             .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
-        let size_usize = usize::try_from(size)
-            .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
-        check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
-        total = checked_add(total, size_usize)?;
-        check_limit(total, limits.max_decoded_bytes, "max_decoded_bytes")?;
+        add_output_size(&mut total, size, reader.offset(), limits)?;
         sizes.push(Some(size));
     }
-
     for (idx, value_type) in types.iter().enumerate() {
         match value_type {
             FrameValueType::Serial => elements.push(sizes[idx]),
@@ -279,12 +304,17 @@ pub(super) fn read_output_sizes(
             FrameValueType::Struct | FrameValueType::Numeric => elements.push(None),
         }
     }
+    Ok(total)
+}
 
-    Ok(OutputSizes {
-        sizes,
-        elements,
-        decoded_bytes: Some(total),
-    })
+/// Checks one declared output size against the limits and adds it to
+/// `total`. `offset` locates a size that does not fit `usize`.
+fn add_output_size(total: &mut usize, size: u64, offset: usize, limits: Limits) -> Result<()> {
+    let size_usize =
+        usize::try_from(size).map_err(|_| Error::at(ErrorKind::LimitExceeded, offset))?;
+    check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
+    *total = checked_add(*total, size_usize)?;
+    check_limit(*total, limits.max_decoded_bytes, "max_decoded_bytes")
 }
 
 pub(super) fn read_comment(reader: &mut Reader<'_>) -> Result<Vec<u8>> {
