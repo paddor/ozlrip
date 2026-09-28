@@ -35,7 +35,6 @@ mod output;
 mod outputs;
 mod parse_int;
 mod partition;
-mod pivco_huffman;
 mod plan;
 mod runtime;
 mod slots;

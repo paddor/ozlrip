@@ -5,14 +5,14 @@ use core::cmp;
 use fearless_simd::{Level, Simd, mask8x16, prelude::*, u8x16};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::{elements::read_var_u64, streams::StreamInput};
+use crate::execute::{elements::read_var_u64, streams::StreamInput};
 
 const MAX_SYMBOLS: usize = 256;
 const MAX_TABLE_LOG: usize = 12;
 const MAX_WEIGHT: usize = MAX_TABLE_LOG + 1;
 const MAX_BLOCK_SIZE: usize = 1 << 28;
 
-pub(super) fn decode_node(
+pub(in crate::execute) fn decode_pivco_huffman_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
@@ -845,7 +845,7 @@ mod tests {
     }
 
     fn decode(weights: &[u8], bitstream: &[u8], header: &[u8]) -> Result<Vec<u8>> {
-        decode_node(
+        decode_pivco_huffman_node(
             &[stream(weights), stream(bitstream)],
             header,
             Limits::default(),
@@ -958,7 +958,8 @@ mod tests {
         limits.max_buffer_bytes = 2;
 
         let err =
-            decode_node(&[stream(&weights), stream(&[])], &header(3, None), limits).unwrap_err();
+            decode_pivco_huffman_node(&[stream(&weights), stream(&[])], &header(3, None), limits)
+                .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::LimitExceeded);
     }

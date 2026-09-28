@@ -23,7 +23,7 @@ use super::{
     entropy::{
         decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
         decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
-        decode_huffman_struct_v2_node, decode_huffman_v2_node,
+        decode_huffman_struct_v2_node, decode_huffman_v2_node, decode_pivco_huffman_node,
     },
     lz::{
         decode_fastlz_deprecated_node, decode_field_lz_node, decode_lz_node,
@@ -37,7 +37,6 @@ use super::{
     },
     parse_int,
     partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node},
-    pivco_huffman,
     runtime::StandardNodeContext,
     zstd::decode_zstd_chunk,
 };
@@ -251,7 +250,7 @@ pub(super) fn execute_standard_node(
             one_typed(decode_huffman_struct_v2_node(inputs, header, ctx.limits))
         }
         standard::PIVCO_HUFFMAN_ID => {
-            one_serial(pivco_huffman::decode_node(inputs, header, ctx.limits))
+            one_serial(decode_pivco_huffman_node(inputs, header, ctx.limits))
         }
         standard::QUANTIZE_OFFSETS_ID => one_typed(decode_quantize_node(
             inputs,
