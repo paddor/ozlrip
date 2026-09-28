@@ -7,12 +7,12 @@ mod legacy;
 mod legacy_huffman;
 mod pivco_huffman;
 
-pub(super) use fse::{decode_fse_ncount_node, decode_fse_symbols, decode_fse_v2_node};
+#[cfg(test)]
+pub(super) use fse::decode_fse_symbols;
+pub(super) use fse::{decode_fse_ncount_node, decode_fse_v2_node};
 pub(super) use huffman::{decode_huffman_struct_v2_node, decode_huffman_v2_node};
 pub(super) use legacy::{
-    LEGACY_ENTROPY_MAX_DEPTH, decode_fse_deprecated_node, decode_huffman_deprecated_node,
-    decode_huffman_fixed_deprecated_node, read_legacy_compressed_entropy_header,
-    read_legacy_entropy_header, unpack_legacy_bits,
+    LegacyLimit, LegacyParams, LegacyPayload, decode_fse_deprecated_node,
+    decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node, parse_legacy_payload,
 };
-pub(super) use legacy_huffman::decode_legacy_huffman_block;
 pub(super) use pivco_huffman::decode_pivco_huffman_node;

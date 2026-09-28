@@ -6,17 +6,17 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::legacy_literals::{
-    LegacyLiteralCursor, LegacyLiteralPayload, copy_deprecated_lz_literals,
-    parse_deprecated_lz_stored_stream, parse_legacy_literal_entropy_payload,
+    LegacyLiteralCursor, parse_deprecated_lz_stored_stream, parse_legacy_literal_entropy_payload,
     read_deprecated_lz_sized_slice,
 };
 use super::sequences::append_lz_match;
+use crate::execute::entropy::LegacyPayload;
 use crate::execute::header::require_empty_header;
 use crate::execute::streams::StreamInput;
 
 struct FastLzDeprecatedPayload<'a> {
-    literals: LegacyLiteralPayload<'a>,
-    tokens: LegacyLiteralPayload<'a>,
+    literals: LegacyPayload<'a>,
+    tokens: LegacyPayload<'a>,
     offsets: &'a [u8],
     extras: &'a [u8],
 }
@@ -78,7 +78,7 @@ fn decode_fastlz_deprecated_payload(
         Error::new(ErrorKind::AllocationFailed).with_detail("fastlz_deprecated allocation failed")
     })?;
     let mut literals = LegacyLiteralCursor::new(payload.literals);
-    let tokens = copy_deprecated_lz_literals(payload.tokens, "fastlz_deprecated tokens")?;
+    let tokens = payload.tokens.into_vec("fastlz_deprecated tokens")?;
     let mut offsets_pos = 0usize;
     let mut extras_pos = 0usize;
     let mut rep = FASTLZ_DEPRECATED_MIN_OFFSET;

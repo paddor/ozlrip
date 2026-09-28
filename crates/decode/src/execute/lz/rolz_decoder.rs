@@ -6,8 +6,9 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::legacy_literals::{LegacyLiteralCursor, LegacyLiteralPayload, read_legacy_literal_byte};
+use super::legacy_literals::{LegacyLiteralCursor, read_legacy_literal_byte};
 use super::sequences::append_lz_match;
+use crate::execute::entropy::LegacyPayload;
 
 #[derive(Clone, Copy)]
 pub(super) struct RolzDeprecatedParams {
@@ -30,14 +31,14 @@ pub(super) struct RolzDeprecatedPayload<'a> {
 }
 
 pub(super) enum RolzDeprecatedLiterals<'a> {
-    Linear(LegacyLiteralPayload<'a>),
+    Linear(LegacyPayload<'a>),
     O1(Box<RolzDeprecatedO1Literals<'a>>),
 }
 
 pub(super) struct RolzDeprecatedO1Literals<'a> {
     pub(super) max_context: u8,
     pub(super) context_to_cluster: [u8; 256],
-    pub(super) clusters: Vec<LegacyLiteralPayload<'a>>,
+    pub(super) clusters: Vec<LegacyPayload<'a>>,
     pub(super) total_len: usize,
 }
 

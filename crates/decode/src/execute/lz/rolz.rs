@@ -9,14 +9,14 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use zrip_core::bitstream::reader_reverse::ReverseBitReader;
 
 use super::legacy_literals::{
-    LegacyLiteralPayload, decode_deprecated_lz_entropy_payload_to_vec,
-    parse_deprecated_lz_stored_stream, parse_legacy_literal_entropy_payload,
-    read_deprecated_lz_le_u32,
+    decode_deprecated_lz_entropy_payload_to_vec, parse_deprecated_lz_stored_stream,
+    parse_legacy_literal_entropy_payload, read_deprecated_lz_le_u32,
 };
 use super::rolz_decoder::{
     ROLZ_DEPRECATED_MATCH_TYPE_REP, RolzDeprecatedLiterals, RolzDeprecatedO1Literals,
     RolzDeprecatedParams, RolzDeprecatedPayload, decode_rolz_deprecated_payload,
 };
+use crate::execute::entropy::LegacyPayload;
 use crate::execute::header::require_empty_header;
 use crate::execute::streams::StreamInput;
 
@@ -242,9 +242,7 @@ fn parse_rolz_deprecated_literals<'a>(
     limits: Limits,
 ) -> Result<RolzDeprecatedLiterals<'a>> {
     if num_literals == 0 {
-        return Ok(RolzDeprecatedLiterals::Linear(LegacyLiteralPayload::Raw(
-            &[],
-        )));
+        return Ok(RolzDeprecatedLiterals::Linear(LegacyPayload::Raw(&[])));
     }
 
     let order = *payload.get(*offset).ok_or_else(|| {
@@ -304,7 +302,7 @@ fn parse_rolz_deprecated_o1_literals<'a>(
         .map_or(0, |cluster| usize::from(cluster) + 1);
     let cluster_limit = limits
         .max_buffer_bytes
-        .checked_div(core::mem::size_of::<LegacyLiteralPayload<'_>>().max(1))
+        .checked_div(core::mem::size_of::<LegacyPayload<'_>>().max(1))
         .unwrap_or(0);
     if num_clusters > cluster_limit {
         return Err(Error::new(ErrorKind::LimitExceeded)
@@ -337,7 +335,7 @@ fn parse_rolz_deprecated_literal_clusters<'a>(
     num_clusters: usize,
     num_literals: usize,
     limits: Limits,
-) -> Result<Vec<LegacyLiteralPayload<'a>>> {
+) -> Result<Vec<LegacyPayload<'a>>> {
     let mut clusters = Vec::new();
     clusters.try_reserve_exact(num_clusters).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed)

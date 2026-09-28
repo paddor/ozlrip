@@ -14,7 +14,7 @@ use super::huffman::{
     decode_large_huffman_streams_x4,
 };
 use super::legacy::{
-    checked_legacy_entropy_output_len, decode_legacy_entropy_payload_internal,
+    LegacyLimit, LegacyParams, checked_legacy_entropy_output_len, parse_legacy_block,
     read_legacy_compressed_entropy_header,
 };
 use crate::execute::elements::read_var_u64;
@@ -241,20 +241,19 @@ impl LargeHuffmanBlock<'_> {
             return Err(Error::new(ErrorKind::LimitExceeded)
                 .with_detail(format!("{transform_name} entropy depth exceeds limit")));
         }
-        let weights = decode_legacy_entropy_payload_internal(
-            encoded,
-            &mut offset,
-            1,
-            LEGACY_ENTROPY_DEFAULT_FSE_STATES,
+        let params = LegacyParams {
+            element_width: 1,
+            fse_states: LEGACY_ENTROPY_DEFAULT_FSE_STATES,
+            limit: LegacyLimit::Output,
             limits,
             transform_name,
-            max_depth - 1,
-        )?;
-        if weights.decoded_elements != symbols {
+        };
+        let weights = parse_legacy_block(encoded, &mut offset, params, max_depth - 1)?
+            .into_vec(transform_name)?;
+        if weights.len() != symbols {
             return Err(self.malformed("huffman weight count is invalid"));
         }
-        let (table, derived_log) =
-            build_large_huffman_decode_table(&weights.bytes, transform_name)?;
+        let (table, derived_log) = build_large_huffman_decode_table(&weights, transform_name)?;
         if derived_log != table_log {
             return Err(self.malformed("huffman weights are not normalized"));
         }
