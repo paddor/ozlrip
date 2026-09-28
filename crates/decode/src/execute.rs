@@ -73,6 +73,7 @@ use numeric_nodes::{
 };
 use output::verify_decoded_checksum;
 use output::{DecodedChunk, OutputBudget};
+pub(crate) use outputs::{DecodedOutput, decode_outputs_with_context};
 use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
 use plan::{ChunkExecutionPlan, NodeExecutionPlan, build_chunk_execution_plan};
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};

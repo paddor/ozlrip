@@ -1,10 +1,6 @@
 //! Decoding every frame output with its type: serial, struct, numeric or
 //! string. Output `k` of a chunk is its stream `streams - k - 1`, as in
 //! upstream `addChunksIntoFinalStreams`.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the public typed-output API comes next")
-)]
 
 use alloc::vec::Vec;
 

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add `decode_outputs`, which decodes every frame output with its type as an
+  `Output`: serial bytes, structs, little-endian numerics, or strings with
+  their lengths. `Decoder::decode_outputs_into` and `decode_outputs_into`
+  reuse the caller's buffers. Each output's type is checked against the
+  frame header and its width stays the same across chunks. The content
+  checksum covers all outputs, string lengths included from format v15, as
+  upstream computes it. `decode` still decodes single serial outputs only.
 - Add `Options::verify_content_checksum` and
   `Options::verify_compressed_checksum`, upstream's two checksum decode
   parameters. Both default to `true`. The compressed option also covers the

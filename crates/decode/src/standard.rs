@@ -96,10 +96,6 @@ pub(crate) struct StandardNode {
     pub(crate) shape: NodeShape,
     /// Type of every stream the node regenerates: the input type of its
     /// upstream encoder, from `decoder_registry.c`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the public typed-output API comes next")
-    )]
     pub(crate) output_type: FrameValueType,
 }
 

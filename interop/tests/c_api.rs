@@ -4,7 +4,7 @@
 //! the library through `openzl-shim`.
 
 use openzl_shim::{CompressOptions, Decompressor, Graph, Input, compress};
-use ozlrip::{ErrorKind, FrameValueType};
+use ozlrip::{ErrorKind, FrameValueType, Output};
 
 fn text_input() -> Vec<u8> {
     b"ozlrip interop through the OpenZL C API, repeated for entropy. "
@@ -69,9 +69,114 @@ fn numeric_frame_reports_numeric_output() {
     let info = ozlrip::inspect(&frame).unwrap();
     assert_eq!(info.output_types, [FrameValueType::Numeric]);
 
-    // Typed outputs are not decodable through the serial API yet.
+    // The serial API rejects typed frames; decode_outputs returns them.
     let err = ozlrip::decode(&frame).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        ozlrip::decode_outputs(&frame).unwrap(),
+        [Output::Numeric {
+            width: 4,
+            bytes: values,
+        }]
+    );
+}
+
+/// Typed inputs of every type, alone and together in one frame, through
+/// every starting graph that accepts them and every format version from the
+/// first that writes several typed outputs.
+#[test]
+fn typed_frames_decode_like_their_inputs() {
+    let serial = text_input();
+    let records = (0u8..=255).cycle().take(3 * 700).collect::<Vec<u8>>();
+    let numbers = |width: usize| {
+        (0u64..900)
+            .flat_map(|value| (value * 7919 % 1000).to_le_bytes()[..width].to_vec())
+            .collect::<Vec<u8>>()
+    };
+    let numeric = [1, 2, 4, 8].map(|width| (width, numbers(width)));
+    let strings = ["alpha", "", "beta", "gamma", "delta"]
+        .iter()
+        .cycle()
+        .take(400)
+        .copied()
+        .collect::<Vec<_>>();
+    let string_bytes = strings.concat().into_bytes();
+    let string_lengths = strings
+        .iter()
+        .map(|string| u32::try_from(string.len()).unwrap())
+        .collect::<Vec<_>>();
+
+    let mut inputs = vec![
+        (Input::Serial(&serial), Output::Serial(serial.clone())),
+        (
+            Input::Struct {
+                width: 3,
+                bytes: &records,
+            },
+            Output::Struct {
+                width: 3,
+                bytes: records.clone(),
+            },
+        ),
+        (
+            Input::String {
+                bytes: &string_bytes,
+                lengths: &string_lengths,
+            },
+            Output::String {
+                bytes: string_bytes.clone(),
+                lengths: string_lengths.clone(),
+            },
+        ),
+    ];
+    for (width, bytes) in &numeric {
+        inputs.push((
+            Input::Numeric {
+                width: *width,
+                bytes,
+            },
+            Output::Numeric {
+                width: *width,
+                bytes: bytes.clone(),
+            },
+        ));
+    }
+
+    let mut frames = 0;
+    for version in 15..=openzl_shim::max_format_version() {
+        let mut cases = inputs
+            .iter()
+            .map(|(input, output)| (vec![*input], vec![output.clone()]))
+            .collect::<Vec<_>>();
+        cases.push((
+            inputs.iter().map(|(input, _)| *input).collect(),
+            inputs.iter().map(|(_, output)| output.clone()).collect(),
+        ));
+        for (case_inputs, expected) in cases {
+            for graph in [Graph::Generic, Graph::Store, Graph::Zstd] {
+                let options = CompressOptions {
+                    graph,
+                    format_version: version,
+                    ..CompressOptions::default()
+                };
+                // Some graphs only accept some input types.
+                let Ok(frame) = compress(&case_inputs, options) else {
+                    continue;
+                };
+                let decoded = ozlrip::decode_outputs(&frame).unwrap_or_else(|err| {
+                    panic!("v{version} {graph:?} {} inputs: {err}", case_inputs.len())
+                });
+                assert_eq!(
+                    decoded,
+                    expected,
+                    "v{version} {graph:?} {} inputs",
+                    case_inputs.len()
+                );
+                frames += 1;
+            }
+        }
+    }
+    assert!(frames > 100, "{frames} frames");
 }
 
 /// Every prefix of an upstream frame, in every format version, is accepted

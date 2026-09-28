@@ -9,11 +9,13 @@ use ozlrip_core::{Limits, Result};
 mod dict;
 mod execute;
 mod info;
+mod outputs;
 mod parse;
 mod standard;
 mod varint;
 
 pub use info::{FrameInfo, FrameValueType};
+pub use outputs::Output;
 
 use dict::DictionaryStore;
 
@@ -152,10 +154,49 @@ impl Decoder {
     }
 
     /// Decodes one OpenZL frame into a new `Vec`.
+    ///
+    /// The frame must have a single serial output; frames with typed or
+    /// several outputs return [`ErrorKind::Unsupported`](ozlrip_core::ErrorKind)
+    /// here and decode with [`Decoder::decode_outputs`].
     pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         self.decode_into(input, &mut output)?;
         Ok(output)
+    }
+
+    /// Decodes every output of one OpenZL frame, with its type.
+    pub fn decode_outputs(&mut self, input: &[u8]) -> Result<Vec<Output>> {
+        let mut outputs = Vec::new();
+        self.decode_outputs_into(input, &mut outputs)?;
+        Ok(outputs)
+    }
+
+    /// Decodes every output of one OpenZL frame into `outputs`, replacing
+    /// its entries and reusing their buffers. On error, `outputs` holds one
+    /// entry per output with partial or no content.
+    pub fn decode_outputs_into(&mut self, input: &[u8], outputs: &mut Vec<Output>) -> Result<()> {
+        let options = self.options;
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        let mut decoded = outputs
+            .drain(..)
+            .map(Output::into_decoded)
+            .collect::<Vec<_>>();
+        let mut runtime = execute::DecodeRuntime::new(
+            &mut self.scratch,
+            &mut self.dict_store,
+            #[cfg(feature = "zstd")]
+            &mut self.zstd,
+        );
+        let result = execute::decode_outputs_with_context(
+            input,
+            &plan,
+            &mut decoded,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+        );
+        outputs.extend(decoded.into_iter().map(Output::from_decoded));
+        result
     }
 
     /// Parses and validates frame metadata without executing decode nodes.
@@ -212,6 +253,32 @@ pub fn decode_into_with_options(
     options: Options,
 ) -> Result<usize> {
     Decoder::with_options(options).decode_into(input, dst)
+}
+
+/// Decodes every output of one OpenZL frame using [`Options::default`].
+pub fn decode_outputs(input: &[u8]) -> Result<Vec<Output>> {
+    Decoder::new().decode_outputs(input)
+}
+
+/// Decodes every output of one OpenZL frame using explicit options.
+pub fn decode_outputs_with_options(input: &[u8], options: Options) -> Result<Vec<Output>> {
+    Decoder::with_options(options).decode_outputs(input)
+}
+
+/// Decodes every output of one OpenZL frame into `outputs`, reusing its
+/// buffers, using [`Options::default`].
+pub fn decode_outputs_into(input: &[u8], outputs: &mut Vec<Output>) -> Result<()> {
+    Decoder::new().decode_outputs_into(input, outputs)
+}
+
+/// Decodes every output of one OpenZL frame into `outputs` using explicit
+/// options.
+pub fn decode_outputs_into_with_options(
+    input: &[u8],
+    outputs: &mut Vec<Output>,
+    options: Options,
+) -> Result<()> {
+    Decoder::with_options(options).decode_outputs_into(input, outputs)
 }
 
 /// Parses and validates frame metadata using [`Options::default`].
