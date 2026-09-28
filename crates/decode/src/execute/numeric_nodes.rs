@@ -6,9 +6,11 @@ use super::numeric::{max_numeric_value, push_numeric_element, read_element};
 use super::output::{alloc_output, check_output_len};
 
 use super::{
-    DecodeScratch, OwnedStream, StreamInput, fast_bitpack, fast_delta, fast_zigzag,
-    numeric_element_count, read_conversion_int_size, read_var_u64,
-    validate_conversion_numeric_width, validate_numeric_stream_width,
+    fast_bitpack, fast_delta, fast_zigzag,
+    node::{read_conversion_int_size, validate_conversion_numeric_width},
+    numeric::{numeric_element_count, read_var_u64, validate_numeric_stream_width},
+    runtime::DecodeScratch,
+    streams::{OwnedStream, StreamInput},
 };
 
 pub(super) fn decode_bitpack_serial_chunk(

@@ -3,7 +3,10 @@ use alloc::{string::ToString, vec::Vec};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::output::check_output_len;
-use super::{OwnedStream, StreamInput, numeric_element_count};
+use super::{
+    numeric::numeric_element_count,
+    streams::{OwnedStream, StreamInput},
+};
 
 pub(super) fn decode_node(
     input: StreamInput<'_>,

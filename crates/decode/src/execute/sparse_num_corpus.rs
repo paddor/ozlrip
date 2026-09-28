@@ -1,4 +1,4 @@
-use super::{StreamInput, sparse_num};
+use super::{sparse_num, streams::StreamInput};
 use ozlrip_core::{ErrorKind, Limits};
 
 fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {

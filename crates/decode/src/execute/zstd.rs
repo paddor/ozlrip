@@ -10,12 +10,10 @@ use crate::parse::FramePlan;
 use crate::{parse::SingleZstdFrame, standard};
 
 #[cfg(feature = "zstd")]
-use super::output::{OutputBudget, size_mismatch};
+use super::output::{OutputBudget, size_mismatch, verify_decoded_checksum};
+use super::{node::StandardNodeContext, streams::OwnedStream};
 #[cfg(feature = "zstd")]
-use super::verify_decoded_checksum;
-#[cfg(feature = "zstd")]
-use super::{DecodeScratch, read_var_u64};
-use super::{OwnedStream, StandardNodeContext};
+use super::{numeric::read_var_u64, runtime::DecodeScratch};
 
 /// The zstd context in `slot`, created on first use.
 #[cfg(feature = "zstd")]

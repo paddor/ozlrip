@@ -5,7 +5,7 @@ use core::cmp;
 use fearless_simd::{Level, Simd, mask8x16, prelude::*, u8x16};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::{StreamInput, read_var_u64};
+use super::{numeric::read_var_u64, streams::StreamInput};
 
 const MAX_SYMBOLS: usize = 256;
 const MAX_TABLE_LOG: usize = 12;

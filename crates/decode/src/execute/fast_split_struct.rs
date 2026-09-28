@@ -2,9 +2,9 @@
 
 use alloc::vec::Vec;
 
-use super::StreamInput;
 #[cfg(not(feature = "paranoid"))]
 use super::layout_nodes::split_by_struct_output_len;
+use super::streams::StreamInput;
 
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn append_split_by_struct_output(inputs: &[StreamInput<'_>], output: &mut Vec<u8>) {

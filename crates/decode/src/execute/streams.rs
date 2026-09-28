@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 use smallvec::SmallVec;
 
-use super::DecodeScratch;
 use super::plan::NodeExecutionPlan;
+use super::runtime::DecodeScratch;
 
 pub(super) fn move_stream_to_single_output(
     streams: &mut [StreamSlot<'_>],

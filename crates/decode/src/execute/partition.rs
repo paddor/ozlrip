@@ -6,8 +6,9 @@ use super::numeric::push_numeric_element;
 use super::output::check_output_len;
 
 use super::{
-    OwnedStream, StreamInput, fast_partition, max_numeric_value, read_var_u64,
-    require_numeric_width,
+    fast_partition,
+    numeric::{max_numeric_value, read_var_u64, require_numeric_width},
+    streams::{OwnedStream, StreamInput},
 };
 
 pub(super) struct QuantizeParams {

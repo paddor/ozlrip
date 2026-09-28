@@ -1,5 +1,7 @@
 use super::{
-    StreamInput, decode_plan, decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk,
+    decode_plan,
+    numeric_nodes::{decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk},
+    streams::StreamInput,
 };
 use crate::parse::parse_frame_plan;
 use alloc::vec::Vec;

@@ -7,8 +7,12 @@ use super::output::{alloc_output, check_output_len};
 #[cfg(not(feature = "paranoid"))]
 use super::fast_csv;
 use super::{
-    OwnedStream, StreamInput, checked_sum_u32, fast_dispatch, numeric_element_count,
-    read_usize_numeric_element, require_numeric_width, validate_numeric_stream_width,
+    fast_dispatch,
+    numeric::{
+        checked_sum_u32, numeric_element_count, read_usize_numeric_element, require_numeric_width,
+        validate_numeric_stream_width,
+    },
+    streams::{OwnedStream, StreamInput},
 };
 
 pub(super) fn decode_dispatch_string_node(

@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::StreamInput;
+use super::streams::StreamInput;
 
 #[cfg(not(feature = "paranoid"))]
 pub(super) fn write_transpose_split_output(

@@ -14,8 +14,7 @@ use super::layout_nodes::{
     is_transpose_split,
 };
 use super::lz4::decode_lz4_chunk;
-use super::numeric::checked_sum_u32;
-use super::numeric::read_var_u64;
+use super::numeric::{checked_sum_u32, read_var_u64};
 use super::plan::NodeExecutionPlan;
 use super::streams::{
     LiveBytes, OwnedStream, StreamInput, StreamSlot, move_stream_to_single_output,
@@ -26,16 +25,27 @@ use super::string_nodes::{
     decode_separate_string_components_node, decode_tokenize_string_node,
 };
 use super::{
-    DecodeScratch, QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_bitpack_int_chunk,
-    decode_bitpack_serial_chunk, decode_bitunpack_node, decode_constant_fixed_chunk,
-    decode_constant_serial_chunk, decode_delta_node, decode_dispatch_n_by_tag_node,
-    decode_dispatch_string_node, decode_divide_by_node, decode_fastlz_deprecated_node,
-    decode_field_lz_node, decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
-    decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
-    decode_huffman_struct_v2_node, decode_huffman_v2_node, decode_lz_node, decode_partition_node,
-    decode_quantize_node, decode_range_pack_node, decode_rolz_deprecated_node,
-    decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
-    decode_zstd_chunk, parse_int, pivco_huffman,
+    dispatch::{decode_dispatch_n_by_tag_node, decode_dispatch_string_node},
+    entropy::{
+        decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
+        decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
+        decode_huffman_struct_v2_node, decode_huffman_v2_node,
+    },
+    lz_nodes::{
+        decode_fastlz_deprecated_node, decode_field_lz_node, decode_lz_node,
+        decode_rolz_deprecated_node,
+    },
+    numeric_nodes::{
+        decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_node,
+        decode_constant_fixed_chunk, decode_constant_serial_chunk, decode_delta_node,
+        decode_divide_by_node, decode_range_pack_node, decode_serial_to_num_be_chunk,
+        decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
+    },
+    parse_int,
+    partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node},
+    pivco_huffman,
+    runtime::DecodeScratch,
+    zstd::decode_zstd_chunk,
 };
 
 pub(super) fn try_execute_single_input_splitn_node(

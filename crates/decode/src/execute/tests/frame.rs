@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "zstd")]
+use crate::execute::{direct_append::direct_append_tail, plan::build_chunk_execution_plan};
 
 #[cfg(feature = "zstd")]
 fn mixed_direct_append_frame() -> Vec<u8> {

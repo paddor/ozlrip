@@ -12,7 +12,10 @@ use zrip_core::{
     huffman::{DECODE_TABLE_SIZE, HuffmanDecodeEntry, decode, weights::parse_huffman_weights},
 };
 
-use super::{OwnedStream, StreamInput, numeric_element_count, read_var_u64, require_numeric_width};
+use super::{
+    numeric::{numeric_element_count, read_var_u64, require_numeric_width},
+    streams::{OwnedStream, StreamInput},
+};
 
 pub(super) fn decode_fse_ncount_node(
     source: StreamInput<'_>,

@@ -3,12 +3,12 @@ use alloc::{vec, vec::Vec};
 use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-use super::DecodeScratch;
 use super::numeric::{
     max_numeric_value, numeric_element_count, read_numeric_element, read_u32_element,
     read_usize_numeric_element, read_var_u64, validate_numeric_stream_width, write_numeric_element,
 };
 use super::output::{alloc_output, check_output_len};
+use super::runtime::DecodeScratch;
 use super::streams::{OwnedStream, StreamInput};
 use super::{fast_split_struct, fast_tokenize, fast_transpose};
 

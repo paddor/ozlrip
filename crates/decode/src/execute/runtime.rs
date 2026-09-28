@@ -4,7 +4,7 @@ use ozlrip_core::{Error, ErrorKind, Result};
 
 use crate::dict::DictionaryStore;
 
-use super::OwnedStream;
+use super::streams::OwnedStream;
 
 /// Most buffers the scratch pool keeps.
 const MAX_POOLED_BUFFERS: usize = 64;

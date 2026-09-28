@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use super::{StreamInput, parse_int};
+use super::{parse_int, streams::StreamInput};
 use ozlrip_core::{ErrorKind, Limits};
 
 fn stream(bytes: &[u8], element_width: usize) -> StreamInput<'_> {

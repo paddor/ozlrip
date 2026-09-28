@@ -33,8 +33,10 @@ mod output;
 mod outputs;
 mod parse_int;
 mod partition;
+mod pivco_huffman;
 mod plan;
 mod runtime;
+mod sparse_num;
 mod streams;
 mod string_nodes;
 mod zstd;
@@ -43,47 +45,25 @@ use direct_append::{
     DirectAppendChunk, DirectAppendKind, append_split_by_struct_to_final_splitn,
     direct_append_tail, validate_direct_append_tail, validate_string_to_serial_tail,
 };
-use dispatch::{
-    decode_dispatch_n_by_tag_node, decode_dispatch_string_node,
-    decode_dispatch_string_node_to_serial_output,
-};
-use entropy::{
-    decode_fse_deprecated_node, decode_fse_ncount_node, decode_fse_v2_node,
-    decode_huffman_deprecated_node, decode_huffman_fixed_deprecated_node,
-    decode_huffman_struct_v2_node, decode_huffman_v2_node,
-};
-use lz_nodes::{
-    decode_fastlz_deprecated_node, decode_field_lz_node, decode_field_lz_node_to_output,
-    decode_lz_node, decode_lz_node_to_output, decode_rolz_deprecated_node,
-};
+use dispatch::decode_dispatch_string_node_to_serial_output;
+use lz_nodes::{decode_field_lz_node_to_output, decode_lz_node_to_output};
 use node::{
-    StandardNodeContext, execute_standard_node, node_header, one_typed, read_conversion_int_size,
-    single_input, single_stream, try_execute_byte_preserving_conversion_node,
-    try_execute_single_input_splitn_node, validate_conversion_numeric_width,
+    StandardNodeContext, execute_standard_node, node_header, one_typed, single_input,
+    single_stream, try_execute_byte_preserving_conversion_node,
+    try_execute_single_input_splitn_node,
 };
-use numeric::{
-    checked_sum_u32, max_numeric_value, numeric_element_count, read_usize_numeric_element,
-    read_var_u64, require_numeric_width, validate_numeric_stream_width,
-};
-use numeric_nodes::{
-    decode_bitpack_int_chunk, decode_bitpack_serial_chunk, decode_bitunpack_node,
-    decode_constant_fixed_chunk, decode_constant_serial_chunk, decode_dedup_num_node,
-    decode_delta_node, decode_divide_by_node, decode_range_pack_node,
-    decode_serial_to_num_be_chunk, decode_struct_to_num_be_chunk, decode_zigzag_numeric_chunk,
-};
-use output::verify_decoded_checksum;
-use output::{DecodedChunk, OutputBudget};
+use numeric_nodes::decode_dedup_num_node;
+use output::{DecodedChunk, OutputBudget, verify_decoded_checksum};
 pub(crate) use outputs::{DecodedOutput, decode_outputs_with_context};
-use partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node};
 use plan::{ChunkExecutionPlan, NodeExecutionPlan, build_chunk_execution_plan};
 pub(crate) use runtime::{DecodeRuntime, DecodeScratch};
 use streams::{
-    LiveBytes, OwnedStream, StreamInput, StreamSlot, collect_node_inputs, initialize_stream_slots,
+    LiveBytes, StreamSlot, collect_node_inputs, initialize_stream_slots,
     recycle_consumed_owned_streams,
 };
 #[cfg(feature = "zstd")]
 pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
-use zstd::{decode_zstd_chunk, decode_zstd_chunk_to_output, try_decode_single_zstd_into_dst};
+use zstd::{decode_zstd_chunk_to_output, try_decode_single_zstd_into_dst};
 
 #[cfg(test)]
 mod convert_be_corpus;
@@ -589,9 +569,6 @@ fn decode_transform_chunk_appending(
 
     Err(Error::new(ErrorKind::InvalidGraph).with_detail("direct-append tail was not executed"))
 }
-
-mod pivco_huffman;
-mod sparse_num;
 
 #[cfg(test)]
 mod tests;

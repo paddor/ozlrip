@@ -5,8 +5,8 @@ use alloc::{vec, vec::Vec};
 
 use ozlrip_core::Limits;
 
-use super::StreamInput;
 use super::dispatch::decode_dispatch_string_to_serial;
+use super::streams::StreamInput;
 
 /// Reproducible xorshift generator.
 struct Rng(u64);
