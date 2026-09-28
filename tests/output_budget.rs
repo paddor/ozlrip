@@ -150,3 +150,23 @@ fn single_zstd_frame_enforces_exact_expansion_ratio() {
         assert!(decoded == payload, "comment {comment:?}");
     }
 }
+
+/// String lengths of every output count toward one expansion ratio for the
+/// whole frame, not one ratio per output.
+#[test]
+fn string_lengths_of_all_outputs_share_the_expansion_ratio() {
+    let frame = FrameBuilder::new(21)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .build();
+    // Each output's 400 length bytes fit the ratio; all 1600 do not.
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_expansion_ratio = 400usize.div_ceil(frame.len());
+    assert!(1600 > frame.len() * limits.max_expansion_ratio);
+
+    let err = ozlrip::decode_outputs_with_options(&frame, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded, "{err}");
+}

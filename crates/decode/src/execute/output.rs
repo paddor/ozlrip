@@ -63,34 +63,21 @@ impl OutputBudget {
         encoded_size: usize,
         limits: Limits,
     ) -> Result<Self> {
-        let declared = plan
-            .info
-            .output_sizes
-            .get(index)
-            .copied()
-            .flatten()
-            .ok_or_else(|| {
-                Error::new(ErrorKind::Unsupported)
-                    .with_detail("unknown OpenZL output sizes are unsupported")
-            })?;
-        let declared = usize::try_from(declared).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
-        })?;
-        Self::new(declared, encoded_size, limits)
+        Self::new(declared_output_size(plan, index)?, encoded_size, limits)
     }
 
+    /// Budget for `declared` bytes, checked against the limits and the
+    /// expansion ratio of a frame of `encoded_size` bytes.
     pub(super) fn new(declared: usize, encoded_size: usize, limits: Limits) -> Result<Self> {
+        let budget = Self::part(declared, limits)?;
+        check_expansion(declared, encoded_size, limits)?;
+        Ok(budget)
+    }
+
+    /// Budget for `declared` bytes, one part of a frame's output. The caller
+    /// checks the frame's total with [`check_expansion`].
+    pub(super) fn part(declared: usize, limits: Limits) -> Result<Self> {
         check_output_len(declared, limits)?;
-        let max_expanded = encoded_size
-            .checked_mul(limits.max_expansion_ratio)
-            .ok_or_else(|| {
-                Error::new(ErrorKind::IntegerOverflow)
-                    .with_detail("encoded size expansion limit overflowed")
-            })?;
-        if declared > max_expanded {
-            return Err(Error::new(ErrorKind::LimitExceeded)
-                .with_detail("decoded expansion ratio exceeded"));
-        }
         Ok(Self {
             declared,
             written: 0,
@@ -131,6 +118,40 @@ impl OutputBudget {
             Err(size_mismatch())
         }
     }
+}
+
+/// Size that output `index` of `plan` declares.
+pub(super) fn declared_output_size(plan: &FramePlan, index: usize) -> Result<usize> {
+    let declared = plan
+        .info
+        .output_sizes
+        .get(index)
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported)
+                .with_detail("unknown OpenZL output sizes are unsupported")
+        })?;
+    usize::try_from(declared).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
+    })
+}
+
+/// Fails if `declared` output bytes exceed the expansion ratio of a frame of
+/// `encoded_size` bytes.
+pub(super) fn check_expansion(declared: usize, encoded_size: usize, limits: Limits) -> Result<()> {
+    let max_expanded = encoded_size
+        .checked_mul(limits.max_expansion_ratio)
+        .ok_or_else(|| {
+            Error::new(ErrorKind::IntegerOverflow)
+                .with_detail("encoded size expansion limit overflowed")
+        })?;
+    if declared > max_expanded {
+        return Err(
+            Error::new(ErrorKind::LimitExceeded).with_detail("decoded expansion ratio exceeded")
+        );
+    }
+    Ok(())
 }
 
 /// The error for output that does not match its declared size.

@@ -11,7 +11,7 @@ use crate::info::FrameValueType;
 use crate::parse::FramePlan;
 use crate::standard;
 
-use super::output::{OutputBudget, check_output_len};
+use super::output::{OutputBudget, check_expansion, check_output_len, declared_output_size};
 use super::plan::{ChunkExecutionPlan, build_chunk_execution_plan};
 use super::streams::StreamSlot;
 use super::{DecodeRuntime, decode_plan_with_context, run_chunk};
@@ -69,15 +69,16 @@ pub(crate) fn decode_outputs_with_context(
         Error::new(ErrorKind::Unsupported)
             .with_detail("unknown OpenZL output sizes are unsupported")
     })?;
-    // Checks the declared total against the limits and the expansion ratio.
-    OutputBudget::new(declared_total, input.len(), limits)?;
+    check_output_len(declared_total, limits)?;
     let mut budgets = Vec::new();
     budgets.try_reserve_exact(count).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed).with_detail("output budget allocation failed")
     })?;
-    for (index, output) in outputs.iter_mut().enumerate() {
-        let mut bytes = OutputBudget::for_output(plan, index, input.len(), limits)?;
-        bytes.reserve(&mut output.bytes)?;
+    // String lengths are decoded output too, so the expansion ratio covers
+    // them together with the content of every output.
+    let mut expanded = declared_total;
+    for (index, output) in outputs.iter().enumerate() {
+        let bytes = OutputBudget::part(declared_output_size(plan, index)?, limits)?;
         let lengths = match info.output_elements.get(index).copied().flatten() {
             Some(elements) if output.value_type == Some(FrameValueType::String) => {
                 let elements = usize::try_from(elements).map_err(|_| {
@@ -86,16 +87,28 @@ pub(crate) fn decode_outputs_with_context(
                 let length_bytes = elements.checked_mul(4).ok_or_else(|| {
                     Error::new(ErrorKind::IntegerOverflow).with_detail("string count overflows")
                 })?;
-                let budget = OutputBudget::new(length_bytes, input.len(), limits)?;
-                output.lengths.try_reserve_exact(elements).map_err(|_| {
-                    Error::new(ErrorKind::AllocationFailed)
-                        .with_detail("string length allocation failed")
+                expanded = expanded.checked_add(length_bytes).ok_or_else(|| {
+                    Error::new(ErrorKind::IntegerOverflow)
+                        .with_detail("decoded output size overflows")
                 })?;
-                Some(budget)
+                Some(OutputBudget::part(length_bytes, limits)?)
             }
             _ => None,
         };
         budgets.push((bytes, lengths));
+    }
+    check_expansion(expanded, input.len(), limits)?;
+    for (output, (bytes, lengths)) in outputs.iter_mut().zip(&mut budgets) {
+        bytes.reserve(&mut output.bytes)?;
+        if let Some(lengths) = lengths {
+            output
+                .lengths
+                .try_reserve_exact(lengths.remaining() / 4)
+                .map_err(|_| {
+                    Error::new(ErrorKind::AllocationFailed)
+                        .with_detail("string length allocation failed")
+                })?;
+        }
     }
 
     for chunk in &plan.chunks {
