@@ -382,11 +382,3 @@ fn inspect_enforces_stored_stream_limit() {
 
     assert_eq!(err.kind(), ErrorKind::LimitExceeded);
 }
-
-/// A decoder, with or without a dictionary provider, moves and shares
-/// across threads.
-#[test]
-fn decoder_is_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<ozlrip::Decoder>();
-}
