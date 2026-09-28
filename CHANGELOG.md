@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `inspect_header`, which reads the frame header from a prefix that
+  holds only the header: format version, output count, types, sizes and
+  element counts, comment and dictionary bundle id. A shorter prefix
+  returns `Truncated`. `FrameHeaderInfo::header_bytes` says how much of the
+  frame the header takes.
 - Add `frame_size`, the size of the frame at the start of a buffer that may
   continue past it, as upstream `ZL_getCompressedSize` reports it. It reads
   the frame and chunk headers but checks neither checksums nor the node

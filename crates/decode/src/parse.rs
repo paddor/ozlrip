@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::dict::{MAX_DICTS_PER_BUNDLE, UNIQUE_ID_BYTES};
-use crate::info::{FrameInfo, FrameValueType};
+use crate::info::{FrameHeaderInfo, FrameInfo, FrameValueType};
 use smallvec::SmallVec;
 
 mod chunk;
@@ -88,43 +88,16 @@ pub(crate) fn frame_size(input: &[u8], limits: Limits) -> Result<usize> {
 /// `info.frame_bytes`. The node graph is not validated.
 fn scan_frame(input: &[u8], limits: Limits, verify_compressed: bool) -> Result<FramePlan> {
     let mut reader = Reader::new(input);
-    let magic = reader.read_u32_le()?;
-    let format_version = format_version_from_magic(magic)?;
-
-    let mut flags = FrameFlags::default();
-    if format_version >= CHUNK_VERSION_MIN {
-        flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
-    }
-
-    let dictionary_bundle_id = if flags.has_bundle_id() {
-        Some(read_bundle_id(&mut reader)?)
-    } else {
-        None
-    };
-
-    let output_header = read_output_header(&mut reader, input, format_version, limits)?;
-    let output_sizes = read_output_sizes(
-        &mut reader,
-        &output_header.output_types,
+    let header = read_frame_header(&mut reader, input, limits, verify_compressed)?;
+    let FrameHeader {
         format_version,
-        limits,
-    )?;
-
-    let comment = if flags.has_comment() {
-        Some(read_comment(&mut reader)?)
-    } else {
-        None
-    };
-
-    if format_version >= CHUNK_VERSION_MIN && flags.has_encoded_checksum() {
-        let checksum_offset = reader.offset();
-        let expected = reader.read_byte()?;
-        if verify_compressed {
-            verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
-        }
-    }
-
-    let header_bytes = reader.offset();
+        flags,
+        dictionary_bundle_id,
+        output_header,
+        output_sizes,
+        comment,
+        header_bytes,
+    } = header;
     let chunk_scan = read_chunks(
         &mut reader,
         format_version,
@@ -156,6 +129,88 @@ fn scan_frame(input: &[u8], limits: Limits, verify_compressed: bool) -> Result<F
     Ok(FramePlan {
         info,
         chunks: chunk_scan.chunks,
+    })
+}
+
+/// The frame header without what follows it.
+pub(crate) fn inspect_header(
+    input: &[u8],
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<FrameHeaderInfo> {
+    let mut reader = Reader::new(input);
+    let header = read_frame_header(&mut reader, input, limits, verify_compressed)?;
+    Ok(FrameHeaderInfo {
+        format_version: header.format_version,
+        header_bytes: header.header_bytes,
+        decoded_bytes: header.output_sizes.decoded_bytes,
+        outputs: header.output_header.outputs,
+        output_types: header.output_header.output_types.into_vec(),
+        output_sizes: header.output_sizes.sizes.into_vec(),
+        output_elements: header.output_sizes.elements.into_vec(),
+        comment: header.comment,
+        dictionary_bundle_id: header.dictionary_bundle_id,
+    })
+}
+
+struct FrameHeader {
+    format_version: u32,
+    flags: FrameFlags,
+    dictionary_bundle_id: Option<Vec<u8>>,
+    output_header: header::OutputHeader,
+    output_sizes: header::OutputSizes,
+    comment: Option<Vec<u8>>,
+    header_bytes: usize,
+}
+
+/// Reads the frame header, through its checksum, and leaves `reader` at the
+/// first chunk.
+fn read_frame_header(
+    reader: &mut Reader<'_>,
+    input: &[u8],
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<FrameHeader> {
+    let magic = reader.read_u32_le()?;
+    let format_version = format_version_from_magic(magic)?;
+
+    let mut flags = FrameFlags::default();
+    if format_version >= CHUNK_VERSION_MIN {
+        flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
+    }
+
+    let dictionary_bundle_id = if flags.has_bundle_id() {
+        Some(read_bundle_id(reader)?)
+    } else {
+        None
+    };
+
+    let output_header = read_output_header(reader, input, format_version, limits)?;
+    let output_sizes =
+        read_output_sizes(reader, &output_header.output_types, format_version, limits)?;
+
+    let comment = if flags.has_comment() {
+        Some(read_comment(reader)?)
+    } else {
+        None
+    };
+
+    if format_version >= CHUNK_VERSION_MIN && flags.has_encoded_checksum() {
+        let checksum_offset = reader.offset();
+        let expected = reader.read_byte()?;
+        if verify_compressed {
+            verify_header_checksum(&input[..checksum_offset], expected, checksum_offset)?;
+        }
+    }
+
+    Ok(FrameHeader {
+        format_version,
+        flags,
+        dictionary_bundle_id,
+        output_header,
+        output_sizes,
+        comment,
+        header_bytes: reader.offset(),
     })
 }
 

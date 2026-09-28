@@ -14,7 +14,7 @@ mod parse;
 mod standard;
 mod varint;
 
-pub use info::{FrameInfo, FrameValueType};
+pub use info::{FrameHeaderInfo, FrameInfo, FrameValueType};
 pub use outputs::Output;
 
 use dict::DictionaryStore;
@@ -295,6 +295,19 @@ pub fn frame_size(input: &[u8]) -> Result<usize> {
 /// The limits apply to the frame, not to all of `input`.
 pub fn frame_size_with_options(input: &[u8], options: Options) -> Result<usize> {
     parse::frame_size(input, options.limits)
+}
+
+/// Reads the header at the start of an OpenZL frame, using
+/// [`Options::default`]. `prefix` needs to hold only the header; its size
+/// is [`FrameHeaderInfo::header_bytes`]. The header checksum is verified if
+/// the frame has one.
+pub fn inspect_header(prefix: &[u8]) -> Result<FrameHeaderInfo> {
+    inspect_header_with_options(prefix, Options::default())
+}
+
+/// Reads the header at the start of an OpenZL frame using explicit options.
+pub fn inspect_header_with_options(prefix: &[u8], options: Options) -> Result<FrameHeaderInfo> {
+    parse::inspect_header(prefix, options.limits, options.verify_compressed_checksum)
 }
 
 /// Parses and validates frame metadata using [`Options::default`].

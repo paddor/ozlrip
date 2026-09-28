@@ -42,6 +42,33 @@ pub struct FrameInfo {
     pub dictionary_bundle_id: Option<Vec<u8>>,
 }
 
+/// What a frame header states, from [`crate::inspect_header`]. Reading it
+/// needs only the header, not the whole frame.
+///
+/// New fields may be added in minor releases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct FrameHeaderInfo {
+    /// OpenZL wire format version.
+    pub format_version: u32,
+    /// Size of the frame header.
+    pub header_bytes: usize,
+    /// Total decoded size, when every output is serial with a known size.
+    pub decoded_bytes: Option<usize>,
+    /// Number of frame outputs.
+    pub outputs: usize,
+    /// Type of each output.
+    pub output_types: Vec<FrameValueType>,
+    /// Decoded byte size of each output, when the header states it.
+    pub output_sizes: Vec<Option<u64>>,
+    /// Element count of each output, when the header states it.
+    pub output_elements: Vec<Option<u64>>,
+    /// Comment bytes, if any.
+    pub comment: Option<Vec<u8>>,
+    /// Dictionary bundle the frame needs, if any.
+    pub dictionary_bundle_id: Option<Vec<u8>>,
+}
+
 /// Type of a frame output.
 ///
 /// New types may be added in minor releases.

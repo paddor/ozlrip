@@ -49,6 +49,7 @@ fn serial_graphs_roundtrip_at_default_version() {
         let decoded =
             ozlrip::decode(&frame).unwrap_or_else(|err| panic!("{graph:?} decode failed: {err}"));
         assert_eq!(decoded, input, "{graph:?} roundtrip mismatch");
+        assert_header_matches_frame(&frame);
     }
 }
 
@@ -172,6 +173,7 @@ fn typed_frames_decode_like_their_inputs() {
                     "v{version} {graph:?} {} inputs",
                     case_inputs.len()
                 );
+                assert_header_matches_frame(&frame);
                 frames += 1;
             }
         }
@@ -248,5 +250,31 @@ fn frame_size_matches_upstream() {
                 }
             }
         }
+    }
+}
+
+/// The header alone gives what `inspect` reports for the whole frame, no
+/// shorter prefix parses, and every longer one does.
+fn assert_header_matches_frame(frame: &[u8]) {
+    let info = ozlrip::inspect(frame).unwrap();
+    let header = ozlrip::inspect_header(&frame[..info.header_bytes]).unwrap();
+    assert_eq!(header.format_version, info.format_version);
+    assert_eq!(header.header_bytes, info.header_bytes);
+    assert_eq!(header.outputs, info.outputs);
+    assert_eq!(header.output_types, info.output_types);
+    assert_eq!(header.output_sizes, info.output_sizes);
+    assert_eq!(header.output_elements, info.output_elements);
+    for len in 0..info.header_bytes {
+        assert!(
+            ozlrip::inspect_header(&frame[..len]).is_err(),
+            "prefix {len}"
+        );
+    }
+    for len in info.header_bytes..=frame.len() {
+        assert_eq!(
+            ozlrip::inspect_header(&frame[..len]).unwrap(),
+            header,
+            "prefix {len}"
+        );
     }
 }
