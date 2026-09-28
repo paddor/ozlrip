@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add `DictionaryProvider`, like upstream's `ZL_DictLoader`, and
+  `Decoder::set_dictionary_provider`. A decoder asks its provider for the
+  dictionary bundle a frame names when it has not loaded it, then keeps the
+  bundle loaded. A bundle whose ID differs from the one asked for returns
+  `Malformed`.
 - Add `Decoder::decode_chunks`, which decodes a frame with a single serial
   output one chunk at a time and passes each chunk's bytes to a callback.
   Decoded memory peaks at one chunk. Each chunk's content checksum is

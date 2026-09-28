@@ -20,8 +20,8 @@ extern crate alloc;
 
 pub use ozlrip_core::{Error, ErrorKind, Limits, Result};
 pub use ozlrip_decode::{
-    Decoder, FrameHeaderInfo, FrameInfo, FrameValueType, Options, Output, decode, decode_into,
-    decode_into_with_options, decode_outputs, decode_outputs_into,
+    Decoder, DictionaryProvider, FrameHeaderInfo, FrameInfo, FrameValueType, Options, Output,
+    decode, decode_into, decode_into_with_options, decode_outputs, decode_outputs_into,
     decode_outputs_into_with_options, decode_outputs_with_options, decode_with_options, frame_size,
     frame_size_with_options, inspect, inspect_header, inspect_header_with_options,
     inspect_with_options,

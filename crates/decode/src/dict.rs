@@ -30,10 +30,34 @@ impl DictionaryStore {
         self.bundles.clear();
     }
 
+    /// Whether the bundle with `bundle_id` is loaded.
+    pub(crate) fn contains(&self, bundle_id: &[u8]) -> bool {
+        self.bundles.iter().any(|bundle| bundle.id == bundle_id)
+    }
+
     /// Loads a fat bundle, replacing a loaded bundle with the same ID.
     /// `limits` bound the dictionaries and bytes of all loaded bundles.
     pub(crate) fn load_fat_bundle(&mut self, bytes: &[u8], limits: Limits) -> Result<()> {
         let bundle = parse_fat_bundle(bytes, &self.bundles, limits)?;
+        self.insert(bundle)
+    }
+
+    /// Loads a fat bundle that a provider returned for `bundle_id`.
+    pub(crate) fn load_provided_bundle(
+        &mut self,
+        bytes: &[u8],
+        bundle_id: &[u8; UNIQUE_ID_BYTES],
+        limits: Limits,
+    ) -> Result<()> {
+        let bundle = parse_fat_bundle(bytes, &self.bundles, limits)?;
+        if bundle.id != *bundle_id {
+            return Err(Error::new(ErrorKind::Malformed)
+                .with_detail("dictionary provider returned a bundle with another ID"));
+        }
+        self.insert(bundle)
+    }
+
+    fn insert(&mut self, bundle: DictionaryBundle) -> Result<()> {
         if let Some(existing) = self
             .bundles
             .iter_mut()

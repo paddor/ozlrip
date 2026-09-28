@@ -3,19 +3,21 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use ozlrip_core::{Limits, Result};
+use alloc::{boxed::Box, vec::Vec};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 mod dict;
 mod execute;
 mod info;
 mod outputs;
 mod parse;
+mod provider;
 mod standard;
 mod varint;
 
 pub use info::{FrameHeaderInfo, FrameInfo, FrameValueType};
 pub use outputs::Output;
+pub use provider::DictionaryProvider;
 
 use dict::DictionaryStore;
 
@@ -63,6 +65,7 @@ pub struct Decoder {
     options: Options,
     scratch: execute::DecodeScratch,
     dict_store: DictionaryStore,
+    dictionary_provider: Option<Box<dyn DictionaryProvider + Send + Sync>>,
     /// Created on the first zstd frame or node.
     #[cfg(feature = "zstd")]
     zstd: Option<zrip_decode::context::DecompressContext>,
@@ -80,6 +83,7 @@ impl Decoder {
             options,
             scratch: execute::DecodeScratch::new(),
             dict_store: DictionaryStore::new(),
+            dictionary_provider: None,
             #[cfg(feature = "zstd")]
             zstd: None,
         }
@@ -103,6 +107,42 @@ impl Decoder {
     /// Clears all loaded dictionary bundles.
     pub fn clear_dictionary_bundles(&mut self) {
         self.dict_store.clear();
+    }
+
+    /// Sets the provider this decoder asks for the dictionary bundles that
+    /// frames name and it has not loaded. Replaces an earlier provider.
+    pub fn set_dictionary_provider<P>(&mut self, provider: P)
+    where
+        P: DictionaryProvider + Send + Sync + 'static,
+    {
+        self.dictionary_provider = Some(Box::new(provider));
+    }
+
+    /// Removes the dictionary provider. Bundles it supplied stay loaded.
+    pub fn clear_dictionary_provider(&mut self) {
+        self.dictionary_provider = None;
+    }
+
+    /// Loads the bundle `plan` names from the provider, unless it is loaded
+    /// or there is no provider.
+    fn fetch_dictionary_bundle(&mut self, plan: &parse::FramePlan) -> Result<()> {
+        let (Some(bundle_id), Some(provider)) = (
+            plan.info.dictionary_bundle_id.as_deref(),
+            &self.dictionary_provider,
+        ) else {
+            return Ok(());
+        };
+        if self.dict_store.contains(bundle_id) {
+            return Ok(());
+        }
+        let bundle_id: &[u8; dict::UNIQUE_ID_BYTES] = bundle_id.try_into().map_err(|_| {
+            Error::new(ErrorKind::Malformed).with_detail("dictionary bundle ID must be 32 bytes")
+        })?;
+        if let Some(bundle) = provider.fat_bundle(bundle_id)? {
+            self.dict_store
+                .load_provided_bundle(&bundle, bundle_id, self.options.limits)?;
+        }
+        Ok(())
     }
 
     /// Frees the buffers and codec state kept for reuse between decodes.
@@ -137,6 +177,7 @@ impl Decoder {
             );
         }
         let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
         let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
             &mut self.dict_store,
@@ -171,6 +212,7 @@ impl Decoder {
     {
         let options = self.options;
         let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
         let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
             &mut self.dict_store,
@@ -211,6 +253,7 @@ impl Decoder {
     pub fn decode_outputs_into(&mut self, input: &[u8], outputs: &mut Vec<Output>) -> Result<()> {
         let options = self.options;
         let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
         let mut decoded = outputs
             .drain(..)
             .map(Output::into_decoded)
@@ -538,6 +581,122 @@ mod tests {
         let err = decoder.decode_into(&frame, &mut output).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(output, [1, 2]);
+    }
+
+    /// Serves one bundle and counts how often it is asked.
+    struct TestProvider {
+        bundle: Option<Vec<u8>>,
+        calls: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    impl TestProvider {
+        fn new(bundle: Option<Vec<u8>>) -> Self {
+            Self {
+                bundle,
+                calls: alloc::sync::Arc::default(),
+            }
+        }
+
+        fn calls(&self) -> alloc::sync::Arc<core::sync::atomic::AtomicUsize> {
+            alloc::sync::Arc::clone(&self.calls)
+        }
+    }
+
+    impl DictionaryProvider for TestProvider {
+        fn fat_bundle(&self, bundle_id: &[u8; 32]) -> Result<Option<alloc::borrow::Cow<'_, [u8]>>> {
+            assert_eq!(*bundle_id, BUNDLE_ID);
+            self.calls
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(self.bundle.as_deref().map(alloc::borrow::Cow::Borrowed))
+        }
+    }
+
+    /// A frame's bundle comes from the provider once, then stays loaded.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn decodes_with_a_bundle_from_the_provider() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let provider = TestProvider::new(Some(bundle));
+        let calls = provider.calls();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(provider);
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(
+            decoder.decode_outputs(&frame).unwrap(),
+            [Output::Serial(expected)]
+        );
+        assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 1);
+
+        decoder.clear_dictionary_provider();
+        assert!(decoder.decode(&frame).is_ok());
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn does_not_ask_the_provider_for_loaded_bundles() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let provider = TestProvider::new(None);
+        let calls = provider.calls();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(provider);
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn reports_bundles_the_provider_lacks_as_not_loaded() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(TestProvider::new(None));
+
+        let err = decoder.decode(&frame).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(err.detail(), Some("dictionary bundle is not loaded"));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_provided_bundles_with_another_id() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let other = fat_bundle(OTHER_BUNDLE_ID, &test_zstd_dict_bytes());
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(TestProvider::new(Some(other)));
+
+        let err = decoder.decode(&frame).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(
+            err.detail(),
+            Some("dictionary provider returned a bundle with another ID")
+        );
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn returns_provider_errors() {
+        struct Failing;
+        impl DictionaryProvider for Failing {
+            fn fat_bundle(
+                &self,
+                _bundle_id: &[u8; 32],
+            ) -> Result<Option<alloc::borrow::Cow<'_, [u8]>>> {
+                Err(Error::new(ErrorKind::LimitExceeded).with_detail("store is offline"))
+            }
+        }
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(Failing);
+        let mut output = vec![1, 2];
+
+        let err = decoder.decode_into(&frame, &mut output).unwrap_err();
+
+        assert_eq!(err.detail(), Some("store is offline"));
         assert_eq!(output, [1, 2]);
     }
 
