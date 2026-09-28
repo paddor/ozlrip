@@ -1,9 +1,4 @@
 #![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-#![allow(
-    clippy::inline_always,
-    clippy::too_many_arguments,
-    reason = "profiled field-LZ fast path keeps validated stream arguments split"
-)]
 
 #[cfg(not(feature = "paranoid"))]
 use alloc::vec::Vec;
@@ -12,6 +7,10 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Result};
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field-LZ streams stay split, as the node hands them over"
+)]
 pub(super) fn decode_to_output(
     literals: &[u8],
     tokens: &[u8],
@@ -132,6 +131,9 @@ pub(super) fn decode_to_output(
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("field_lz literal length exceeds output size"));
         }
+        // SAFETY: `literal_end <= literals.len()` and
+        // `out_literal_end <= output_limit <= capacity`, checked above;
+        // `literals` is not `output`'s buffer.
         unsafe {
             copy_literals(
                 literal_ptr.add(literal_pos),
@@ -159,6 +161,9 @@ pub(super) fn decode_to_output(
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("field_lz match length exceeds output size"));
         }
+        // SAFETY: the offset is in `1..=out_pos - output_base`, so the source
+        // starts in bytes written above, and `out_match_end <= output_limit`,
+        // within capacity.
         unsafe {
             let src = output_ptr.add(out_pos - match_offset);
             let dst = output_ptr.add(out_pos);
@@ -186,6 +191,9 @@ pub(super) fn decode_to_output(
         return Err(Error::new(ErrorKind::Malformed)
             .with_detail("field_lz numeric stream was not fully consumed"));
     }
+    // SAFETY: the remaining literals end at `final_len <= output_limit`,
+    // within capacity, and the copies initialized every byte from
+    // `output_base` to `final_len`.
     unsafe {
         copy_literals(
             literal_ptr.add(literal_pos),
@@ -198,36 +206,60 @@ pub(super) fn decode_to_output(
 }
 
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled: read for every offset and extra length"
+)]
 #[inline(always)]
 fn read_u32_usize(bytes: &[u8], offset: usize) -> Result<usize> {
     if offset.checked_add(4).is_none_or(|end| end > bytes.len()) {
         return Err(Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted"));
     }
+    // SAFETY: the check above keeps the 4-byte read within `bytes`.
     unsafe {
-        // SAFETY: bounds check above proves the 4-byte read is in-bounds.
         Ok(u32::from_le((bytes.as_ptr().add(offset).cast::<u32>()).read_unaligned()) as usize)
     }
 }
 
+/// # Safety
+///
+/// `src` must be valid for `len` reads and `dst` for `len` writes, and the
+/// two ranges must not overlap.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled: called for every literal run and short match"
+)]
 #[inline(always)]
 unsafe fn copy_literals(src: *const u8, dst: *mut u8, len: usize) {
     if len != 0 {
+        // SAFETY: guaranteed by the caller.
         unsafe {
             core::ptr::copy_nonoverlapping(src, dst, len);
         }
     }
 }
 
+/// Copies a match that overlaps its own output by doubling the copied
+/// prefix.
+///
+/// # Safety
+///
+/// `src` must be `offset` bytes before `dst` in the same buffer, with
+/// `0 < offset < len`, and `dst` must be valid for `len` writes.
 #[cfg(not(feature = "paranoid"))]
+#[expect(
+    clippy::inline_always,
+    reason = "profiled: called for every overlapping match"
+)]
 #[inline(always)]
 unsafe fn copy_lz_match(src: *const u8, dst: *mut u8, len: usize, offset: usize) {
     debug_assert!(offset != 0);
     debug_assert!(offset < len);
+    // SAFETY: `src..src + offset` ends at `dst`, so the first copy does not
+    // overlap, and each later copy reads `copied` bytes already written
+    // at `dst` into the next `copied` bytes, within `len`.
     unsafe {
-        // SAFETY: caller validated that `src..src+offset` is readable and
-        // `dst..dst+len` is writable. First copy seeds the repeated window;
-        // later copies read only bytes already initialized by prior copies.
         core::ptr::copy_nonoverlapping(src, dst, offset);
         let mut copied = offset;
         while copied < len {
