@@ -54,6 +54,7 @@ must_use_candidate = "allow"
 similar_names = "allow"
 too_many_lines = "allow"
 doc_markdown = "allow"
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 lto = "thin"

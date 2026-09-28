@@ -564,7 +564,7 @@ fn merge_constant_constant_simd(
 }
 
 #[cfg(all(feature = "std", not(feature = "paranoid")))]
-#[allow(
+#[expect(
     clippy::inline_always,
     reason = "fearless_simd dispatch needs inlining for target-feature codegen"
 )]

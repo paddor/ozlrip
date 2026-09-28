@@ -865,7 +865,10 @@ fn rejects_committed_section_truncations_in_representative_frames() {
         input.push(0);
         input
     };
-    #[allow(unused_mut)]
+    #[cfg_attr(
+        not(feature = "checksum"),
+        expect(unused_mut, reason = "only checksum builds add a frame")
+    )]
     let mut frames = vec![(stored, 8), (transform, 8)];
     #[cfg(feature = "checksum")]
     {
