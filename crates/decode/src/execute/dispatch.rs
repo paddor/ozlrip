@@ -668,42 +668,26 @@ fn delimiter_bytes_match_csv_header_rows(source: &DispatchStringSource<'_>, rows
         && chunks_match_4(&remaining[1..], *b",,,\n")
 }
 
+/// Whether `bytes` is `pattern` repeated a whole number of times.
 #[cfg(not(feature = "paranoid"))]
 fn chunks_match_16(bytes: &[u8], pattern: [u8; 16]) -> bool {
-    debug_assert!(bytes.len().is_multiple_of(16));
+    let (chunks, rest) = bytes.as_chunks::<16>();
     let expected = u128::from_le_bytes(pattern);
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let actual = unsafe {
-            // SAFETY: caller gives 16-byte chunks; loop offset stays within
-            // `bytes` and read is explicitly unaligned.
-            bytes.as_ptr().add(offset).cast::<u128>().read_unaligned()
-        };
-        if u128::from_le(actual) != expected {
-            return false;
-        }
-        offset += 16;
-    }
-    true
+    rest.is_empty()
+        && chunks
+            .iter()
+            .all(|chunk| u128::from_le_bytes(*chunk) == expected)
 }
 
+/// Whether `bytes` is `pattern` repeated a whole number of times.
 #[cfg(not(feature = "paranoid"))]
 fn chunks_match_4(bytes: &[u8], pattern: [u8; 4]) -> bool {
-    debug_assert!(bytes.len().is_multiple_of(4));
+    let (chunks, rest) = bytes.as_chunks::<4>();
     let expected = u32::from_le_bytes(pattern);
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let actual = unsafe {
-            // SAFETY: caller gives 4-byte chunks; loop offset stays within
-            // `bytes` and read is explicitly unaligned.
-            bytes.as_ptr().add(offset).cast::<u32>().read_unaligned()
-        };
-        if u32::from_le(actual) != expected {
-            return false;
-        }
-        offset += 4;
-    }
-    true
+    rest.is_empty()
+        && chunks
+            .iter()
+            .all(|chunk| u32::from_le_bytes(*chunk) == expected)
 }
 
 fn append_dispatched_string_2byte_csv_pattern(
