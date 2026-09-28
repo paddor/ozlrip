@@ -4,7 +4,7 @@ use alloc::{vec, vec::Vec};
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
-use super::{elements::read_usize_numeric_element, streams::StreamInput};
+use crate::execute::{elements::read_usize_numeric_element, streams::StreamInput};
 
 pub(super) fn decode_dispatch_n_by_tag_to_output(
     tags: &StreamInput<'_>,

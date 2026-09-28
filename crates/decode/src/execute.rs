@@ -12,13 +12,10 @@ mod chunk;
 mod conversion;
 mod direct_append;
 mod dispatch;
-mod dispatch_source;
 mod elements;
 mod entropy;
 mod fast_bitpack;
-mod fast_csv;
 mod fast_delta;
-mod fast_dispatch;
 mod fast_lengths;
 mod fast_partition;
 mod fast_zigzag;
@@ -52,8 +49,6 @@ pub(crate) use zstd::{decode_single_zstd_frame_with_context, zstd_context};
 
 #[cfg(test)]
 mod convert_be_corpus;
-#[cfg(test)]
-mod dispatch_csv_tests;
 #[cfg(test)]
 mod parse_int_corpus;
 #[cfg(test)]
