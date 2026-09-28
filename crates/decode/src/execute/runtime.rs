@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use ozlrip_core::{Error, ErrorKind, Result};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::dict::DictionaryStore;
 
@@ -100,6 +100,19 @@ impl<'a> DecodeRuntime<'a> {
             zstd,
         }
     }
+}
+
+/// Frame parameters and decoder state that node decoders use.
+pub(super) struct StandardNodeContext<'a> {
+    pub(super) format_version: u32,
+    pub(super) limits: Limits,
+    pub(super) scratch: &'a mut DecodeScratch,
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(super) dictionary_bundle_id: Option<&'a [u8]>,
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(super) dict_store: &'a mut DictionaryStore,
+    #[cfg(feature = "zstd")]
+    pub(super) zstd: &'a mut Option<zrip_decode::context::DecompressContext>,
 }
 
 #[cfg(test)]

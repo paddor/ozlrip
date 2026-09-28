@@ -12,7 +12,6 @@ use super::lz_nodes::{
 };
 #[cfg(feature = "lz4")]
 use super::lz4::*;
-use super::node::StandardNodeContext;
 use super::node::execute_standard_node;
 use super::numeric_nodes::decode_dedup_num_node;
 use super::numeric_nodes::{
@@ -22,6 +21,7 @@ use super::numeric_nodes::{
 use super::partition::{
     QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node,
 };
+use super::runtime::StandardNodeContext;
 use super::runtime::{DecodeRuntime, DecodeScratch};
 use super::{entropy, lz_nodes};
 use super::{layout_nodes::*, streams::*, string_nodes::*};

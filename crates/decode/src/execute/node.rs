@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::{dict::DictionaryStore, standard};
+use crate::standard;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::output::check_output_len;
@@ -44,7 +44,7 @@ use super::{
     parse_int,
     partition::{QUANTIZE_LENGTHS, QUANTIZE_OFFSETS, decode_partition_node, decode_quantize_node},
     pivco_huffman,
-    runtime::DecodeScratch,
+    runtime::StandardNodeContext,
     zstd::decode_zstd_chunk,
 };
 
@@ -116,18 +116,6 @@ pub(super) fn node_header(headers: &[u8], start: usize, len: usize) -> Result<&[
     headers.get(start..end).ok_or_else(|| {
         Error::new(ErrorKind::InvalidGraph).with_detail("node header is out of bounds")
     })
-}
-
-pub(super) struct StandardNodeContext<'a> {
-    pub(super) format_version: u32,
-    pub(super) limits: Limits,
-    pub(super) scratch: &'a mut DecodeScratch,
-    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
-    pub(super) dictionary_bundle_id: Option<&'a [u8]>,
-    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
-    pub(super) dict_store: &'a mut DictionaryStore,
-    #[cfg(feature = "zstd")]
-    pub(super) zstd: &'a mut Option<zrip_decode::context::DecompressContext>,
 }
 
 pub(super) fn execute_standard_node(
