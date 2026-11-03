@@ -6,6 +6,8 @@
   `paranoid` feature stays and has no effect today. The unchecked CSV
   `dispatch_string` row writers are gone, and one checked writer serves
   every shape.
+- Update `zrip-decode` to 0.8.13, `zrip-core` to 0.11.1, and
+  `lz4rip-decode` to 0.11.0, which forbid unsafe code too.
 - A `convert_struct_to_num_le` node with a header names itself in its
   `Unsupported` error detail. It named `convert_num_to_struct_le`.
 - Breaking: remove `Limits::paranoid()`. The `paranoid` feature does not

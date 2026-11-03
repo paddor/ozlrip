@@ -41,7 +41,7 @@ ozlrip-decode = { version = "0.5.0", path = "crates/decode", default-features = 
 [dev-dependencies]
 ozlrip-test-support = { path = "crates/test-support" }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
-zrip = { version = "0.8.11", default-features = false, features = ["alloc"] }
+zrip = { version = "0.8.16", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
