@@ -119,36 +119,40 @@ decodes every frame. A few shapes that no upstream encoder writes return
 
 ## Performance
 
-Decoded MB/s for release candidate 0.6.0 against OpenZL C, called in process
-on the same frames from upstream `dev` (`b75871d`, format v27), on an Intel
-Core i7-8700B. Ratios above 1 mean ozlrip is faster. The headline columns are
-the portable build: default features, no target-cpu flags for ozlrip, `-O3`
-for OpenZL C. The native ratio builds both with native CPU flags.
+Decoded MB/s for 0.6.0 against OpenZL C, called in process on the same frames
+from upstream `dev` (`b75871d`, format v27), on an Intel Core i7-8700B. Ratios
+above 1 mean ozlrip is faster. The headline columns are the portable build:
+default features, no target-cpu flags for ozlrip, `-O3` for OpenZL C, each
+number the median of 3 sweeps. The native ratio builds both with native CPU
+flags, from one sweep.
 
 | case | ozlrip MB/s | OpenZL C MB/s | ratio | native ratio |
 |---|---:|---:|---:|---:|
-| `serial-random-4k` | 4164 | 3824 | 1.09x | 1.11x |
-| `serial-random-1m` | 6342 | 6892 | 0.92x | 0.78x |
-| `serial-repeated-4k` | 1996 | 1252 | 1.59x | 1.73x |
-| `serial-sequential-1m` | 11020 | 11146 | 0.99x | 1.00x |
-| `serial-sequential-16m` | 9010 | 8631 | 1.04x | 1.07x |
-| `u8-rle-16m` | 6150 | 4072 | 1.51x | 1.61x |
-| `le-u32-delta-16m` | 1674 | 711 | 2.35x | 2.06x |
-| `era5-le-i32-sample` | 836 | 976 | 0.86x | 0.82x |
-| `le-u64-timeseries-32m` | 1559 | 725 | 2.15x | 1.98x |
-| `csv-timeseries-3m` | 276 | 200 | 1.38x | 1.30x |
-| `csv-timeseries-30m` | 347 | 227 | 1.53x | 1.64x |
-| `csv-pums-sample` | 353 | 174 | 2.02x | 2.04x |
-| `tbl-supplier-pipe` | 62 | 53 | 1.17x | 1.21x |
-| `sao-fixed-5m` | 1482 | 671 | 2.21x | 2.22x |
-| `sao-fixed-28m` | 1371 | 858 | 1.60x | 1.60x |
-| `sddl2-sao-silesia-28m` | 1051 | 640 | 1.64x | 1.58x |
-| `parquet-canonical-sample` | 83 | 58 | 1.42x | 1.41x |
-| `parquet-nested-sample` | 101 | 78 | 1.28x | 1.24x |
-| `lorem-serial-sample` | 1210 | 1077 | 1.12x | 0.34x |
-| `u16-zigzag-sample` | 794 | 561 | 1.41x | 1.43x |
+| `serial-random-4k` | 4138 | 3830 | 1.08x | 1.13x |
+| `serial-random-1m` | 6319 | 7001 | 0.90x | 0.92x |
+| `serial-repeated-4k` | 1993 | 1251 | 1.59x | 1.66x |
+| `serial-sequential-1m` | 10976 | 11202 | 0.98x | 0.89x |
+| `serial-sequential-16m` | 8325 | 7983 | 1.04x | 1.09x |
+| `u8-rle-16m` | 3263 | 3937 | 0.83x | 0.80x |
+| `le-u32-delta-16m` | 1590 | 709 | 2.24x | 1.91x |
+| `era5-le-i32-sample` | 801 | 970 | 0.83x | 0.85x |
+| `le-u64-timeseries-32m` | 1595 | 734 | 2.17x | 2.10x |
+| `csv-timeseries-3m` | 273 | 202 | 1.35x | 1.31x |
+| `csv-timeseries-30m` | 356 | 213 | 1.67x | 1.66x |
+| `csv-pums-sample` | 317 | 169 | 1.87x | 1.82x |
+| `tbl-supplier-pipe` | 64 | 53 | 1.20x | 1.26x |
+| `sao-fixed-5m` | 1455 | 674 | 2.16x | 2.06x |
+| `sao-fixed-28m` | 1583 | 819 | 1.93x | 1.76x |
+| `sddl2-sao-silesia-28m` | 1127 | 629 | 1.79x | 1.58x |
+| `parquet-canonical-sample` | 86 | 59 | 1.45x | 1.51x |
+| `parquet-nested-sample` | 104 | 78 | 1.34x | 1.33x |
+| `lorem-serial-sample` | 1359 | 1077 | 1.26x | 0.36x |
+| `u16-zigzag-sample` | 768 | 565 | 1.36x | 1.45x |
 
-- OpenZL C decodes `lorem-serial-sample` 3.5x faster with native CPU flags.
+- `u8-rle-16m` lost half its speed in `zrip-decode` 0.8.11, the first
+  safe-only release. On the same machine, ozlrip at `d13b17c` decodes it at
+  6177 MB/s with `zrip-decode` 0.8.10 and 3293 MB/s with 0.8.11.
+- OpenZL C decodes `lorem-serial-sample` 3.6x faster with native CPU flags.
   Most of that time is in its LZ decode loop.
 - `era5-le-i32-sample` moves by up to 10% between builds with code layout
   alone.
