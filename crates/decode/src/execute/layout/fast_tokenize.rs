@@ -44,6 +44,8 @@ fn decode_index_width_1<const ELEMENT_WIDTH: usize>(
     indices: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<()> {
+    let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
+    debug_assert_eq!(tokens.len(), alphabet_size);
     let start_len = output.len();
     let output_len = indices.len() * ELEMENT_WIDTH;
     output.resize(start_len + output_len, 0);
@@ -53,12 +55,7 @@ fn decode_index_width_1<const ELEMENT_WIDTH: usize>(
             .iter()
             .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
-            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
-                alphabet,
-                alphabet_size,
-                usize::from(index),
-                out,
-            )?;
+            write_tokenized_element_fixed(tokens, usize::from(index), out)?;
         }
         Ok(())
     })();
@@ -75,6 +72,8 @@ fn decode_index_width_2<const ELEMENT_WIDTH: usize>(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let elements = indices.len() / 2;
+    let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
+    debug_assert_eq!(tokens.len(), alphabet_size);
     let start_len = output.len();
     let output_len = elements * ELEMENT_WIDTH;
     output.resize(start_len + output_len, 0);
@@ -86,12 +85,7 @@ fn decode_index_width_2<const ELEMENT_WIDTH: usize>(
             .iter()
             .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
-            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
-                alphabet,
-                alphabet_size,
-                usize::from(u16::from_le_bytes(*index)),
-                out,
-            )?;
+            write_tokenized_element_fixed(tokens, usize::from(u16::from_le_bytes(*index)), out)?;
         }
         Ok(())
     })();
@@ -108,6 +102,8 @@ fn decode_index_width_4<const ELEMENT_WIDTH: usize>(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let elements = indices.len() / 4;
+    let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
+    debug_assert_eq!(tokens.len(), alphabet_size);
     let start_len = output.len();
     let output_len = elements * ELEMENT_WIDTH;
     output.resize(start_len + output_len, 0);
@@ -119,9 +115,8 @@ fn decode_index_width_4<const ELEMENT_WIDTH: usize>(
             .iter()
             .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
-            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
-                alphabet,
-                alphabet_size,
+            write_tokenized_element_fixed(
+                tokens,
                 u32::from_le_bytes(*index)
                     .try_into()
                     .map_err(|_| numeric_too_large())?,
@@ -143,6 +138,8 @@ fn decode_index_width_8<const ELEMENT_WIDTH: usize>(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let elements = indices.len() / 8;
+    let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
+    debug_assert_eq!(tokens.len(), alphabet_size);
     let start_len = output.len();
     let output_len = elements * ELEMENT_WIDTH;
     output.resize(start_len + output_len, 0);
@@ -154,9 +151,8 @@ fn decode_index_width_8<const ELEMENT_WIDTH: usize>(
             .iter()
             .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
         {
-            write_tokenized_element_fixed::<ELEMENT_WIDTH>(
-                alphabet,
-                alphabet_size,
+            write_tokenized_element_fixed(
+                tokens,
                 u64::from_le_bytes(*index)
                     .try_into()
                     .map_err(|_| numeric_too_large())?,
@@ -236,14 +232,12 @@ fn decode_tokenize_indices_generic(
 #[expect(clippy::inline_always, reason = "profiled: one call per token")]
 #[inline(always)]
 fn write_tokenized_element_fixed<const ELEMENT_WIDTH: usize>(
-    alphabet: &[u8],
-    alphabet_size: usize,
+    tokens: &[[u8; ELEMENT_WIDTH]],
     index: usize,
-    out: &mut [u8],
+    out: &mut [u8; ELEMENT_WIDTH],
 ) -> Result<()> {
-    validate_index(index, alphabet_size)?;
-    let start = index * ELEMENT_WIDTH;
-    out.copy_from_slice(&alphabet[start..start + ELEMENT_WIDTH]);
+    // One check both validates the index and bounds the token read.
+    *out = *tokens.get(index).ok_or_else(index_out_of_bounds)?;
     Ok(())
 }
 
