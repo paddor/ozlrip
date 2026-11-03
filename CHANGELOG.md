@@ -2,6 +2,230 @@
 
 ## [Unreleased]
 
+## [0.6.0]
+
+- Decode fixed-width `tokenize` outputs into pooled buffers. A fresh
+  buffer per decode page-faulted on its first write to every page:
+  `sao-fixed-28m` decodes 36% faster in a portable build, and
+  `sao-fixed-5m` 9%.
+- Pooled buffers keep their bytes, so delta, transpose, bitpack and
+  fixed-width tokenize outputs skip zero-filling bytes they overwrite.
+  `le-u64-timeseries-32m` decodes 5% faster in a portable build.
+- Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the
+  `paranoid` feature stays and has no effect today. The unchecked CSV
+  `dispatch_string` row writers are gone, and one checked writer serves
+  every shape. Against the unsafe build on the same machine, portable
+  decoding is 11-15% slower on CSV frames, 4-10% slower on SAO frames, and
+  9% faster on `lorem-serial-sample`; other cases are within 5%.
+- Update `zrip-decode` to 0.8.13, `zrip-core` to 0.11.1, and
+  `lz4rip-decode` to 0.11.0, which forbid unsafe code too.
+- A `convert_struct_to_num_le` node with a header names itself in its
+  `Unsupported` error detail. It named `convert_num_to_struct_le`.
+- Breaking: remove `Limits::paranoid()`. The `paranoid` feature does not
+  change limits; a preset with the same name suggested otherwise. Start
+  from `Limits::strict()` and lower the fields you need.
+- Add `Limits::expansion_ratio_exempt_bytes`: decoded outputs up to this
+  size skip `max_expansion_ratio` (1 MiB by default). Very
+  compressible data compresses past the default ratio of 256, so frames
+  that upstream writes for 24 KB of constant numbers or 320 KB of repeated
+  text failed with `LimitExceeded`.
+- Document every public item; the crates warn on missing docs. The crate
+  docs list the entry points and the cargo features.
+- Track PivCo-Huffman in the feature compatibility manifest, backed by a
+  zli interop case whose LZ literals upstream codes with PivCo-Huffman.
+- Add `DictionaryProvider`, like upstream's `ZL_DictLoader`, and
+  `Decoder::set_dictionary_provider`. A decoder asks its provider for the
+  dictionary bundle a frame names when it has not loaded it, then keeps the
+  bundle loaded. A bundle whose ID differs from the one asked for returns
+  `Malformed`.
+- Add `Decoder::decode_chunks`, which decodes a frame with a single serial
+  output one chunk at a time and passes each chunk's bytes to a callback.
+  Decoded memory peaks at one chunk. Each chunk's content checksum is
+  verified before the callback sees it; an error from the callback stops
+  decoding.
+- A new interop test compresses a spread of inputs with upstream at every
+  format version it writes, 8 to 27, through every standard graph, chains
+  of numeric nodes and upstream's private deprecated nodes. ozlrip decodes
+  each frame to its input. The test found these gaps, now decoded:
+  - zstd nodes before format v9, which keep the zstd magic number.
+  - `delta_int` before format v13, which keeps the first value in the
+    stream instead of the header.
+  - `range_pack` outputs of 2, 4 and 8 bytes.
+  - `bitunpack` inputs wider than a byte, up to 64 bits.
+  - The Huffman modes of the deprecated entropy codecs, for bytes and 16-bit
+    symbols, also in `rolz_deprecated` and `fastlz_deprecated` literals.
+  - `zstd_fixed` records wider than a byte.
+- Shapes that no upstream encoder writes still return `Unsupported`; the
+  README lists them. A `range_pack` or `bitunpack` header that upstream
+  rejects returns `Malformed` instead of `Unsupported`.
+- Add `inspect_header`, which reads the frame header from a prefix that
+  holds only the header: format version, output count, types, sizes and
+  element counts, comment and dictionary bundle id. A shorter prefix
+  returns `Truncated`. `FrameHeaderInfo::header_bytes` says how much of the
+  frame the header takes.
+- Add `frame_size`, the size of the frame at the start of a buffer that may
+  continue past it, as upstream `ZL_getCompressedSize` reports it. It reads
+  the frame and chunk headers but checks neither checksums nor the node
+  graph. An interop test matches upstream on every prefix of frames in
+  every format version.
+- Add `decode_outputs`, which decodes every frame output with its type as an
+  `Output`: serial bytes, structs, little-endian numerics, or strings with
+  their lengths. `Decoder::decode_outputs_into` and `decode_outputs_into`
+  reuse the caller's buffers. Each output's type is checked against the
+  frame header and its width stays the same across chunks. The content
+  checksum covers all outputs, string lengths included from format v15, as
+  upstream computes it. `decode` still decodes single serial outputs only.
+- Add `Options::verify_content_checksum` and
+  `Options::verify_compressed_checksum`, upstream's two checksum decode
+  parameters. Both default to `true`. The compressed option also covers the
+  one-byte frame header checksum.
+- Breaking: remove the `checksum` feature. Checksum verification is always
+  compiled, and the options above turn it off at run time.
+- A node whose header or input stream ends early returns `Malformed`.
+  Some deprecated entropy and LZ nodes, `pivco_huffman`, and varints inside
+  node headers returned `Truncated`, which now only means the frame bytes
+  ended early.
+- A non-empty transform header on a node whose upstream decoder reads none
+  returns `Unsupported` for every node. `dispatch_string`, `dispatchN_byTag`,
+  `parse_int`, `prefix`, `separate_string_components`,
+  `convert_string_to_serial` and `float_deconstruct` before v5 returned
+  `Malformed`, and a `convert_string_to_serial` tail after `dispatch_string`
+  returned `InvalidGraph`.
+- `LimitExceeded` errors from frame parsing name the `Limits` field and
+  show the value and the bound, for example
+  `max_frame_bytes exceeds its limit: 42 > 41`.
+- Add `ErrorKind::AllocationFailed`. A buffer that fits the configured
+  limits but cannot be allocated returns it instead of `LimitExceeded`.
+- An `Unsupported` error for a transform outside its format version range
+  names the transform and the version.
+- Update `zrip-decode` to 0.8.10. It caps a zstd frame's output at its
+  declared content size and reserves that size up front, which the zstd node
+  used to do itself.
+- `Decoder::new` no longer allocates: the zstd context is created for the
+  first zstd frame or node, and `inspect` no longer builds a decoder.
+  One-shot `decode` of a small stored frame takes 0.38 µs instead of 1.2 µs.
+- zstd nodes size their output from the zstd frame's content size, as
+  upstream does. They reserved 128 KiB per block, and an output with a
+  content size doubled its buffer on the last block. One-shot `decode` of
+  `u16-zigzag-sample` takes 9.3 µs instead of 25 µs.
+- Intermediate buffers stay in the `Decoder`'s scratch pool: zstd and
+  constant node outputs, the streams a direct-append tail reads, and chunk
+  outputs after they are appended. The pool hands out the smallest buffer
+  that fits and keeps at most 64 buffers and 64 MiB. In a portable build,
+  `csv-timeseries-30m` decodes 51%, `sao-fixed-28m` 50%,
+  `sddl2-sao-silesia-28m` 35%, `tbl-supplier-pipe` 85%, and
+  `parquet-nested-sample` 111% faster.
+- Add `Decoder::shrink_to_fit`, which frees the pooled buffers and zstd
+  state.
+- Transpose-split nodes pick the best SIMD level at runtime (with `std`, not
+  `paranoid`), so portable builds vectorize them. `le-u32-delta-16m` decodes
+  49% and `le-u64-timeseries-32m` 33% faster in a portable build, matching a
+  native build.
+- Faster quantize and partition decoding: the forward bit reader keeps
+  pending bits in a register and refills eight bytes at a time. It is now
+  safe code; the unsafe `fast_bitreader` leaf is gone.
+  `era5-le-i32-sample` decodes 6% faster in a portable build.
+- Faster interleaved FSE decoding (`fse_v2` and the deprecated FSE paths):
+  one bit-reader refill per four state updates. `era5-le-i32-sample` decodes
+  14% faster in a portable build.
+- Add `Limits::max_dictionaries` (1024 by default) and
+  `Limits::max_dictionary_bytes` (64 MiB by default). They bound
+  all dictionary bundles a `Decoder` holds and are checked from a bundle's
+  header, before its dictionaries are parsed. A bundle could declare 65,535
+  dictionaries.
+- zstd dictionaries build their decode context on first use instead of at
+  load, so unused dictionaries hold no decode workspace.
+- Verify checksums in frames before format v21. Their flags sit in the chunk
+  header, and the compressed checksum covers the whole frame. They were
+  skipped, so corrupted or truncated legacy frames could decode.
+  `FrameInfo::has_decoded_checksum` and `has_encoded_checksum` now report
+  them.
+- Reject trailing bytes after a frame in every format version, as upstream
+  does. Before, only v21 and later rejected them.
+- `huffman_v2` tables with table log 12 return `Unsupported` instead of
+  `Malformed`. The format allows log 12, but no upstream encoder since the
+  first release writes more than 11, and `zrip` decodes at most 11.
+- Deprecated ROLZ nodes reject a rep0 match code that carries an offset
+  delta, as upstream does since `cfcdf49`. Upstream's out-of-bounds
+  reproducer for that fix is now a regression test.
+- A frame that ends right after its header is truncated. It was accepted as
+  a frame with no chunks, including v21+ frames without the end-of-frame
+  marker. Upstream always reads a chunk before v21 and the marker from v21.
+- lz4 nodes reject a declared size above 255 times the block size before
+  allocating. No LZ4 block can expand further.
+- The `split_by_struct` to `splitn` fast path checks that all `splitn` inputs
+  have the same element width, as the general `splitn` decoder does. It
+  accepted frames the general path rejects.
+- `concat` nodes check their size table against the graph's output count
+  before reserving outputs. A large size table could reserve about 16 times
+  its own size in stream headers before the mismatch was reported.
+- Fix 2-, 4-, and 8-byte delta decoding on big-endian targets: the first
+  element was written in native byte order.
+- Update codec dependencies: `zrip-decode` 0.8.9 replaces `zrip`, so the zstd
+  encoder is no longer built; `zrip-core` 0.11; `lz4rip-decode` 0.10.4
+  replaces `lz4rip`; `fearless_simd` 1.0. A fresh resolve no longer builds two
+  versions of `zrip-core` or `fearless_simd`.
+- The `zstd` and `lz4` features need only `alloc`, so `no_std` builds decode
+  zstd and lz4 nodes. `std` still enables runtime CPU feature detection in the
+  codecs.
+- `paranoid` also enables `paranoid` in `zrip-core`, `zrip-decode`, and
+  `lz4rip-decode`.
+- lz4 block errors include the codec's error message in their detail.
+- Breaking: remove the no-op `checksum` feature from `ozlrip-core`.
+- Add `Limits::max_live_bytes`: the most bytes all intermediate streams of
+  one chunk may hold at once (512 MiB by default). Before, only
+  each stream was bounded, so a hostile chunk could hold many buffers of
+  `max_buffer_bytes` each. The largest observed need is about 3.5 times the
+  chunk output, for a wide CSV sample.
+- Check decoded output against the size the frame declares before reserving
+  anything, after every chunk, and at the end. A tiny frame that declares a
+  huge output now fails on the expansion ratio instead of reserving it, and a
+  chunk that overruns the declared size is reported as such instead of as a
+  later chunk's checksum failure. zstd output that decodes straight into the
+  caller's buffer is capped at the remaining declared size.
+- The single-zstd fast path enforces the expansion ratio exactly. It used a
+  floor division that accepted slightly more output than allowed.
+- Fix quantize and partition decoding of 25- to 32-bit extra bits that start
+  mid-byte. Release builds returned wrong values; debug builds panicked.
+- Breaking: remove the decoder plan cache, `Options::plan_cache_max_frame_bytes`
+  and `DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES`. The cache only helped when the
+  exact same frame bytes were decoded again, cost a frame copy and plan clone
+  on every miss, and let a reused `Decoder` accept typed-output frames on the
+  second call that it rejected on the first.
+- Unsupported dictionary use is rejected when a chunk's execution plan is
+  built, so direct-append paths can no longer skip the check.
+- `decode_into` no longer replaces an empty caller `Vec` that already has
+  enough capacity, so reserved capacity is kept.
+- Decode OpenZL format v27, the version upstream writes by default, in every
+  build. Breaking: remove the `dev-format` feature.
+- Match upstream's per-transform format version ranges: `transpose_split` is
+  accepted from v11 and `convert_serial_string`/`separate_string_components`
+  from v10. Deprecated transforms are rejected after their last version
+  (`zstd_fixed` after v10, FastLZ and ROLZ after v12, deprecated FSE and
+  Huffman after v14).
+- Breaking: `Limits`, `Options`, `FrameInfo`, `ErrorKind`, and
+  `FrameValueType` are `#[non_exhaustive]`. Build `Limits` from
+  `Limits::strict()` or `Limits::default()` and set
+  fields; build `Options` from `Options::default()` or the new
+  `Options::from(limits)`.
+- Breaking: `Limits::default()` is always `Limits::strict()`. The `paranoid`
+  feature no longer changes it.
+- Breaking: rename `FrameInfo::inputs` to `FrameInfo::outputs`.
+- Breaking: remove `Decoder::load_fat_bundle`; use
+  `Decoder::load_dictionary_bundle`.
+- Breaking: `FrameInfo` and `FrameValueType` move from `ozlrip-core` to
+  `ozlrip-decode`. `FrameValueType` is now re-exported from `ozlrip`.
+- `Error::with_detail` takes `impl Into<Cow<'static, str>>`, so static
+  details no longer allocate.
+- `Error` implements `core::error::Error` without the `std` feature, and its
+  `Display` output uses readable kind names instead of `Debug` names.
+- `Decoder` implements `Debug` and is checked to be `Send + Sync`.
+- Remove the `interop` feature. The upstream interop tests are now ignored
+  tests that require `OZLRIP_ZLI` or an `OZLRIP_ZLI_<release>` variable and
+  fail when it is missing. Run them with `cargo test --test interop -- --ignored`.
+- Release smoke tests only run cases whose profile the release's `zli`
+  supports, and now cover OpenZL v0.0.23 and v0.1.0 in CI.
+
 ## [0.5.0]
 
 - Update `zrip`, `zrip-core`, `lz4rip`, and `fearless_simd` dependencies.

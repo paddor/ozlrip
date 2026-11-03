@@ -1,0 +1,51 @@
+use alloc::{string::ToString, vec::Vec};
+
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use crate::execute::header::require_empty_header;
+use crate::execute::output::check_output_len;
+use crate::execute::{
+    elements::numeric_element_count,
+    streams::{OwnedStream, StreamInput},
+};
+
+pub(in crate::execute) fn decode_parse_int_node(
+    input: StreamInput<'_>,
+    header: &[u8],
+    limits: Limits,
+) -> Result<OwnedStream> {
+    require_empty_header(header, "parse_int headers are unsupported")?;
+    if input.element_width != 8 {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("parse_int input must be width-8 numeric values"));
+    }
+    if input.string_lengths.is_some() {
+        return Err(Error::new(ErrorKind::InvalidType)
+            .with_detail("parse_int input must be numeric, not string"));
+    }
+
+    let count = numeric_element_count(input.bytes, input.element_width)?;
+    let mut lengths = Vec::new();
+    lengths.try_reserve_exact(count).map_err(|_| {
+        Error::new(ErrorKind::AllocationFailed).with_detail("parse_int length allocation failed")
+    })?;
+
+    let mut output = Vec::new();
+    for raw in input.bytes.as_chunks::<8>().0 {
+        let text = i64::from_le_bytes(*raw).to_string();
+        let len = u32::try_from(text.len()).map_err(|_| Error::new(ErrorKind::IntegerOverflow))?;
+        let new_len = output
+            .len()
+            .checked_add(text.len())
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
+        check_output_len(new_len, limits)?;
+        lengths.push(len);
+        output.try_reserve_exact(text.len()).map_err(|_| {
+            Error::new(ErrorKind::AllocationFailed)
+                .with_detail("parse_int output allocation failed")
+        })?;
+        output.extend_from_slice(text.as_bytes());
+    }
+
+    Ok(OwnedStream::strings(output, lengths))
+}

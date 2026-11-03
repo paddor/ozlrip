@@ -1,6 +1,6 @@
 [package]
 name = "ozlrip-core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Shared types for ozlrip"
@@ -15,8 +15,8 @@ workspace = true
 default = ["std"]
 std = ["alloc"]
 alloc = []
-checksum = []
+# No effect today: every build is safe Rust. Kept so existing feature lists
+# build, and to keep any future `unsafe` out of builds that enable it.
 paranoid = []
-dev-format = []
 
 [dependencies]

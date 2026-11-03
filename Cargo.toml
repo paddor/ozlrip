@@ -1,11 +1,11 @@
 [workspace]
-members = [".", "crates/core", "crates/decode"]
-exclude = ["bench", "fuzz"]
+members = [".", "crates/core", "crates/decode", "crates/test-support"]
+exclude = ["bench", "fuzz", "interop", "tools/openzl-shim"]
 resolver = "3"
 
 [package]
 name = "ozlrip"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Memory-safe Rust decoder-first implementation of OpenZL"
@@ -25,22 +25,23 @@ include = [
 ]
 
 [features]
-default = ["std", "alloc", "zstd", "lz4", "checksum"]
+default = ["std", "alloc", "zstd", "lz4"]
 std = ["alloc", "ozlrip-core/std", "ozlrip-decode/std"]
 alloc = ["ozlrip-core/alloc", "ozlrip-decode/alloc"]
 zstd = ["ozlrip-decode/zstd"]
 lz4 = ["ozlrip-decode/lz4"]
-checksum = ["ozlrip-core/checksum", "ozlrip-decode/checksum"]
+# No effect today: every build is safe Rust. Kept so existing feature lists
+# build, and to keep any future `unsafe` out of builds that enable it.
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
-dev-format = ["ozlrip-core/dev-format", "ozlrip-decode/dev-format"]
-interop = ["std", "ozlrip-decode/interop"]
 
 [dependencies]
-ozlrip-core = { version = "0.5.0", path = "crates/core", default-features = false }
-ozlrip-decode = { version = "0.5.0", path = "crates/decode", default-features = false }
+ozlrip-core = { version = "0.6.0", path = "crates/core", default-features = false }
+ozlrip-decode = { version = "0.6.0", path = "crates/decode", default-features = false }
 
 [dev-dependencies]
+ozlrip-test-support = { path = "crates/test-support" }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+zrip = { version = "0.8.16", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
@@ -52,7 +53,6 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
-too_many_lines = "allow"
 doc_markdown = "allow"
 
 [profile.release]

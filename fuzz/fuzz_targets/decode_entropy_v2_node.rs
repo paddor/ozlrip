@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
+use ozlrip_test_support::{MAGIC_BASE, bits_needed, push_bitpacked_u32, push_var_u64};
 
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
 const FSE_V2_ID: u32 = 49;
 const HUFFMAN_V2_ID: u32 = 50;
 const HUFFMAN_STRUCT_V2_ID: u32 = 51;
@@ -47,27 +47,19 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let frame = entropy_v2_graph_frame(transform_id, decoded_len, &header, &[&table, bits]);
-    let limits = Limits {
-        max_frame_bytes: 8192,
-        max_decoded_bytes: 4096,
-        max_chunks: 1,
-        max_nodes: 1,
-        max_streams: 3,
-        max_transform_header_bytes: 9,
-        max_stored_stream_bytes: 8192,
-        max_buffer_bytes: 4096,
-        max_graph_depth: 1,
-        max_expansion_ratio: 4096,
-    };
+    let mut limits = Limits::strict();
+    limits.max_frame_bytes = 8192;
+    limits.max_decoded_bytes = 4096;
+    limits.max_chunks = 1;
+    limits.max_nodes = 1;
+    limits.max_streams = 3;
+    limits.max_transform_header_bytes = 9;
+    limits.max_stored_stream_bytes = 8192;
+    limits.max_buffer_bytes = 4096;
+    limits.max_graph_depth = 1;
+    limits.max_expansion_ratio = 4096;
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(
-        &frame,
-        &mut output,
-        ozlrip::Options {
-            limits,
-            ..ozlrip::Options::default()
-        },
-    );
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
 
 fn fse_norm(selector: u8, seed: &[u8]) -> Vec<u8> {
@@ -148,39 +140,4 @@ fn entropy_v2_graph_frame(
     }
     input.push(0);
     input
-}
-
-fn push_bitpacked_u32(out: &mut Vec<u8>, values: &[u32], bits: usize) {
-    if values.is_empty() || bits == 0 {
-        return;
-    }
-    let mut packed = vec![0; (values.len() * bits).div_ceil(8)];
-    for (index, &value) in values.iter().enumerate() {
-        let bit_offset = index * bits;
-        let byte_offset = bit_offset / 8;
-        let bit_shift = bit_offset % 8;
-        let lane = u64::from(value) << bit_shift;
-        let lane_bytes = lane.to_le_bytes();
-        let byte_count = (bit_shift + bits).div_ceil(8);
-        for byte_index in 0..byte_count {
-            packed[byte_offset + byte_index] |= lane_bytes[byte_index];
-        }
-    }
-    out.extend_from_slice(&packed);
-}
-
-fn bits_needed(max_value: usize) -> usize {
-    if max_value <= 1 {
-        0
-    } else {
-        usize::BITS as usize - (max_value - 1).leading_zeros() as usize
-    }
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

@@ -9,14 +9,11 @@ build = "build.rs"
 
 [features]
 default = ["ozlrip/default"]
-no-checksum = ["ozlrip/std", "ozlrip/zstd", "ozlrip/lz4"]
-paranoid = ["ozlrip/default", "ozlrip/paranoid"]
+no-checksum = ["ozlrip/default"]
 
 [dependencies]
+openzl-shim = { path = "../tools/openzl-shim" }
 ozlrip = { path = "..", default-features = false }
-
-[build-dependencies]
-cc = "1.2"
 
 [[bench]]
 name = "decode_profiles"

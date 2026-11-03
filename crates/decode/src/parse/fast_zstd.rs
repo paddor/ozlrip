@@ -1,0 +1,192 @@
+use crate::standard;
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
+
+use super::chunk::{
+    read_count, read_transform_count, standard_transform_id_bits, verify_compressed_checksum,
+};
+use super::header::{
+    FrameFlags, format_version_from_magic, runtime_input_limit, verify_header_checksum,
+};
+use super::reader::{
+    Reader, bits_needed, check_format_limit, check_limit, read_single_low_bits_u32,
+};
+use super::{ByteRange, CHUNK_VERSION_MIN};
+
+pub(crate) fn parse_single_zstd_frame(
+    input: &[u8],
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<Option<SingleZstdFrame>> {
+    check_limit(input.len(), limits.max_frame_bytes, "max_frame_bytes")?;
+    let mut reader = Reader::new(input);
+    let Some(header) = read_single_output_header(&mut reader, limits, verify_compressed)? else {
+        return Ok(None);
+    };
+    if reader.peek_byte()? == 0 {
+        return Ok(None);
+    }
+    let chunk_start = reader.offset();
+    if !read_single_zstd_node(&mut reader, header.format_version, limits)? {
+        return Ok(None);
+    }
+    let stored = read_stored_stream(&mut reader, limits)?;
+    let decoded_checksum = if header.flags.has_decoded_checksum() {
+        Some(reader.read_u32_le()?)
+    } else {
+        None
+    };
+    if header.flags.has_encoded_checksum() {
+        let checksum_offset = reader.offset();
+        let encoded_checksum = Some(reader.read_u32_le()?);
+        if verify_compressed {
+            verify_compressed_checksum(
+                reader.bytes,
+                chunk_start,
+                checksum_offset,
+                encoded_checksum,
+            )?;
+        }
+    }
+    if reader.read_byte()? != 0 || !reader.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SingleZstdFrame {
+        stored,
+        decoded_checksum,
+        decoded_bytes: Some(header.decoded_bytes),
+        frame_bytes: input.len(),
+    }))
+}
+
+struct SingleOutputHeader {
+    format_version: u32,
+    flags: FrameFlags,
+    decoded_bytes: usize,
+}
+
+/// Reads the frame header if it declares one serial output of known size
+/// and has no comment or dictionary bundle ID.
+fn read_single_output_header(
+    reader: &mut Reader<'_>,
+    limits: Limits,
+    verify_compressed: bool,
+) -> Result<Option<SingleOutputHeader>> {
+    let magic = reader.read_u32_le()?;
+    let format_version = format_version_from_magic(magic)?;
+    if format_version < CHUNK_VERSION_MIN {
+        return Ok(None);
+    }
+    let flags = FrameFlags::from_byte(reader.read_byte()?, format_version);
+    if flags.has_bundle_id() || flags.has_comment() {
+        return Ok(None);
+    }
+    let output_token = reader.read_byte()?;
+    let outputs = usize::from(output_token & 0x0f);
+    if outputs != 1 || ((output_token >> 4) & 3) != 0 {
+        return Ok(None);
+    }
+    check_format_limit(
+        outputs,
+        runtime_input_limit(format_version),
+        "frame outputs",
+    )?;
+    check_limit(outputs, limits.max_streams, "max_streams")?;
+    let decoded_bytes = read_single_output_size(reader, limits)?;
+    if flags.has_encoded_checksum() {
+        let checksum_offset = reader.offset();
+        let expected = reader.read_byte()?;
+        if verify_compressed {
+            verify_header_checksum(&reader.bytes[..checksum_offset], expected, checksum_offset)?;
+        }
+    }
+    Ok(Some(SingleOutputHeader {
+        format_version,
+        flags,
+        decoded_bytes,
+    }))
+}
+
+/// Reads the only output's declared size and checks it against the limits.
+fn read_single_output_size(reader: &mut Reader<'_>, limits: Limits) -> Result<usize> {
+    if reader.peek_byte()? == 0 {
+        return Err(Error::at(ErrorKind::Unsupported, reader.offset())
+            .with_detail("unknown OpenZL output sizes are unsupported"));
+    }
+    let encoded = reader.read_var_u64()?;
+    let size = encoded
+        .checked_sub(1)
+        .ok_or_else(|| Error::at(ErrorKind::IntegerOverflow, reader.offset()))?;
+    let size_usize =
+        usize::try_from(size).map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+    check_limit(size_usize, limits.max_buffer_bytes, "max_buffer_bytes")?;
+    check_limit(size_usize, limits.max_decoded_bytes, "max_decoded_bytes")?;
+    Ok(size_usize)
+}
+
+/// Reads a chunk header. Returns whether the chunk holds exactly one zstd
+/// node over one stored stream, with no variable outputs or dictionary.
+fn read_single_zstd_node(
+    reader: &mut Reader<'_>,
+    format_version: u32,
+    limits: Limits,
+) -> Result<bool> {
+    let transforms = read_transform_count(reader, format_version)?;
+    let stored_streams_u64 = read_count(reader, format_version)?;
+    let stored_streams = usize::try_from(stored_streams_u64)
+        .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+    if transforms != 1 || stored_streams != 1 {
+        return Ok(false);
+    }
+    check_limit(transforms, limits.max_nodes, "max_nodes")?;
+    check_limit(stored_streams, limits.max_streams, "max_streams")?;
+    check_limit(1, limits.max_chunks, "max_chunks")?;
+    check_limit(1, limits.max_graph_depth, "max_graph_depth")?;
+
+    if read_single_low_bits_u32(reader, 1)? != 0 {
+        return Ok(false);
+    }
+    let transform_id =
+        read_single_low_bits_u32(reader, standard_transform_id_bits(format_version))?;
+    if transform_id != standard::ZSTD_ID {
+        return Ok(false);
+    }
+    standard::validate_transform_id(transform_id, format_version)?;
+    if read_single_low_bits_u32(reader, 1)? != 0 || read_single_low_bits_u32(reader, 1)? != 0 {
+        return Ok(false);
+    }
+    if format_version >= 16 && read_single_low_bits_u32(reader, 1)? != 0 {
+        return Ok(false);
+    }
+    Ok(read_single_low_bits_u32(reader, bits_needed(2))? == 0)
+}
+
+/// Reads the stored stream's size and skips its bytes.
+fn read_stored_stream(reader: &mut Reader<'_>, limits: Limits) -> Result<ByteRange> {
+    let stored_stream_size = reader.read_var_u64()?;
+    let stored_stream_size = usize::try_from(stored_stream_size)
+        .map_err(|_| Error::at(ErrorKind::LimitExceeded, reader.offset()))?;
+    check_limit(
+        stored_stream_size,
+        limits.max_buffer_bytes,
+        "max_buffer_bytes",
+    )?;
+    check_limit(
+        stored_stream_size,
+        limits.max_stored_stream_bytes,
+        "max_stored_stream_bytes",
+    )?;
+    let stored = ByteRange {
+        start: reader.offset(),
+        len: stored_stream_size,
+    };
+    let _ = reader.read_slice(stored_stream_size)?;
+    Ok(stored)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SingleZstdFrame {
+    pub(crate) stored: ByteRange,
+    pub(crate) decoded_checksum: Option<u32>,
+    pub(crate) decoded_bytes: Option<usize>,
+    pub(crate) frame_bytes: usize,
+}

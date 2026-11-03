@@ -1,0 +1,195 @@
+//! Decoded output is checked against the size the frame header declares:
+//! before anything is reserved, after every chunk, and at the end.
+
+use ozlrip::ErrorKind;
+use ozlrip_test_support::{Chunk, FrameBuilder};
+
+/// A tiny frame that declares 64 MiB of output fails on the expansion ratio
+/// before the decoder reserves anything in the caller's buffer.
+#[test]
+fn declared_size_above_expansion_ratio_fails_before_reserving() {
+    let frame = FrameBuilder::new(21)
+        .serial_output(64 << 20)
+        .chunk(Chunk::stored(*b"abc"))
+        .build();
+    let mut dst = Vec::new();
+
+    let err = ozlrip::decode_into(&frame, &mut dst).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    assert_eq!(dst.capacity(), 0);
+}
+
+/// A frame over a configured limit names that limit in the error detail.
+#[test]
+fn limit_errors_name_the_limit() {
+    let frame = FrameBuilder::new(21)
+        .serial_output(3)
+        .chunk(Chunk::stored(*b"abc"))
+        .build();
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_frame_bytes = frame.len() - 1;
+
+    let err = ozlrip::decode_with_options(&frame, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+    let detail = err.detail().unwrap();
+    assert!(
+        detail.starts_with("max_frame_bytes exceeds its limit"),
+        "{detail}"
+    );
+}
+
+/// With every limit raised, a declared size above `isize::MAX` passes the
+/// checks, and reserving it fails as an allocation failure, not a limit.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn unreservable_declared_size_is_an_allocation_failure() {
+    let declared = 1usize << 63;
+    let frame = FrameBuilder::new(21)
+        .serial_output(declared)
+        .chunk(Chunk::stored(*b"abc"))
+        .build();
+    let mut limits = ozlrip::Limits::strict();
+    limits.max_decoded_bytes = usize::MAX;
+    limits.max_buffer_bytes = usize::MAX;
+    limits.max_expansion_ratio = declared / frame.len() + 1;
+    let mut dst = Vec::new();
+
+    let err = ozlrip::decode_into_with_options(&frame, &mut dst, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::AllocationFailed);
+    assert_eq!(dst.capacity(), 0);
+}
+
+/// A chunk that overruns the declared size fails right away, not after later
+/// chunks have been decoded and checked.
+#[test]
+fn stored_chunk_overrunning_declared_size_fails_before_later_chunks() {
+    let frame = FrameBuilder::new(21)
+        .content_checksum(true)
+        .serial_output(3)
+        .chunk(Chunk::stored(*b"abcd"))
+        .chunk(Chunk::stored(*b"e").decoded(*b"not e"))
+        .build();
+
+    let err = ozlrip::decode(&frame).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+#[cfg(feature = "zstd")]
+fn zstd_stored_stream(decoded: &[u8]) -> Vec<u8> {
+    let compressed = zrip::compress(decoded, 1).unwrap();
+    let mut stored = Vec::new();
+    ozlrip_test_support::push_var_u64(&mut stored, 1);
+    stored.extend_from_slice(&compressed[4..]);
+    stored
+}
+
+#[cfg(feature = "zstd")]
+fn zstd_chunk(decoded: &[u8]) -> Chunk {
+    use ozlrip_test_support::{Node, ZSTD_TRANSFORM_ID};
+
+    Chunk::new()
+        .node(Node::new(ZSTD_TRANSFORM_ID))
+        .stored_stream(zstd_stored_stream(decoded))
+        .decoded(decoded)
+}
+
+/// A zstd chunk that decodes directly into the caller's buffer may not write
+/// past the declared size.
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_chunk_overrunning_declared_size_fails_before_later_chunks() {
+    let payload = b"zstd payload that is longer than declared ".repeat(100);
+    let frame = FrameBuilder::new(21)
+        .content_checksum(true)
+        .serial_output(payload.len() - 1)
+        .chunk(zstd_chunk(&payload))
+        .chunk(Chunk::stored(*b"e").decoded(*b"not e"))
+        .build();
+
+    let err = ozlrip::decode(&frame).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Malformed);
+}
+
+/// Outputs up to `expansion_ratio_exempt_bytes` decode whatever their
+/// expansion ratio; one byte more is held to the ratio again.
+#[cfg(feature = "zstd")]
+#[test]
+fn outputs_up_to_the_exempt_size_skip_the_expansion_ratio() {
+    let exempt = ozlrip::Limits::default().expansion_ratio_exempt_bytes;
+    for (len, fits) in [(exempt, true), (exempt + 1, false)] {
+        let payload = vec![0u8; len];
+        let frame = FrameBuilder::new(21)
+            .serial_output(len)
+            .chunk(zstd_chunk(&payload))
+            .build();
+        assert!(len > frame.len() * ozlrip::Limits::default().max_expansion_ratio);
+
+        match ozlrip::decode(&frame) {
+            Ok(decoded) => assert!(fits && decoded == payload, "{len} bytes"),
+            Err(err) => assert!(!fits && err.kind() == ErrorKind::LimitExceeded, "{err}"),
+        }
+    }
+}
+
+/// Single-zstd frames enforce the expansion ratio exactly, in the fast path
+/// and in the plan-based path (a comment disables the fast path).
+#[cfg(feature = "zstd")]
+#[test]
+fn single_zstd_frame_enforces_exact_expansion_ratio() {
+    for comment in [None, Some(&b"note"[..])] {
+        // Find a payload whose size exceeds frame_len * ratio by less than
+        // frame_len, which a floor division would accept.
+        let (frame, payload, ratio) = (3000usize..)
+            .find_map(|len| {
+                let payload = vec![0u8; len];
+                let mut builder = FrameBuilder::new(22)
+                    .serial_output(len)
+                    .chunk(zstd_chunk(&payload));
+                if let Some(comment) = comment {
+                    builder = builder.comment(comment);
+                }
+                let frame = builder.build();
+                (len % frame.len() != 0).then(|| {
+                    let ratio = len / frame.len();
+                    (frame, payload, ratio)
+                })
+            })
+            .unwrap();
+
+        let mut limits = ozlrip::Limits::strict();
+        limits.expansion_ratio_exempt_bytes = 0;
+        limits.max_expansion_ratio = ratio;
+        let err = ozlrip::decode_with_options(&frame, limits.into()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded, "comment {comment:?}");
+
+        limits.max_expansion_ratio = ratio + 1;
+        let decoded = ozlrip::decode_with_options(&frame, limits.into()).unwrap();
+        assert!(decoded == payload, "comment {comment:?}");
+    }
+}
+
+/// String lengths of every output count toward one expansion ratio for the
+/// whole frame, not one ratio per output.
+#[test]
+fn string_lengths_of_all_outputs_share_the_expansion_ratio() {
+    let frame = FrameBuilder::new(21)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .string_output(0, 100)
+        .build();
+    // Each output's 400 length bytes fit the ratio; all 1600 do not.
+    let mut limits = ozlrip::Limits::strict();
+    limits.expansion_ratio_exempt_bytes = 0;
+    limits.max_expansion_ratio = 400usize.div_ceil(frame.len());
+    assert!(1600 > frame.len() * limits.max_expansion_ratio);
+
+    let err = ozlrip::decode_outputs_with_options(&frame, limits.into()).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::LimitExceeded, "{err}");
+}

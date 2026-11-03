@@ -5,6 +5,64 @@ const NODE_COVERAGE: &str = include_str!("fixtures/standard-node-coverage.tsv");
 const ERROR_TAXONOMY: &str = include_str!("fixtures/error-taxonomy.tsv");
 const FEATURE_COMPATIBILITY: &str = include_str!("fixtures/feature-compatibility.tsv");
 
+/// Error taxonomy categories. The manifest must use each one at least once.
+const ERROR_CATEGORIES: &[&str] = &[
+    "unsupported",
+    "malformed",
+    "truncated",
+    "limit",
+    "invalid_graph",
+    "invalid_type",
+    "overflow",
+    "checksum",
+];
+
+/// Operations an error taxonomy case can run.
+const ERROR_OPERATIONS: &[&str] = &["inspect", "decode", "load-dictionary"];
+
+/// Error kinds an error taxonomy case may expect.
+const ERROR_KINDS: &[&str] = &[
+    "Unsupported",
+    "Malformed",
+    "Truncated",
+    "LimitExceeded",
+    "AllocationFailed",
+    "ChecksumMismatch",
+    "InvalidGraph",
+    "InvalidType",
+    "IntegerOverflow",
+];
+
+/// Error kinds the error taxonomy manifest must cover.
+const REQUIRED_ERROR_KINDS: &[&str] = &[
+    "Unsupported",
+    "Malformed",
+    "Truncated",
+    "LimitExceeded",
+    "ChecksumMismatch",
+    "InvalidGraph",
+    "InvalidType",
+    "IntegerOverflow",
+];
+
+/// Features an error taxonomy case may require.
+const ERROR_FEATURES: &[&str] = &["none", "lz4"];
+
+/// Profiles a feature compatibility row may name.
+const COMPATIBILITY_PROFILES: &[&str] = &[
+    "serial",
+    "u8",
+    "i8",
+    "le-u16",
+    "le-i32",
+    "csv",
+    "sao",
+    "sddl2",
+    "parquet",
+    "numeric-ml-selector-64",
+    "zstd",
+];
+
 #[test]
 fn openzl_release_matrix_tracks_known_checkpoints() {
     let rows = parse_tsv(RELEASE_MATRIX, "checkpoint\tkind\tsource\tverification", 4);
@@ -70,83 +128,17 @@ fn error_taxonomy_manifest_tracks_public_error_classes() {
     let mut kinds = BTreeSet::new();
 
     for row in rows {
-        assert!(
-            cases.insert(row[0]),
-            "duplicate error taxonomy case {}",
-            row[0]
-        );
-        assert!(
-            matches!(
-                row[1],
-                "unsupported"
-                    | "malformed"
-                    | "truncated"
-                    | "limit"
-                    | "invalid_graph"
-                    | "invalid_type"
-                    | "overflow"
-                    | "checksum"
-            ),
-            "bad error taxonomy category {}",
-            row[1]
-        );
-        assert!(
-            matches!(row[2], "inspect" | "decode" | "load-dictionary"),
-            "bad error taxonomy operation {}",
-            row[2]
-        );
-        assert!(
-            matches!(
-                row[3],
-                "Unsupported"
-                    | "Malformed"
-                    | "Truncated"
-                    | "LimitExceeded"
-                    | "ChecksumMismatch"
-                    | "InvalidGraph"
-                    | "InvalidType"
-                    | "IntegerOverflow"
-            ),
-            "bad error taxonomy kind {}",
-            row[3]
-        );
-        assert!(
-            matches!(row[4], "none" | "checksum"),
-            "bad error taxonomy feature {}",
-            row[4]
-        );
+        assert_unique(&mut cases, row[0], "error taxonomy case");
+        assert_member(row[1], ERROR_CATEGORIES, "error taxonomy category");
+        assert_member(row[2], ERROR_OPERATIONS, "error taxonomy operation");
+        assert_member(row[3], ERROR_KINDS, "error taxonomy kind");
+        assert_member(row[4], ERROR_FEATURES, "error taxonomy feature");
         categories.insert(row[1]);
         kinds.insert(row[3]);
     }
 
-    for category in [
-        "unsupported",
-        "malformed",
-        "truncated",
-        "limit",
-        "invalid_graph",
-        "invalid_type",
-        "overflow",
-        "checksum",
-    ] {
-        assert!(
-            categories.contains(category),
-            "missing error taxonomy category {category}"
-        );
-    }
-
-    for kind in [
-        "Unsupported",
-        "Malformed",
-        "Truncated",
-        "LimitExceeded",
-        "ChecksumMismatch",
-        "InvalidGraph",
-        "InvalidType",
-        "IntegerOverflow",
-    ] {
-        assert!(kinds.contains(kind), "missing error taxonomy kind {kind}");
-    }
+    assert_covers(&categories, ERROR_CATEGORIES, "error taxonomy category");
+    assert_covers(&kinds, REQUIRED_ERROR_KINDS, "error taxonomy kind");
 }
 
 #[test]
@@ -161,58 +153,52 @@ fn feature_compatibility_manifest_tracks_profiles() {
     let mut profiles = BTreeSet::new();
 
     for row in rows {
-        assert!(
-            features.insert(row[0]),
-            "duplicate feature compatibility feature {}",
-            row[0]
-        );
-        assert!(
-            cases.insert(row[1]),
-            "duplicate feature compatibility case {}",
-            row[1]
-        );
-        assert!(
-            matches!(
-                row[2],
-                "serial"
-                    | "u8"
-                    | "i8"
-                    | "le-u16"
-                    | "le-i32"
-                    | "csv"
-                    | "sao"
-                    | "sddl2"
-                    | "parquet"
-                    | "numeric-ml-selector-64"
-                    | "zstd"
-            ),
-            "bad feature compatibility profile {}",
-            row[2]
+        assert_unique(&mut features, row[0], "feature compatibility feature");
+        assert_unique(&mut cases, row[1], "feature compatibility case");
+        assert_member(
+            row[2],
+            COMPATIBILITY_PROFILES,
+            "feature compatibility profile",
         );
         assert!(!row[3].is_empty(), "profile_arg must be present");
         assert!(!row[4].is_empty(), "coverage must be present");
         profiles.insert(row[2]);
     }
 
-    for feature in [
-        "serial-profile",
-        "csv-dispatch",
-        "sao-structured",
-        "sddl2-structured",
-        "parquet-structured",
-        "zstd-profile",
-    ] {
-        assert!(
-            features.contains(feature),
-            "missing feature compatibility row for {feature}"
-        );
-    }
+    assert_covers(
+        &features,
+        &[
+            "serial-profile",
+            "csv-dispatch",
+            "sao-structured",
+            "sddl2-structured",
+            "parquet-structured",
+            "zstd-profile",
+            "pivco-huffman",
+        ],
+        "feature compatibility row for",
+    );
+    assert_covers(
+        &profiles,
+        &["serial", "csv", "sao", "sddl2", "parquet", "zstd"],
+        "feature compatibility profile",
+    );
+}
 
-    for profile in ["serial", "csv", "sao", "sddl2", "parquet", "zstd"] {
-        assert!(
-            profiles.contains(profile),
-            "missing feature compatibility profile {profile}"
-        );
+/// Asserts that `value` was not seen before and records it in `seen`.
+fn assert_unique<'a>(seen: &mut BTreeSet<&'a str>, value: &'a str, what: &str) {
+    assert!(seen.insert(value), "duplicate {what} {value}");
+}
+
+/// Asserts that `value` is one of `allowed`.
+fn assert_member(value: &str, allowed: &[&str], what: &str) {
+    assert!(allowed.contains(&value), "bad {what} {value}");
+}
+
+/// Asserts that `seen` contains every value in `required`.
+fn assert_covers(seen: &BTreeSet<&str>, required: &[&str], what: &str) {
+    for value in required {
+        assert!(seen.contains(value), "missing {what} {value}");
     }
 }
 

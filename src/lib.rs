@@ -1,9 +1,17 @@
 //! Memory-safe Rust decoder for OpenZL standard-codec frames.
 //!
-//! Use [`decode`] for the common owned-output case, [`decode_into`] to append
-//! into an existing buffer, and [`inspect`] to parse metadata without executing
-//! the frame graph. Use the `*_with_options` variants or [`Decoder::with_options`]
-//! when the default decoder options are not appropriate.
+//! - [`decode`] and [`decode_into`] decode a frame with one serial output.
+//! - [`decode_outputs`] decodes every output of a frame with its type:
+//!   bytes, fixed-width records, integers or strings.
+//! - [`Decoder`] keeps buffers, codec state and dictionary bundles between
+//!   frames. [`Decoder::decode_chunks`] decodes a large frame one chunk at a
+//!   time.
+//! - [`inspect`], [`inspect_header`] and [`frame_size`] read frame metadata
+//!   without decoding.
+//!
+//! The `*_with_options` variants and [`Decoder::with_options`] take
+//! [`Options`]: the [`Limits`] that bound work on untrusted input, and
+//! whether to verify checksums.
 //!
 //! ```
 //! let frame = [
@@ -13,13 +21,27 @@
 //! let decoded = ozlrip::decode(&frame).unwrap();
 //! assert_eq!(decoded, [7, 8, 9]);
 //! ```
+//!
+//! # Features
+//!
+//! - `std` (default): SIMD dispatch and `std` support in the codecs.
+//!   Without it the crate is `no_std` and needs `alloc`.
+//! - `alloc` (default): required.
+//! - `zstd` (default): zstd nodes, decoded by `zrip`.
+//! - `lz4` (default): lz4 nodes, decoded by `lz4rip`.
+//! - `paranoid`: keeps any future `unsafe` out; no effect today. Every
+//!   crate is `#![forbid(unsafe_code)]`.
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
-pub use ozlrip_core::{Error, ErrorKind, FrameInfo, Limits, Result};
+pub use ozlrip_core::{Error, ErrorKind, Limits, Result};
 pub use ozlrip_decode::{
-    DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES, Decoder, Options, decode, decode_into,
-    decode_into_with_options, decode_with_options, inspect, inspect_with_options,
+    Decoder, DictionaryProvider, FrameHeaderInfo, FrameInfo, FrameValueType, Options, Output,
+    decode, decode_into, decode_into_with_options, decode_outputs, decode_outputs_into,
+    decode_outputs_into_with_options, decode_outputs_with_options, decode_with_options, frame_size,
+    frame_size_with_options, inspect, inspect_header, inspect_header_with_options,
+    inspect_with_options,
 };

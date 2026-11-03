@@ -1,63 +1,79 @@
+//! OpenZL frame parsing, graph validation and decoding for `ozlrip`.
+//!
+//! Use the `ozlrip` crate; it re-exports everything here.
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use ozlrip_core::{FrameInfo, Limits, Result};
+use alloc::{boxed::Box, vec::Vec};
+use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
+mod arith;
 mod dict;
 mod execute;
+mod info;
+mod outputs;
 mod parse;
+mod provider;
 mod standard;
+mod varint;
+
+pub use info::{FrameHeaderInfo, FrameInfo, FrameValueType};
+pub use outputs::Output;
+pub use provider::DictionaryProvider;
 
 use dict::DictionaryStore;
 
-pub const DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-
 /// Decoder configuration.
 ///
-/// New options should be added here instead of creating new public function
-/// variants.
+/// Start from [`Options::default`] (or `Options::from(limits)`) and change
+/// fields as needed. New options may be added in minor releases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Options {
     /// Defensive parser, graph, allocation, and expansion limits.
     pub limits: Limits,
-    /// Maximum frame size eligible for reusable decoder plan caching.
-    ///
-    /// Set to `0` to disable plan caching.
-    pub plan_cache_max_frame_bytes: usize,
+    /// Verify each chunk's checksum of its decoded content, when the frame
+    /// carries one. Upstream's `ZL_DParam_checkContentChecksum`.
+    pub verify_content_checksum: bool,
+    /// Verify the frame header checksum and each chunk's checksum of its
+    /// compressed bytes, when the frame carries them. Upstream's
+    /// `ZL_DParam_checkCompressedChecksum`.
+    pub verify_compressed_checksum: bool,
 }
 
 impl Default for Options {
+    /// [`Limits::default`], with both checksums verified.
     fn default() -> Self {
+        Self::from(Limits::default())
+    }
+}
+
+impl From<Limits> for Options {
+    /// Default options with the given limits.
+    fn from(limits: Limits) -> Self {
         Self {
-            limits: Limits::default(),
-            plan_cache_max_frame_bytes: DEFAULT_PLAN_CACHE_MAX_FRAME_BYTES,
+            limits,
+            verify_content_checksum: true,
+            verify_compressed_checksum: true,
         }
     }
 }
 
 /// Reusable OpenZL decoder with scratch buffers and codec state.
+///
+/// Between decodes it keeps up to 64 MiB of intermediate buffers for reuse;
+/// [`Decoder::shrink_to_fit`] frees them.
 pub struct Decoder {
     options: Options,
     scratch: execute::DecodeScratch,
     dict_store: DictionaryStore,
-    plan_cache: Option<CachedFramePlan>,
+    dictionary_provider: Option<Box<dyn DictionaryProvider + Send + Sync>>,
+    /// Created on the first zstd frame or node.
     #[cfg(feature = "zstd")]
-    zstd: zrip::DecompressContext,
-}
-
-struct CachedFramePlan {
-    frame: Vec<u8>,
-    plan: parse::FramePlan,
-    execution: CachedExecutionPlan,
-}
-
-enum CachedExecutionPlan {
-    DirectAppend(execute::DirectAppendChunkPlans),
-    ChunkExecution(execute::ChunkExecutionPlans),
-    Unplanned,
+    zstd: Option<zrip_decode::context::DecompressContext>,
 }
 
 impl Decoder {
@@ -72,16 +88,18 @@ impl Decoder {
             options,
             scratch: execute::DecodeScratch::new(),
             dict_store: DictionaryStore::new(),
-            plan_cache: None,
+            dictionary_provider: None,
             #[cfg(feature = "zstd")]
-            zstd: zrip::DecompressContext::new(),
+            zstd: None,
         }
     }
 
+    /// The options this decoder was created with.
     pub fn options(&self) -> Options {
         self.options
     }
 
+    /// The limits in this decoder's options.
     pub fn limits(&self) -> Limits {
         self.options.limits
     }
@@ -90,14 +108,7 @@ impl Decoder {
     ///
     /// Currently only zstd dictionary materialization is implemented.
     pub fn load_dictionary_bundle(&mut self, bytes: &[u8]) -> Result<()> {
-        self.dict_store.load_fat_bundle(bytes)
-    }
-
-    /// Loads a fat OpenZL dictionary bundle for later dictionary-backed decode.
-    ///
-    /// Prefer [`Decoder::load_dictionary_bundle`] for new code.
-    pub fn load_fat_bundle(&mut self, bytes: &[u8]) -> Result<()> {
-        self.load_dictionary_bundle(bytes)
+        self.dict_store.load_fat_bundle(bytes, self.options.limits)
     }
 
     /// Clears all loaded dictionary bundles.
@@ -105,115 +116,180 @@ impl Decoder {
         self.dict_store.clear();
     }
 
+    /// Sets the provider this decoder asks for the dictionary bundles that
+    /// frames name and it has not loaded. Replaces an earlier provider.
+    pub fn set_dictionary_provider<P>(&mut self, provider: P)
+    where
+        P: DictionaryProvider + Send + Sync + 'static,
+    {
+        self.dictionary_provider = Some(Box::new(provider));
+    }
+
+    /// Removes the dictionary provider. Bundles it supplied stay loaded.
+    pub fn clear_dictionary_provider(&mut self) {
+        self.dictionary_provider = None;
+    }
+
+    /// Loads the bundle `plan` names from the provider, unless it is loaded
+    /// or there is no provider.
+    fn fetch_dictionary_bundle(&mut self, plan: &parse::FramePlan) -> Result<()> {
+        let (Some(bundle_id), Some(provider)) = (
+            plan.info.dictionary_bundle_id.as_deref(),
+            &self.dictionary_provider,
+        ) else {
+            return Ok(());
+        };
+        if self.dict_store.contains(bundle_id) {
+            return Ok(());
+        }
+        let bundle_id: &[u8; dict::UNIQUE_ID_BYTES] = bundle_id.try_into().map_err(|_| {
+            Error::new(ErrorKind::Malformed).with_detail("dictionary bundle ID must be 32 bytes")
+        })?;
+        if let Some(bundle) = provider.fat_bundle(bundle_id)? {
+            self.dict_store
+                .load_provided_bundle(&bundle, bundle_id, self.options.limits)?;
+        }
+        Ok(())
+    }
+
+    /// Frees the buffers and codec state kept for reuse between decodes.
+    /// Loaded dictionary bundles stay loaded.
+    pub fn shrink_to_fit(&mut self) {
+        self.scratch.clear();
+        #[cfg(feature = "zstd")]
+        {
+            self.zstd = None;
+        }
+    }
+
     /// Decodes one OpenZL frame and appends the decoded bytes to `dst`.
     ///
     /// Returns the number of bytes appended. On error, `dst` is restored to its
     /// original length.
     pub fn decode_into(&mut self, input: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
+        let options = self.options;
         #[cfg(feature = "zstd")]
-        if let Some(frame) = parse::parse_single_zstd_frame(input, self.options.limits)? {
+        if let Some(frame) = parse::parse_single_zstd_frame(
+            input,
+            options.limits,
+            options.verify_compressed_checksum,
+        )? {
             return execute::decode_single_zstd_frame_with_context(
                 input,
                 frame,
                 dst,
-                self.options.limits,
-                &mut self.zstd,
+                options.limits,
+                options.verify_content_checksum,
+                execute::zstd_context(&mut self.zstd),
             );
         }
-        if let Some(cached) = self.plan_cache.as_ref()
-            && cached.frame == input
-        {
-            let mut runtime = execute::DecodeRuntime::new(
-                &mut self.scratch,
-                &mut self.dict_store,
-                #[cfg(feature = "zstd")]
-                &mut self.zstd,
-            );
-            match &cached.execution {
-                CachedExecutionPlan::DirectAppend(plans) => {
-                    return execute::decode_plan_with_cached_direct_append_plans(
-                        input,
-                        &cached.plan,
-                        plans,
-                        dst,
-                        self.options.limits,
-                        &mut runtime,
-                    );
-                }
-                CachedExecutionPlan::ChunkExecution(plans) => {
-                    return execute::decode_plan_with_cached_chunk_execution_plans(
-                        input,
-                        &cached.plan,
-                        plans,
-                        dst,
-                        self.options.limits,
-                        &mut runtime,
-                    );
-                }
-                CachedExecutionPlan::Unplanned => {}
-            }
-            return execute::decode_plan_with_context(
-                input,
-                &cached.plan,
-                dst,
-                self.options.limits,
-                &mut runtime,
-            );
-        }
-
-        let plan = parse::parse_frame_plan(input, self.options.limits)?;
-        self.remember_frame_plan(input, &plan);
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
         let mut runtime = execute::DecodeRuntime::new(
             &mut self.scratch,
             &mut self.dict_store,
             #[cfg(feature = "zstd")]
             &mut self.zstd,
         );
-        execute::decode_plan_with_context(input, &plan, dst, self.options.limits, &mut runtime)
+        execute::decode_plan_with_context(
+            input,
+            &plan,
+            dst,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+        )
     }
 
-    fn remember_frame_plan(&mut self, input: &[u8], plan: &parse::FramePlan) {
-        if self.options.plan_cache_max_frame_bytes == 0
-            || input.len() > self.options.plan_cache_max_frame_bytes
-        {
-            self.plan_cache = None;
-            return;
-        }
-
-        let mut frame = Vec::new();
-        if frame.try_reserve_exact(input.len()).is_err() {
-            self.plan_cache = None;
-            return;
-        }
-        frame.extend_from_slice(input);
-        let execution = Self::prepare_cached_execution_plan(plan);
-        self.plan_cache = Some(CachedFramePlan {
-            frame,
-            plan: plan.clone(),
-            execution,
-        });
-    }
-
-    fn prepare_cached_execution_plan(plan: &parse::FramePlan) -> CachedExecutionPlan {
-        if let Ok(Some(plans)) = execute::prepare_direct_append_chunk_plans(plan) {
-            return CachedExecutionPlan::DirectAppend(plans);
-        }
-        match execute::prepare_chunk_execution_plans(plan) {
-            Ok(plans) => CachedExecutionPlan::ChunkExecution(plans),
-            Err(_) => CachedExecutionPlan::Unplanned,
-        }
+    /// Decodes a frame with a single serial output chunk by chunk.
+    ///
+    /// Each chunk's decoded bytes go to `sink` in frame order. The next chunk
+    /// reuses their buffer, so decoded memory peaks at one chunk instead of
+    /// the whole output. Returns the total decoded size. Chunks decode one
+    /// after the other; there is no parallel decode.
+    ///
+    /// The whole frame is parsed and its compressed checksums are verified
+    /// first. Each chunk's content checksum is verified before the chunk
+    /// reaches `sink`. The frame's declared output size is checked as chunks
+    /// arrive and after the last one, so `sink` may see chunks of a frame
+    /// that then fails. An error from `sink` stops decoding and is returned.
+    pub fn decode_chunks<F>(&mut self, input: &[u8], mut sink: F) -> Result<usize>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        let options = self.options;
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
+        let mut runtime = execute::DecodeRuntime::new(
+            &mut self.scratch,
+            &mut self.dict_store,
+            #[cfg(feature = "zstd")]
+            &mut self.zstd,
+        );
+        execute::decode_chunks_with_context(
+            input,
+            &plan,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+            &mut sink,
+        )
     }
 
     /// Decodes one OpenZL frame into a new `Vec`.
+    ///
+    /// The frame must have a single serial output; frames with typed or
+    /// several outputs return [`ErrorKind::Unsupported`](ozlrip_core::ErrorKind)
+    /// here and decode with [`Decoder::decode_outputs`].
     pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         self.decode_into(input, &mut output)?;
         Ok(output)
     }
 
+    /// Decodes every output of one OpenZL frame, with its type.
+    pub fn decode_outputs(&mut self, input: &[u8]) -> Result<Vec<Output>> {
+        let mut outputs = Vec::new();
+        self.decode_outputs_into(input, &mut outputs)?;
+        Ok(outputs)
+    }
+
+    /// Decodes every output of one OpenZL frame into `outputs`, replacing
+    /// its entries and reusing their buffers. On error, `outputs` holds one
+    /// entry per output with partial or no content.
+    pub fn decode_outputs_into(&mut self, input: &[u8], outputs: &mut Vec<Output>) -> Result<()> {
+        let options = self.options;
+        let plan = parse::parse_frame(input, options.limits, options.verify_compressed_checksum)?;
+        self.fetch_dictionary_bundle(&plan)?;
+        let mut decoded = outputs
+            .drain(..)
+            .map(Output::into_decoded)
+            .collect::<Vec<_>>();
+        let mut runtime = execute::DecodeRuntime::new(
+            &mut self.scratch,
+            &mut self.dict_store,
+            #[cfg(feature = "zstd")]
+            &mut self.zstd,
+        );
+        let result = execute::decode_outputs_with_context(
+            input,
+            &plan,
+            &mut decoded,
+            options.limits,
+            options.verify_content_checksum,
+            &mut runtime,
+        );
+        outputs.extend(decoded.into_iter().map(Output::from_decoded));
+        result
+    }
+
     /// Parses and validates frame metadata without executing decode nodes.
     pub fn inspect(&self, input: &[u8]) -> Result<FrameInfo> {
-        parse::inspect_frame(input, self.options.limits)
+        parse::inspect_frame(
+            input,
+            self.options.limits,
+            self.options.verify_compressed_checksum,
+        )
     }
 }
 
@@ -222,6 +298,19 @@ impl Default for Decoder {
         Self::new()
     }
 }
+
+impl core::fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Decoder")
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Decoder>();
+};
 
 /// Decodes one OpenZL frame into a new `Vec` using [`Options::default`].
 pub fn decode(input: &[u8]) -> Result<Vec<u8>> {
@@ -250,39 +339,83 @@ pub fn decode_into_with_options(
     Decoder::with_options(options).decode_into(input, dst)
 }
 
+/// Decodes every output of one OpenZL frame using [`Options::default`].
+pub fn decode_outputs(input: &[u8]) -> Result<Vec<Output>> {
+    Decoder::new().decode_outputs(input)
+}
+
+/// Decodes every output of one OpenZL frame using explicit options.
+pub fn decode_outputs_with_options(input: &[u8], options: Options) -> Result<Vec<Output>> {
+    Decoder::with_options(options).decode_outputs(input)
+}
+
+/// Decodes every output of one OpenZL frame into `outputs`, reusing its
+/// buffers, using [`Options::default`].
+pub fn decode_outputs_into(input: &[u8], outputs: &mut Vec<Output>) -> Result<()> {
+    Decoder::new().decode_outputs_into(input, outputs)
+}
+
+/// Decodes every output of one OpenZL frame into `outputs` using explicit
+/// options.
+pub fn decode_outputs_into_with_options(
+    input: &[u8],
+    outputs: &mut Vec<Output>,
+    options: Options,
+) -> Result<()> {
+    Decoder::with_options(options).decode_outputs_into(input, outputs)
+}
+
+/// Size of the OpenZL frame at the start of `input`, using
+/// [`Options::default`]. `input` may continue past the frame, for example
+/// with more frames.
+///
+/// Like upstream `ZL_getCompressedSize`, this reads the frame and chunk
+/// headers but checks neither checksums nor the node graph.
+pub fn frame_size(input: &[u8]) -> Result<usize> {
+    frame_size_with_options(input, Options::default())
+}
+
+/// Size of the OpenZL frame at the start of `input`, using explicit options.
+/// The limits apply to the frame, not to all of `input`.
+pub fn frame_size_with_options(input: &[u8], options: Options) -> Result<usize> {
+    parse::frame_size(input, options.limits)
+}
+
+/// Reads the header at the start of an OpenZL frame, using
+/// [`Options::default`]. `prefix` needs to hold only the header; its size
+/// is [`FrameHeaderInfo::header_bytes`]. The header checksum is verified if
+/// the frame has one.
+pub fn inspect_header(prefix: &[u8]) -> Result<FrameHeaderInfo> {
+    inspect_header_with_options(prefix, Options::default())
+}
+
+/// Reads the header at the start of an OpenZL frame using explicit options.
+pub fn inspect_header_with_options(prefix: &[u8], options: Options) -> Result<FrameHeaderInfo> {
+    parse::inspect_header(prefix, options.limits, options.verify_compressed_checksum)
+}
+
 /// Parses and validates frame metadata using [`Options::default`].
 pub fn inspect(input: &[u8]) -> Result<FrameInfo> {
-    Decoder::default().inspect(input)
+    inspect_with_options(input, Options::default())
 }
 
 /// Parses and validates frame metadata using explicit options.
 pub fn inspect_with_options(input: &[u8], options: Options) -> Result<FrameInfo> {
-    Decoder::with_options(options).inspect(input)
+    parse::inspect_frame(input, options.limits, options.verify_compressed_checksum)
 }
 
 #[cfg(all(test, feature = "zstd"))]
 mod tests {
     use super::*;
+    use alloc::vec;
     use ozlrip_core::ErrorKind;
+    use ozlrip_test_support::{magic, push_var_u64};
 
-    const MAGIC_BASE: u32 = 0xd7b1_a5c0;
     const BUNDLE_INFO_MAGIC: u32 = 0x4942_ccda;
     const PACKED_DICT_MAGIC: u32 = 0x4944_ccda;
     const BUNDLE_ID: [u8; 32] = [7; 32];
     const OTHER_BUNDLE_ID: [u8; 32] = [8; 32];
     const DICT_ID: [u8; 32] = [9; 32];
-
-    fn magic(version: u32) -> [u8; 4] {
-        (MAGIC_BASE + version).to_le_bytes()
-    }
-
-    fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-        while value >= 0x80 {
-            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-            value >>= 7;
-        }
-        out.push(u8::try_from(value).unwrap());
-    }
 
     #[cfg(feature = "zstd")]
     fn test_zstd_dict_bytes() -> Vec<u8> {
@@ -406,6 +539,29 @@ mod tests {
         assert_eq!(&output[2..], expected);
     }
 
+    /// Dictionary contexts are built on first use, and the dictionary limits
+    /// count every loaded bundle, except the one a reload replaces.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn limits_dictionaries_and_builds_contexts_on_first_use() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let raw_dict = test_zstd_dict_bytes();
+        let mut limits = Limits::strict();
+        limits.max_dictionaries = 1;
+        let mut decoder = Decoder::with_options(Options::from(limits));
+
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+        assert_eq!(decoder.dict_store.built_contexts(), 0);
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+        let err = decoder
+            .load_dictionary_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::LimitExceeded);
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(decoder.dict_store.built_contexts(), 1);
+    }
+
     #[cfg(feature = "zstd")]
     #[test]
     fn rejects_dictionary_frame_without_loaded_bundle_without_mutating_destination() {
@@ -426,7 +582,7 @@ mod tests {
         let raw_dict = test_zstd_dict_bytes();
         let mut decoder = Decoder::new();
         decoder
-            .load_fat_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
+            .load_dictionary_bundle(&fat_bundle(OTHER_BUNDLE_ID, &raw_dict))
             .unwrap();
         let mut output = vec![1, 2];
 
@@ -436,12 +592,128 @@ mod tests {
         assert_eq!(output, [1, 2]);
     }
 
+    /// Serves one bundle and counts how often it is asked.
+    struct TestProvider {
+        bundle: Option<Vec<u8>>,
+        calls: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    impl TestProvider {
+        fn new(bundle: Option<Vec<u8>>) -> Self {
+            Self {
+                bundle,
+                calls: alloc::sync::Arc::default(),
+            }
+        }
+
+        fn calls(&self) -> alloc::sync::Arc<core::sync::atomic::AtomicUsize> {
+            alloc::sync::Arc::clone(&self.calls)
+        }
+    }
+
+    impl DictionaryProvider for TestProvider {
+        fn fat_bundle(&self, bundle_id: &[u8; 32]) -> Result<Option<alloc::borrow::Cow<'_, [u8]>>> {
+            assert_eq!(*bundle_id, BUNDLE_ID);
+            self.calls
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(self.bundle.as_deref().map(alloc::borrow::Cow::Borrowed))
+        }
+    }
+
+    /// A frame's bundle comes from the provider once, then stays loaded.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn decodes_with_a_bundle_from_the_provider() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let provider = TestProvider::new(Some(bundle));
+        let calls = provider.calls();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(provider);
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(
+            decoder.decode_outputs(&frame).unwrap(),
+            [Output::Serial(expected)]
+        );
+        assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 1);
+
+        decoder.clear_dictionary_provider();
+        assert!(decoder.decode(&frame).is_ok());
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn does_not_ask_the_provider_for_loaded_bundles() {
+        let (frame, bundle, expected) = zstd_dict_test_frame();
+        let provider = TestProvider::new(None);
+        let calls = provider.calls();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(provider);
+        decoder.load_dictionary_bundle(&bundle).unwrap();
+
+        assert_eq!(decoder.decode(&frame).unwrap(), expected);
+        assert_eq!(calls.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn reports_bundles_the_provider_lacks_as_not_loaded() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(TestProvider::new(None));
+
+        let err = decoder.decode(&frame).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(err.detail(), Some("dictionary bundle is not loaded"));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn rejects_provided_bundles_with_another_id() {
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let other = fat_bundle(OTHER_BUNDLE_ID, &test_zstd_dict_bytes());
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(TestProvider::new(Some(other)));
+
+        let err = decoder.decode(&frame).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Malformed);
+        assert_eq!(
+            err.detail(),
+            Some("dictionary provider returned a bundle with another ID")
+        );
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn returns_provider_errors() {
+        struct Failing;
+        impl DictionaryProvider for Failing {
+            fn fat_bundle(
+                &self,
+                _bundle_id: &[u8; 32],
+            ) -> Result<Option<alloc::borrow::Cow<'_, [u8]>>> {
+                Err(Error::new(ErrorKind::LimitExceeded).with_detail("store is offline"))
+            }
+        }
+        let (frame, _bundle, _expected) = zstd_dict_test_frame();
+        let mut decoder = Decoder::new();
+        decoder.set_dictionary_provider(Failing);
+        let mut output = vec![1, 2];
+
+        let err = decoder.decode_into(&frame, &mut output).unwrap_err();
+
+        assert_eq!(err.detail(), Some("store is offline"));
+        assert_eq!(output, [1, 2]);
+    }
+
     #[cfg(feature = "zstd")]
     #[test]
     fn clear_dictionary_bundles_drops_loaded_bundle() {
         let (frame, bundle, _expected) = zstd_dict_test_frame();
         let mut decoder = Decoder::new();
-        decoder.load_fat_bundle(&bundle).unwrap();
+        decoder.load_dictionary_bundle(&bundle).unwrap();
         decoder.clear_dictionary_bundles();
         let mut output = vec![1, 2];
 

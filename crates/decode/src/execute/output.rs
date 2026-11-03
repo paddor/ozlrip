@@ -4,11 +4,6 @@ use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use crate::parse::FramePlan;
 
-pub(super) struct DecodedOutput<'a> {
-    pub(super) chunks: Vec<DecodedChunk<'a>>,
-    pub(super) total_len: usize,
-}
-
 pub(super) enum DecodedChunk<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
@@ -23,16 +18,141 @@ impl DecodedChunk<'_> {
     }
 }
 
-pub(super) fn check_output_size(
-    size: usize,
-    encoded_size: usize,
-    plan: &FramePlan,
-    limits: Limits,
-) -> Result<()> {
-    if size > limits.max_decoded_bytes || size > limits.max_buffer_bytes {
+/// Fails if a node output of `len` bytes would exceed the decode limits.
+#[inline]
+pub(super) fn check_output_len(len: usize, limits: Limits) -> Result<()> {
+    if len > limits.max_decoded_bytes || len > limits.max_buffer_bytes {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded output limit exceeded")
         );
+    }
+    Ok(())
+}
+
+/// An empty buffer with room for a node output of `len` bytes, after
+/// checking `len` against the decode limits. `detail` describes a failed
+/// allocation.
+#[inline]
+pub(super) fn alloc_output(len: usize, limits: Limits, detail: &'static str) -> Result<Vec<u8>> {
+    check_output_len(len, limits)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| Error::new(ErrorKind::AllocationFailed).with_detail(detail))?;
+    Ok(output)
+}
+
+/// A zero-filled buffer of `len` bytes, for outputs whose size the caller
+/// already checked. `detail` describes a failed allocation.
+pub(super) fn zeroed_output(len: usize, detail: &'static str) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| Error::new(ErrorKind::AllocationFailed).with_detail(detail))?;
+    output.resize(len, 0);
+    Ok(output)
+}
+
+/// Tracks one frame output against the size its header declares.
+///
+/// Built before anything is reserved or written, so a tiny frame that
+/// declares a huge output fails on the configured limits or the expansion
+/// ratio instead of reserving that output. Chunks are charged as they are
+/// decoded, and the total must match the declared size exactly.
+pub(super) struct OutputBudget {
+    declared: usize,
+    written: usize,
+    reserved: bool,
+}
+
+impl OutputBudget {
+    /// Budget for output `index` of `plan`. `encoded_size` is the size of the
+    /// whole frame.
+    pub(super) fn for_output(
+        plan: &FramePlan,
+        index: usize,
+        encoded_size: usize,
+        limits: Limits,
+    ) -> Result<Self> {
+        Self::new(declared_output_size(plan, index)?, encoded_size, limits)
+    }
+
+    /// Budget for `declared` bytes, checked against the limits and the
+    /// expansion ratio of a frame of `encoded_size` bytes.
+    pub(super) fn new(declared: usize, encoded_size: usize, limits: Limits) -> Result<Self> {
+        let budget = Self::part(declared, limits)?;
+        check_expansion(declared, encoded_size, limits)?;
+        Ok(budget)
+    }
+
+    /// Budget for `declared` bytes, one part of a frame's output. The caller
+    /// checks the frame's total with [`check_expansion`].
+    pub(super) fn part(declared: usize, limits: Limits) -> Result<Self> {
+        check_output_len(declared, limits)?;
+        Ok(Self {
+            declared,
+            written: 0,
+            reserved: false,
+        })
+    }
+
+    /// Bytes the output may still grow by.
+    pub(super) fn remaining(&self) -> usize {
+        self.declared - self.written
+    }
+
+    /// Reserves the rest of the declared size in `dst`, once.
+    pub(super) fn reserve(&mut self, dst: &mut Vec<u8>) -> Result<()> {
+        if !self.reserved {
+            dst.try_reserve_exact(self.remaining()).map_err(|_| {
+                Error::new(ErrorKind::AllocationFailed).with_detail("output allocation failed")
+            })?;
+            self.reserved = true;
+        }
+        Ok(())
+    }
+
+    /// Charges `len` decoded bytes; fails if they exceed the declared size.
+    pub(super) fn consume(&mut self, len: usize) -> Result<()> {
+        if len > self.remaining() {
+            return Err(size_mismatch());
+        }
+        self.written += len;
+        Ok(())
+    }
+
+    /// Fails unless exactly the declared size was decoded.
+    pub(super) fn finish(&self) -> Result<()> {
+        if self.written == self.declared {
+            Ok(())
+        } else {
+            Err(size_mismatch())
+        }
+    }
+}
+
+/// Size that output `index` of `plan` declares.
+pub(super) fn declared_output_size(plan: &FramePlan, index: usize) -> Result<usize> {
+    let declared = plan
+        .info
+        .output_sizes
+        .get(index)
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            Error::new(ErrorKind::Unsupported)
+                .with_detail("unknown OpenZL output sizes are unsupported")
+        })?;
+    usize::try_from(declared).map_err(|_| {
+        Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
+    })
+}
+
+/// Fails if `declared` output bytes exceed the expansion ratio of a frame of
+/// `encoded_size` bytes. Outputs up to the exempt size always pass.
+pub(super) fn check_expansion(declared: usize, encoded_size: usize, limits: Limits) -> Result<()> {
+    if declared <= limits.expansion_ratio_exempt_bytes {
+        return Ok(());
     }
     let max_expanded = encoded_size
         .checked_mul(limits.max_expansion_ratio)
@@ -40,24 +160,19 @@ pub(super) fn check_output_size(
             Error::new(ErrorKind::IntegerOverflow)
                 .with_detail("encoded size expansion limit overflowed")
         })?;
-    if size > max_expanded {
+    if declared > max_expanded {
         return Err(
             Error::new(ErrorKind::LimitExceeded).with_detail("decoded expansion ratio exceeded")
         );
     }
-    if let Some(expected) = plan.info.output_sizes.first().and_then(|size| *size) {
-        let expected = usize::try_from(expected).map_err(|_| {
-            Error::new(ErrorKind::LimitExceeded).with_detail("decoded output size is too large")
-        })?;
-        if expected != size {
-            return Err(Error::new(ErrorKind::Malformed)
-                .with_detail("stored output size does not match frame header"));
-        }
-    }
     Ok(())
 }
 
-#[cfg(feature = "checksum")]
+/// The error for output that does not match its declared size.
+pub(super) fn size_mismatch() -> Error {
+    Error::new(ErrorKind::Malformed).with_detail("stored output size does not match frame header")
+}
+
 pub(super) fn verify_decoded_checksum(output: &[u8], expected: Option<u32>) -> Result<()> {
     if let Some(expected) = expected {
         let actual = (xxhash_rust::xxh3::xxh3_64(output) & 0xffff_ffff) as u32;

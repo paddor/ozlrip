@@ -2,8 +2,12 @@
 
 use libfuzzer_sys::fuzz_target;
 use ozlrip::Limits;
+use ozlrip_test_support::{Chunk, FrameBuilder, Node};
 
-const MAGIC_BASE: u32 = 0xd7b1_a5c0;
+/// Last format versions of the deprecated transforms (upstream
+/// `decoder_registry.c`); newer frames reject them.
+const LEGACY_ENTROPY_LAST_VERSION: u32 = 14;
+const LEGACY_LZ_LAST_VERSION: u32 = 12;
 const FSE_DEPRECATED_ID: u8 = 15;
 const HUFFMAN_DEPRECATED_ID: u8 = 16;
 const HUFFMAN_FIXED_DEPRECATED_ID: u8 = 17;
@@ -46,64 +50,32 @@ fuzz_target!(|data: &[u8]| {
         ),
     };
 
-    let frame = standard_transform_serial_frame(21, transform_id, &stored, decoded_len, &header);
-    let limits = Limits {
-        max_frame_bytes: 8192,
-        max_decoded_bytes: 4096,
-        max_chunks: 1,
-        max_nodes: 1,
-        max_streams: 2,
-        max_transform_header_bytes: 16,
-        max_stored_stream_bytes: 8192,
-        max_buffer_bytes: 4096,
-        max_graph_depth: 1,
-        max_expansion_ratio: 4096,
+    let version = match transform_id {
+        FASTLZ_DEPRECATED_ID | ROLZ_DEPRECATED_ID => LEGACY_LZ_LAST_VERSION,
+        _ => LEGACY_ENTROPY_LAST_VERSION,
     };
+    let frame = FrameBuilder::new(version)
+        .serial_output(decoded_len)
+        .chunk(
+            Chunk::new()
+                .node(Node::new(u32::from(transform_id)).header(header))
+                .stored_stream(stored),
+        )
+        .build();
+    let mut limits = Limits::strict();
+    limits.max_frame_bytes = 8192;
+    limits.max_decoded_bytes = 4096;
+    limits.max_chunks = 1;
+    limits.max_nodes = 1;
+    limits.max_streams = 2;
+    limits.max_transform_header_bytes = 16;
+    limits.max_stored_stream_bytes = 8192;
+    limits.max_buffer_bytes = 4096;
+    limits.max_graph_depth = 1;
+    limits.max_expansion_ratio = 4096;
     let mut output = Vec::new();
-    let _ = ozlrip::decode_into_with_options(
-        &frame,
-        &mut output,
-        ozlrip::Options {
-            limits,
-            ..ozlrip::Options::default()
-        },
-    );
+    let _ = ozlrip::decode_into_with_options(&frame, &mut output, ozlrip::Options::from(limits));
 });
-
-fn standard_transform_serial_frame(
-    version: u32,
-    transform_id: u8,
-    stored: &[u8],
-    decoded_len: usize,
-    transform_header: &[u8],
-) -> Vec<u8> {
-    let mut input = Vec::new();
-    input.extend_from_slice(&(MAGIC_BASE + version).to_le_bytes());
-    input.push(0);
-    input.push(1);
-    push_var_u64(&mut input, u64::try_from(decoded_len + 1).unwrap());
-    input.push(2);
-    input.push(1);
-    input.push(0);
-    input.push(transform_id);
-    if transform_header.is_empty() {
-        input.push(0);
-    } else {
-        input.push(1);
-        push_var_u64(
-            &mut input,
-            u64::try_from(transform_header.len() - 1).unwrap(),
-        );
-    }
-    input.push(0);
-    input.push(0);
-    input.push(0);
-    push_var_u64(&mut input, u64::try_from(stored.len()).unwrap());
-    input.extend_from_slice(transform_header);
-    input.extend_from_slice(stored);
-    input.push(0);
-    input
-}
 
 fn deprecated_lz_stored_stream(decoded_size: usize, payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
@@ -127,12 +99,4 @@ fn rolz_payload(data: &[u8]) -> Vec<u8> {
     output.extend_from_slice(&num_sequences.to_le_bytes());
     output.extend_from_slice(body);
     output
-}
-
-fn push_var_u64(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
-        value >>= 7;
-    }
-    out.push(u8::try_from(value).unwrap());
 }

@@ -1,4 +1,9 @@
+use alloc::format;
+
 use ozlrip_core::{Error, ErrorKind, Result};
+
+use crate::info::FrameValueType;
+use FrameValueType::{Numeric, Serial, String, Struct};
 
 pub(crate) const LZ4_ID: u32 = 62;
 pub(crate) const ZSTD_ID: u32 = 22;
@@ -67,46 +72,440 @@ pub(crate) const CONCAT_STRING_ID: u32 = 59;
 pub(crate) const INTERLEAVE_STRING_ID: u32 = 61;
 pub(crate) const PIVCO_HUFFMAN_ID: u32 = 67;
 
+/// How many streams a standard node reads and regenerates when decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NodeShape {
+    /// Streams the node always reads.
+    pub(crate) static_inputs: usize,
+    /// Whether the frame may give the node more inputs than `static_inputs`.
+    pub(crate) variable_inputs: bool,
+    pub(crate) min_outputs: usize,
+    /// `None` when the node regenerates any number of outputs.
+    pub(crate) max_outputs: Option<usize>,
+}
+
+/// A standard transform: its ID, upstream name, the format versions that
+/// register it, its shape, and the type of the streams it regenerates.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StandardNode {
+    pub(crate) id: u32,
+    pub(crate) name: &'static str,
+    pub(crate) min_version: u32,
+    /// Last format version that registers a deprecated node.
+    pub(crate) max_version: Option<u32>,
+    pub(crate) shape: NodeShape,
+    /// Type of every stream the node regenerates: the input type of its
+    /// upstream encoder, from `decoder_registry.c`.
+    pub(crate) output_type: FrameValueType,
+}
+
+const fn fixed(inputs: usize, outputs: usize) -> NodeShape {
+    NodeShape {
+        static_inputs: inputs,
+        variable_inputs: false,
+        min_outputs: outputs,
+        max_outputs: Some(outputs),
+    }
+}
+
+/// `static_inputs` plus any number of variable inputs, one output.
+const fn variable(static_inputs: usize) -> NodeShape {
+    NodeShape {
+        static_inputs,
+        variable_inputs: true,
+        min_outputs: 1,
+        max_outputs: Some(1),
+    }
+}
+
+/// Fixed inputs, one or more outputs.
+const fn fan_out(static_inputs: usize) -> NodeShape {
+    NodeShape {
+        static_inputs,
+        variable_inputs: false,
+        min_outputs: 1,
+        max_outputs: None,
+    }
+}
+
+const fn node(
+    id: u32,
+    name: &'static str,
+    min_version: u32,
+    shape: NodeShape,
+    output_type: FrameValueType,
+) -> StandardNode {
+    StandardNode {
+        id,
+        name,
+        min_version,
+        max_version: None,
+        shape,
+        output_type,
+    }
+}
+
+const fn deprecated(
+    id: u32,
+    name: &'static str,
+    min_version: u32,
+    max_version: u32,
+    shape: NodeShape,
+    output_type: FrameValueType,
+) -> StandardNode {
+    StandardNode {
+        id,
+        name,
+        min_version,
+        max_version: Some(max_version),
+        shape,
+        output_type,
+    }
+}
+
+/// Every standard transform ozlrip knows, by ID. Version ranges follow
+/// upstream `src/openzl/codecs/decoder_registry.c`.
+pub(crate) const STANDARD_NODES: [StandardNode; 66] = [
+    node(DELTA_INT_ID, "delta_int", 3, fixed(1, 1), Numeric),
+    node(TRANSPOSE_ID, "transpose", 3, fixed(1, 1), Struct),
+    node(ZIGZAG_ID, "zigzag", 3, fixed(1, 1), Numeric),
+    node(
+        TRANSPOSE_SPLIT_ID,
+        "transpose_split",
+        11,
+        variable(0),
+        Struct,
+    ),
+    node(
+        CONVERT_SERIAL_TO_STRUCT_ID,
+        "convert_serial_to_struct",
+        3,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(
+        CONVERT_STRUCT_TO_SERIAL_ID,
+        "convert_struct_to_serial",
+        3,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(
+        CONVERT_STRUCT_TO_NUM_LE_ID,
+        "convert_struct_to_num_le",
+        3,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(
+        CONVERT_NUM_TO_STRUCT_LE_ID,
+        "convert_num_to_struct_le",
+        3,
+        fixed(1, 1),
+        Numeric,
+    ),
+    node(
+        CONVERT_SERIAL_TO_NUM_LE_ID,
+        "convert_serial_to_num_le",
+        3,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(
+        CONVERT_NUM_TO_SERIAL_LE_ID,
+        "convert_num_to_serial_le",
+        3,
+        fixed(1, 1),
+        Numeric,
+    ),
+    node(
+        CONVERT_STRING_TO_SERIAL_ID,
+        "convert_string_to_serial",
+        10,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(
+        SEPARATE_STRING_COMPONENTS_ID,
+        "separate_string_components",
+        10,
+        fixed(2, 1),
+        String,
+    ),
+    node(
+        CONVERT_STRUCT_TO_NUM_BE_ID,
+        "convert_struct_to_num_be",
+        21,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(
+        CONVERT_SERIAL_TO_NUM_BE_ID,
+        "convert_serial_to_num_be",
+        21,
+        fixed(1, 1),
+        Serial,
+    ),
+    deprecated(
+        FSE_DEPRECATED_ID,
+        "fse_deprecated",
+        3,
+        14,
+        fixed(1, 1),
+        Serial,
+    ),
+    deprecated(
+        HUFFMAN_DEPRECATED_ID,
+        "huffman_deprecated",
+        3,
+        14,
+        fixed(1, 1),
+        Serial,
+    ),
+    deprecated(
+        HUFFMAN_FIXED_DEPRECATED_ID,
+        "huffman_fixed_deprecated",
+        3,
+        14,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(SENTINEL_ID, "sentinel", 24, fixed(2, 1), Numeric),
+    node(LZ_ID, "lz", 24, fixed(4, 1), Serial),
+    deprecated(
+        ROLZ_DEPRECATED_ID,
+        "rolz_deprecated",
+        3,
+        12,
+        fixed(1, 1),
+        Serial,
+    ),
+    deprecated(
+        FASTLZ_DEPRECATED_ID,
+        "fastlz_deprecated",
+        3,
+        12,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(ZSTD_ID, "zstd", 3, fixed(1, 1), Serial),
+    deprecated(
+        ZSTD_FIXED_ID,
+        "zstd_fixed_legacy",
+        3,
+        10,
+        fixed(1, 1),
+        Struct,
+    ),
+    node(FIELD_LZ_ID, "field_lz", 3, fixed(5, 1), Struct),
+    node(
+        QUANTIZE_OFFSETS_ID,
+        "quantize_offsets",
+        3,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(
+        QUANTIZE_LENGTHS_ID,
+        "quantize_lengths",
+        3,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(BITPACK_SERIAL_ID, "bitpack_serial", 3, fixed(1, 1), Serial),
+    node(BITPACK_INT_ID, "bitpack_int", 3, fixed(1, 1), Numeric),
+    node(FLATPACK_ID, "flatpack", 3, fixed(2, 1), Serial),
+    node(
+        TRANSPOSE_SPLIT2_ID,
+        "transpose_split2",
+        3,
+        fixed(2, 1),
+        Struct,
+    ),
+    node(
+        TRANSPOSE_SPLIT4_ID,
+        "transpose_split4",
+        3,
+        fixed(4, 1),
+        Struct,
+    ),
+    node(
+        TRANSPOSE_SPLIT8_ID,
+        "transpose_split8",
+        3,
+        fixed(8, 1),
+        Struct,
+    ),
+    node(
+        FLOAT_DECONSTRUCT_ID,
+        "float_deconstruct",
+        4,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(BITUNPACK_ID, "bitunpack", 6, fixed(1, 1), Serial),
+    node(RANGE_PACK_ID, "range_pack", 8, fixed(1, 1), Numeric),
+    node(TOKENIZE_FIXED_ID, "tokenize_fixed", 8, fixed(2, 1), Struct),
+    node(
+        TOKENIZE_NUMERIC_ID,
+        "tokenize_numeric",
+        8,
+        fixed(2, 1),
+        Numeric,
+    ),
+    node(
+        TOKENIZE_STRING_ID,
+        "tokenize_string",
+        11,
+        fixed(2, 1),
+        String,
+    ),
+    node(SPLITN_ID, "splitn", 9, variable(0), Serial),
+    node(
+        SPLIT_BY_STRUCT_ID,
+        "split_by_struct",
+        9,
+        variable(0),
+        Serial,
+    ),
+    node(
+        DISPATCH_N_BY_TAG_ID,
+        "dispatch_n_by_tag",
+        9,
+        variable(2),
+        Serial,
+    ),
+    node(MERGE_SORTED_ID, "merge_sorted", 9, fixed(2, 1), Numeric),
+    node(
+        CONSTANT_SERIAL_ID,
+        "constant_serial",
+        11,
+        fixed(1, 1),
+        Serial,
+    ),
+    node(CONSTANT_FIXED_ID, "constant_fixed", 11, fixed(1, 1), Struct),
+    node(PREFIX_ID, "prefix", 11, fixed(2, 1), String),
+    node(SPLITN_STRUCT_ID, "splitn_struct", 14, variable(0), Struct),
+    node(SPLITN_NUM_ID, "splitn_num", 14, variable(0), Numeric),
+    node(FSE_V2_ID, "fse_v2", 15, fixed(2, 1), Serial),
+    node(HUFFMAN_V2_ID, "huffman_v2", 15, fixed(2, 1), Serial),
+    node(
+        HUFFMAN_STRUCT_V2_ID,
+        "huffman_struct_v2",
+        15,
+        fixed(2, 1),
+        Struct,
+    ),
+    node(FSE_NCOUNT_ID, "fse_ncount", 15, fixed(1, 1), Numeric),
+    node(DIVIDE_BY_ID, "divide_by", 16, fixed(1, 1), Numeric),
+    node(
+        DISPATCH_STRING_ID,
+        "dispatch_string",
+        16,
+        variable(1),
+        String,
+    ),
+    node(CONCAT_SERIAL_ID, "concat_serial", 16, fan_out(2), Serial),
+    node(DEDUP_NUM_ID, "dedup_num", 16, fan_out(1), Numeric),
+    node(CONCAT_NUM_ID, "concat_num", 17, fan_out(2), Numeric),
+    node(CONCAT_STRUCT_ID, "concat_struct", 17, fan_out(2), Struct),
+    node(CONCAT_STRING_ID, "concat_string", 18, fan_out(2), String),
+    node(PARSE_INT_ID, "parse_int", 19, fixed(1, 1), String),
+    node(
+        INTERLEAVE_STRING_ID,
+        "interleave_string",
+        20,
+        fan_out(1),
+        String,
+    ),
+    node(LZ4_ID, "lz4", 23, fixed(1, 1), Serial),
+    node(BIT_SPLIT_ID, "bit_split", 24, variable(0), Numeric),
+    node(PARTITION_ID, "partition", 24, fixed(2, 1), Numeric),
+    node(MUX_LENGTHS_ID, "mux_lengths", 24, fixed(2, 2), Numeric),
+    node(SPARSE_NUM_ID, "sparse_num", 26, fixed(2, 1), Numeric),
+    node(PIVCO_HUFFMAN_ID, "pivco_huffman", 27, fixed(2, 1), Serial),
+];
+
+/// Position in `STANDARD_NODES` of each ID below 128, the OpenZL standard
+/// range; `u8::MAX` where no node has that ID.
+const NODE_INDEX: [u8; 128] = node_index();
+
+const fn node_index() -> [u8; 128] {
+    let mut index = [u8::MAX; 128];
+    let mut position = 0;
+    while position < STANDARD_NODES.len() {
+        let id = STANDARD_NODES[position].id as usize;
+        assert!(index[id] == u8::MAX, "duplicate standard node ID");
+        #[expect(clippy::cast_possible_truncation, reason = "the table has 66 rows")]
+        {
+            index[id] = position as u8;
+        }
+        position += 1;
+    }
+    index
+}
+
+/// The standard node with `id`, if ozlrip knows it.
+pub(crate) fn standard_node(id: u32) -> Option<&'static StandardNode> {
+    let position = *NODE_INDEX.get(usize::try_from(id).ok()?)?;
+    STANDARD_NODES.get(usize::from(position))
+}
+
 pub(crate) fn validate_transform_id(id: u32, format_version: u32) -> Result<()> {
-    let Some(min_version) = min_version(id) else {
+    let Some(node) = standard_node(id) else {
         return Err(
             Error::new(ErrorKind::Unsupported).with_detail("unknown OpenZL standard transform ID")
         );
     };
-    if format_version < min_version {
-        return Err(Error::new(ErrorKind::Unsupported)
-            .with_detail("standard transform ID is not available in this format version"));
+    let too_new = node
+        .max_version
+        .is_some_and(|max_version| format_version > max_version);
+    if format_version < node.min_version || too_new {
+        return Err(Error::new(ErrorKind::Unsupported).with_detail(format!(
+            "{} is not available in format version {format_version}",
+            node.name
+        )));
     }
     Ok(())
 }
 
-const fn min_version(id: u32) -> Option<u32> {
-    match id {
-        1..=3 | 5..=10 | 15..=17 | 20..=32 => Some(3),
-        33 => Some(4),
-        34 => Some(6),
-        35..=37 => Some(8),
-        40..=43 => Some(9),
-        11 | 12 | 38 | 44..=46 => Some(11),
-        4 | 47 | 48 => Some(14),
-        49..=52 => Some(15),
-        53..=56 => Some(16),
-        57 | 58 => Some(17),
-        59 => Some(18),
-        60 => Some(19),
-        61 => Some(20),
-        13 | 14 => Some(21),
-        62 => Some(23),
-        18 | 19 | 63..=65 => Some(24),
-        66 => Some(26),
-        67 => Some(27),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
+
+    #[test]
+    fn table_matches_the_node_coverage_manifest() {
+        const MANIFEST: &str = include_str!("../../../tests/fixtures/standard-node-coverage.tsv");
+        let rows = MANIFEST
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                assert_eq!(fields.len(), 3, "coverage row {line:?}");
+                let id = fields[0].parse::<u32>().expect("numeric node ID");
+                (id, fields[1])
+            })
+            .collect::<Vec<_>>();
+        let table = STANDARD_NODES
+            .iter()
+            .map(|node| (node.id, node.name))
+            .collect::<Vec<_>>();
+
+        assert_eq!(table, rows);
+    }
+
+    #[test]
+    fn finds_every_node_by_id() {
+        for node in &STANDARD_NODES {
+            assert_eq!(standard_node(node.id).map(|found| found.id), Some(node.id));
+        }
+        for id in [0, 39, 68, 127, 128, u32::MAX] {
+            assert!(standard_node(id).is_none(), "id {id}");
+        }
+    }
 
     #[test]
     fn rejects_reserved_transform_zero() {
@@ -123,5 +522,30 @@ mod tests {
         let err = validate_transform_id(67, 26).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         validate_transform_id(67, 27).unwrap();
+    }
+
+    #[test]
+    fn matches_upstream_minimum_versions() {
+        for (id, first) in [(TRANSPOSE_SPLIT_ID, 11), (11, 10), (12, 10)] {
+            validate_transform_id(id, first).unwrap();
+            let err = validate_transform_id(id, first - 1).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn rejects_deprecated_transforms_after_their_last_version() {
+        for (id, last) in [
+            (ZSTD_FIXED_ID, 10),
+            (ROLZ_DEPRECATED_ID, 12),
+            (FASTLZ_DEPRECATED_ID, 12),
+            (FSE_DEPRECATED_ID, 14),
+            (HUFFMAN_DEPRECATED_ID, 14),
+            (HUFFMAN_FIXED_DEPRECATED_ID, 14),
+        ] {
+            validate_transform_id(id, last).unwrap();
+            let err = validate_transform_id(id, last + 1).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+        }
     }
 }
