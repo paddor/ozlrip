@@ -263,9 +263,9 @@ pub(super) fn execute_standard_node(
             &QUANTIZE_LENGTHS,
         )),
         standard::PARTITION_ID => one_typed(decode_partition_node(inputs, header, ctx.limits)),
-        standard::TOKENIZE_FIXED_ID | standard::TOKENIZE_NUMERIC_ID => {
-            one_typed(decode_tokenize_fixed_node(inputs, header, ctx.limits))
-        }
+        standard::TOKENIZE_FIXED_ID | standard::TOKENIZE_NUMERIC_ID => one_typed(
+            decode_tokenize_fixed_node(inputs, header, ctx.limits, ctx.scratch),
+        ),
         standard::TOKENIZE_STRING_ID => {
             one_typed(decode_tokenize_string_node(inputs, header, ctx.limits))
         }

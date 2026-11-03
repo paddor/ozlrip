@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Decode fixed-width `tokenize` outputs into pooled buffers. A fresh
+  buffer per decode page-faulted on its first write to every page:
+  `sao-fixed-28m` decodes 36% faster in a portable build, and
+  `sao-fixed-5m` 9%.
+
 ## [0.6.0]
 
 - Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the

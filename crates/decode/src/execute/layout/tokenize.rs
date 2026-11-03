@@ -1,20 +1,20 @@
 //! The `tokenize` node for fixed-width and numeric tokens: an alphabet and
 //! indexes into it.
 
-use alloc::vec::Vec;
-
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::fast_tokenize;
 use crate::execute::elements::{numeric_element_count, validate_numeric_stream_width};
 use crate::execute::header::require_empty_header;
 use crate::execute::output::check_output_len;
+use crate::execute::runtime::DecodeScratch;
 use crate::execute::streams::{OwnedStream, StreamInput};
 
 pub(in crate::execute) fn decode_tokenize_fixed_node(
     inputs: &[StreamInput<'_>],
     header: &[u8],
     limits: Limits,
+    scratch: &mut DecodeScratch,
 ) -> Result<OwnedStream> {
     require_empty_header(header, "tokenize_fixed headers are unsupported")?;
     let [alphabet, indices] = inputs else {
@@ -39,10 +39,7 @@ pub(in crate::execute) fn decode_tokenize_fixed_node(
         );
     }
 
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::AllocationFailed).with_detail("tokenize allocation failed")
-    })?;
+    let mut output = scratch.take_byte_buffer(output_len, "tokenize allocation failed")?;
     fast_tokenize::decode_tokenize_indices(
         alphabet.bytes,
         alphabet_size,
@@ -51,10 +48,5 @@ pub(in crate::execute) fn decode_tokenize_fixed_node(
         indices.element_width,
         &mut output,
     )?;
-    Ok(OwnedStream {
-        bytes: output,
-        element_width,
-        string_lengths: None,
-        recyclable: false,
-    })
+    Ok(OwnedStream::pooled(output, element_width))
 }
