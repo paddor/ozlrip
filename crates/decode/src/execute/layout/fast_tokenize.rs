@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
+/// Replaces `output` with the tokens. `output` may hold stale bytes: every
+/// byte is overwritten. On error `output` holds unspecified bytes.
 pub(super) fn decode_tokenize_indices(
     alphabet: &[u8],
     alphabet_size: usize,
@@ -46,23 +48,14 @@ fn decode_index_width_1<const ELEMENT_WIDTH: usize>(
 ) -> Result<()> {
     let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
     debug_assert_eq!(tokens.len(), alphabet_size);
-    let start_len = output.len();
-    let output_len = indices.len() * ELEMENT_WIDTH;
-    output.resize(start_len + output_len, 0);
-
-    let result = (|| {
-        for (&index, out) in indices
-            .iter()
-            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
-        {
-            write_tokenized_element_fixed(tokens, usize::from(index), out)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        output.truncate(start_len);
+    output.resize(indices.len() * ELEMENT_WIDTH, 0);
+    for (&index, out) in indices
+        .iter()
+        .zip(output.as_chunks_mut::<ELEMENT_WIDTH>().0)
+    {
+        write_tokenized_element_fixed(tokens, usize::from(index), out)?;
     }
-    result
+    Ok(())
 }
 
 fn decode_index_width_2<const ELEMENT_WIDTH: usize>(
@@ -74,25 +67,16 @@ fn decode_index_width_2<const ELEMENT_WIDTH: usize>(
     let elements = indices.len() / 2;
     let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
     debug_assert_eq!(tokens.len(), alphabet_size);
-    let start_len = output.len();
-    let output_len = elements * ELEMENT_WIDTH;
-    output.resize(start_len + output_len, 0);
-
-    let result = (|| {
-        for (index, out) in indices
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
-        {
-            write_tokenized_element_fixed(tokens, usize::from(u16::from_le_bytes(*index)), out)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        output.truncate(start_len);
+    output.resize(elements * ELEMENT_WIDTH, 0);
+    for (index, out) in indices
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<ELEMENT_WIDTH>().0)
+    {
+        write_tokenized_element_fixed(tokens, usize::from(u16::from_le_bytes(*index)), out)?;
     }
-    result
+    Ok(())
 }
 
 fn decode_index_width_4<const ELEMENT_WIDTH: usize>(
@@ -104,31 +88,22 @@ fn decode_index_width_4<const ELEMENT_WIDTH: usize>(
     let elements = indices.len() / 4;
     let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
     debug_assert_eq!(tokens.len(), alphabet_size);
-    let start_len = output.len();
-    let output_len = elements * ELEMENT_WIDTH;
-    output.resize(start_len + output_len, 0);
-
-    let result = (|| {
-        for (index, out) in indices
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
-        {
-            write_tokenized_element_fixed(
-                tokens,
-                u32::from_le_bytes(*index)
-                    .try_into()
-                    .map_err(|_| numeric_too_large())?,
-                out,
-            )?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        output.truncate(start_len);
+    output.resize(elements * ELEMENT_WIDTH, 0);
+    for (index, out) in indices
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<ELEMENT_WIDTH>().0)
+    {
+        write_tokenized_element_fixed(
+            tokens,
+            u32::from_le_bytes(*index)
+                .try_into()
+                .map_err(|_| numeric_too_large())?,
+            out,
+        )?;
     }
-    result
+    Ok(())
 }
 
 fn decode_index_width_8<const ELEMENT_WIDTH: usize>(
@@ -140,31 +115,22 @@ fn decode_index_width_8<const ELEMENT_WIDTH: usize>(
     let elements = indices.len() / 8;
     let tokens = alphabet.as_chunks::<ELEMENT_WIDTH>().0;
     debug_assert_eq!(tokens.len(), alphabet_size);
-    let start_len = output.len();
-    let output_len = elements * ELEMENT_WIDTH;
-    output.resize(start_len + output_len, 0);
-
-    let result = (|| {
-        for (index, out) in indices
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .zip(output[start_len..].as_chunks_mut::<ELEMENT_WIDTH>().0)
-        {
-            write_tokenized_element_fixed(
-                tokens,
-                u64::from_le_bytes(*index)
-                    .try_into()
-                    .map_err(|_| numeric_too_large())?,
-                out,
-            )?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        output.truncate(start_len);
+    output.resize(elements * ELEMENT_WIDTH, 0);
+    for (index, out) in indices
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<ELEMENT_WIDTH>().0)
+    {
+        write_tokenized_element_fixed(
+            tokens,
+            u64::from_le_bytes(*index)
+                .try_into()
+                .map_err(|_| numeric_too_large())?,
+            out,
+        )?;
     }
-    result
+    Ok(())
 }
 
 fn decode_tokenize_indices_generic(
@@ -175,6 +141,7 @@ fn decode_tokenize_indices_generic(
     index_width: usize,
     output: &mut Vec<u8>,
 ) -> Result<()> {
+    output.clear();
     match index_width {
         1 => {
             for &index in indices {
@@ -275,31 +242,41 @@ fn numeric_too_large() -> Error {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::decode_tokenize_indices;
     use ozlrip_core::ErrorKind;
 
     #[test]
-    fn appends_fixed_width_tokens_after_existing_output() {
+    fn overwrites_stale_output() {
         let alphabet = *b"aabbcc";
         let indices = [2, 0, 1];
-        let mut output = b"pre".to_vec();
-        output.reserve_exact(6);
+        let mut output = b"stale bytes".to_vec();
 
         decode_tokenize_indices(&alphabet, 3, 2, &indices, 1, &mut output).unwrap();
 
-        assert_eq!(output, b"preccaabb");
+        assert_eq!(output, b"ccaabb");
     }
 
     #[test]
-    fn rejects_invalid_index_and_restores_output_len() {
+    fn overwrites_stale_output_for_odd_widths() {
+        let alphabet = *b"aaabbb";
+        let indices = [1, 0];
+        let mut output = b"stale bytes".to_vec();
+
+        decode_tokenize_indices(&alphabet, 2, 3, &indices, 1, &mut output).unwrap();
+
+        assert_eq!(output, b"bbbaaa");
+    }
+
+    #[test]
+    fn rejects_invalid_index() {
         let alphabet = *b"aabb";
         let indices = [1, 2];
-        let mut output = b"pre".to_vec();
-        output.reserve_exact(4);
+        let mut output = Vec::new();
 
         let err = decode_tokenize_indices(&alphabet, 2, 2, &indices, 1, &mut output).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Malformed);
-        assert_eq!(output, b"pre");
     }
 }

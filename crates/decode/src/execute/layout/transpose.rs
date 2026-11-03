@@ -43,7 +43,7 @@ pub(in crate::execute) fn decode_transpose_node(
     } else {
         source_elements
     };
-    let mut output = scratch.take_byte_buffer(output_len, "transpose allocation failed")?;
+    let mut output = scratch.take_stale_byte_buffer(output_len, "transpose allocation failed")?;
     output.resize(output_len, 0);
     for output_element in 0..source_width {
         for output_byte in 0..source_elements {
@@ -84,7 +84,7 @@ pub(in crate::execute) fn decode_transpose_split_node(
                 .with_detail("transpose_split lanes have different sizes"));
         }
     }
-    let mut output = scratch.take_byte_buffer(output_len, "transpose allocation failed")?;
+    let mut output = scratch.take_stale_byte_buffer(output_len, "transpose allocation failed")?;
     fast_transpose::write_transpose_split_output(inputs, output_len, &mut output);
     Ok(OwnedStream::pooled(output, width))
 }

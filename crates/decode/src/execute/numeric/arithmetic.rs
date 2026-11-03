@@ -1,6 +1,8 @@
 //! Numeric nodes that undo an arithmetic transform: `delta`, `zigzag`,
 //! `divide_by` and `range_pack`.
 
+use alloc::vec::Vec;
+
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::{fast_delta, fast_zigzag};
@@ -73,15 +75,10 @@ pub(in crate::execute) fn decode_delta_node(
         Error::new(ErrorKind::IntegerOverflow).with_detail("delta size overflowed")
     })?;
     check_output_len(output_len, limits)?;
-    let mut output = scratch.take_byte_buffer(output_len, "delta allocation failed")?;
     if first.is_empty() {
-        return Ok(OwnedStream {
-            bytes: output,
-            element_width: stored.element_width,
-            string_lengths: None,
-            recyclable: true,
-        });
+        return Ok(OwnedStream::pooled(Vec::new(), stored.element_width));
     }
+    let mut output = scratch.take_stale_byte_buffer(output_len, "delta allocation failed")?;
     fast_delta::decode_delta_elements(deltas, first, stored.element_width, output_len, &mut output);
     Ok(OwnedStream::pooled(output, stored.element_width))
 }

@@ -2,6 +2,9 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
 
+/// Replaces `output` with the unpacked elements. `output` may hold stale
+/// bytes: every byte is overwritten. On error `output` holds unspecified
+/// bytes.
 pub(super) fn unpack_lsb_bits(
     stored: &[u8],
     bits: usize,
@@ -19,6 +22,7 @@ pub(super) fn unpack_lsb_bits(
         let src = stored.get(..output_len).ok_or_else(|| {
             Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
         })?;
+        output.clear();
         output.extend_from_slice(src);
         return Ok(());
     }
@@ -37,12 +41,11 @@ fn unpack_lsb_bits_packed(
         return unpack_lsb_bits_u16_window(stored, bits, elements, output);
     }
 
-    let start = output.len();
     let output_len = elements
         .checked_mul(element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    output.resize(start + output_len, 0);
-    let out = &mut output[start..start + output_len];
+    output.resize(output_len, 0);
+    let out = output.as_mut_slice();
     if bits <= 56 {
         return unpack_lsb_bits_u64(stored, bits, element_width, out);
     }
@@ -68,14 +71,13 @@ fn unpack_lsb_bits_u16_window(
     }
 
     let mask = (1u32 << bits) - 1;
-    let start = output.len();
     let output_len = elements
         .checked_mul(2)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    output.resize(start + output_len, 0);
+    output.resize(output_len, 0);
 
     let mut bit_index = 0usize;
-    for out in output[start..].as_chunks_mut::<2>().0 {
+    for out in output.as_chunks_mut::<2>().0 {
         let byte_index = bit_index / 8;
         // One check and one load per element; only the last few elements
         // read a short window.
@@ -215,22 +217,23 @@ mod tests {
     }
 
     #[test]
-    fn unpacks_every_width_and_tail_length() {
+    fn unpacks_every_width_and_tail_length_over_stale_output() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        for (element_width, max_bits) in [(1, 7), (2, 15), (4, 31), (8, 63)] {
+        for (element_width, max_bits) in [(1, 8), (2, 16), (4, 32), (8, 64)] {
             for bits in 1..=max_bits {
                 for elements in 0..40 {
                     let values: Vec<u64> = (0..elements)
                         .map(|_| {
                             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                            (seed >> 7) & ((1u64 << bits) - 1)
+                            (seed >> 7) & (u64::MAX >> (64 - bits))
                         })
                         .collect();
                     let expected: Vec<u8> = values
                         .iter()
                         .flat_map(|value| value.to_le_bytes()[..element_width].to_vec())
                         .collect();
-                    let mut output = b"pre".to_vec();
+                    // Stale bytes both longer and shorter than the output.
+                    let mut output = vec![0xa5; 3 * elements + 5];
 
                     unpack_lsb_bits(
                         &pack(&values, bits),
@@ -241,10 +244,8 @@ mod tests {
                     )
                     .unwrap();
 
-                    assert_eq!(output[..3], *b"pre");
                     assert_eq!(
-                        output[3..],
-                        expected,
+                        output, expected,
                         "width {element_width} bits {bits} n {elements}"
                     );
                 }

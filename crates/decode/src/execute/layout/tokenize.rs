@@ -39,7 +39,7 @@ pub(in crate::execute) fn decode_tokenize_fixed_node(
         );
     }
 
-    let mut output = scratch.take_byte_buffer(output_len, "tokenize allocation failed")?;
+    let mut output = scratch.take_stale_byte_buffer(output_len, "tokenize allocation failed")?;
     fast_tokenize::decode_tokenize_indices(
         alphabet.bytes,
         alphabet_size,

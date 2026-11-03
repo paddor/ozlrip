@@ -6,6 +6,9 @@
   buffer per decode page-faulted on its first write to every page:
   `sao-fixed-28m` decodes 36% faster in a portable build, and
   `sao-fixed-5m` 9%.
+- Pooled buffers keep their bytes, so delta, transpose, bitpack and
+  fixed-width tokenize outputs skip zero-filling bytes they overwrite.
+  `le-u64-timeseries-32m` decodes 5% faster in a portable build.
 
 ## [0.6.0]
 

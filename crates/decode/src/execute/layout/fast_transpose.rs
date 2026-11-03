@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use crate::execute::streams::StreamInput;
 
+/// Replaces `output` with the interleaved lanes. `output` may hold stale
+/// bytes: it is resized to `output_len` and every byte is overwritten.
 pub(super) fn write_transpose_split_output(
     inputs: &[StreamInput<'_>],
     output_len: usize,

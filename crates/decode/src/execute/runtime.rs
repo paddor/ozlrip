@@ -12,6 +12,9 @@ const MAX_POOLED_BUFFERS: usize = 64;
 /// Most bytes of capacity the scratch pool keeps.
 const MAX_POOLED_BYTES: usize = 64 << 20;
 
+/// What debug builds overwrite stale pooled bytes with.
+pub(super) const STALE_POISON: u8 = 0xa5;
+
 /// Byte buffers kept for reuse between nodes, chunks and decodes.
 #[derive(Default)]
 pub(crate) struct DecodeScratch {
@@ -36,6 +39,32 @@ impl DecodeScratch {
         capacity: usize,
         detail: &'static str,
     ) -> Result<Vec<u8>> {
+        let mut buffer = self.take_pooled_or_new(capacity, detail)?;
+        buffer.clear();
+        Ok(buffer)
+    }
+
+    /// Like [`Self::take_byte_buffer`], but a pooled buffer keeps the bytes
+    /// it held. For kernels that `resize` to their output length and then
+    /// overwrite every byte: `resize` zeroes only past the old length. A
+    /// kernel that skips a byte leaks bytes from an earlier stream.
+    pub(super) fn take_stale_byte_buffer(
+        &mut self,
+        capacity: usize,
+        detail: &'static str,
+    ) -> Result<Vec<u8>> {
+        let mut buffer = self.take_pooled_or_new(capacity, detail)?;
+        // Debug builds poison stale bytes, so tests catch a kernel that
+        // skips one.
+        if cfg!(debug_assertions) {
+            buffer.fill(STALE_POISON);
+        }
+        Ok(buffer)
+    }
+
+    /// Returns the smallest pooled buffer with at least `capacity` bytes of
+    /// capacity, as recycled, or a new empty one.
+    fn take_pooled_or_new(&mut self, capacity: usize, detail: &'static str) -> Result<Vec<u8>> {
         // Best fit, so a small request does not take the buffer a later
         // large request needs.
         let best = self
@@ -64,8 +93,10 @@ impl DecodeScratch {
         }
     }
 
-    /// Keeps `buffer` for reuse, or frees it when the pool is full.
-    pub(super) fn recycle_byte_buffer(&mut self, mut buffer: Vec<u8>) {
+    /// Keeps `buffer` for reuse, or frees it when the pool is full. The pool
+    /// keeps its length too, so [`Self::take_stale_byte_buffer`] users skip
+    /// zeroing the bytes it already holds.
+    pub(super) fn recycle_byte_buffer(&mut self, buffer: Vec<u8>) {
         let capacity = buffer.capacity();
         if capacity == 0
             || self.byte_buffers.len() == MAX_POOLED_BUFFERS
@@ -73,7 +104,6 @@ impl DecodeScratch {
         {
             return;
         }
-        buffer.clear();
         self.pooled_bytes += capacity;
         self.byte_buffers.push(buffer);
     }
@@ -148,6 +178,29 @@ mod tests {
         assert_eq!(scratch.take_byte_buffer(5, "").unwrap().capacity(), 10);
         assert_eq!(scratch.take_byte_buffer(50, "").unwrap().capacity(), 100);
         assert_eq!(scratch.pooled_bytes, 1000);
+    }
+
+    #[test]
+    fn take_byte_buffer_empties_a_recycled_buffer() {
+        let mut scratch = DecodeScratch::new();
+        scratch.recycle_byte_buffer(alloc::vec![7; 10]);
+
+        assert_eq!(scratch.take_byte_buffer(5, "").unwrap(), []);
+    }
+
+    #[test]
+    fn take_stale_byte_buffer_keeps_the_recycled_length() {
+        let mut scratch = DecodeScratch::new();
+        scratch.recycle_byte_buffer(alloc::vec![7; 10]);
+
+        let buffer = scratch.take_stale_byte_buffer(5, "").unwrap();
+
+        let stale = if cfg!(debug_assertions) {
+            STALE_POISON
+        } else {
+            7
+        };
+        assert_eq!(buffer, [stale; 10]);
     }
 
     #[test]

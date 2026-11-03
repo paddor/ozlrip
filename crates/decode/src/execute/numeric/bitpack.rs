@@ -53,7 +53,7 @@ fn decode_bitpack_chunk(
         .checked_mul(parsed.element_width)
         .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
     check_output_len(output_len, limits)?;
-    let mut output = scratch.take_byte_buffer(output_len, "bitpack allocation failed")?;
+    let mut output = scratch.take_stale_byte_buffer(output_len, "bitpack allocation failed")?;
     fast_bitpack::unpack_lsb_bits(
         stored,
         parsed.bits,

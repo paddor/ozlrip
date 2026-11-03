@@ -1,5 +1,7 @@
 use alloc::vec::Vec;
 
+/// Replaces `output` with the decoded elements. `output` may hold stale
+/// bytes: every byte is overwritten.
 pub(super) fn decode_delta_elements(
     stored: &[u8],
     header: &[u8],
@@ -7,11 +9,11 @@ pub(super) fn decode_delta_elements(
     output_len: usize,
     output: &mut Vec<u8>,
 ) {
-    debug_assert_eq!(output.as_slice(), []);
     if element_width == 1 {
         // Extending from a mapped slice iterator writes each byte once:
         // no zero fill and no per-byte bounds check.
         let mut previous = header[0];
+        output.clear();
         output.push(previous);
         output.extend(stored.iter().map(|&delta| {
             previous = previous.wrapping_add(delta);
@@ -19,6 +21,9 @@ pub(super) fn decode_delta_elements(
         }));
         return;
     }
+    // The zip loops below write every byte only when the lengths match.
+    debug_assert_eq!(header.len() + stored.len(), output_len);
+    debug_assert!(stored.len().is_multiple_of(element_width));
     output.resize(output_len, 0);
     output[..element_width].copy_from_slice(header);
     match element_width {
