@@ -7,16 +7,21 @@ pub(super) fn decode_delta_elements(
     output_len: usize,
     output: &mut Vec<u8>,
 ) {
+    debug_assert_eq!(output.as_slice(), []);
+    if element_width == 1 {
+        // Extending from a mapped slice iterator writes each byte once:
+        // no zero fill and no per-byte bounds check.
+        let mut previous = header[0];
+        output.push(previous);
+        output.extend(stored.iter().map(|&delta| {
+            previous = previous.wrapping_add(delta);
+            previous
+        }));
+        return;
+    }
     output.resize(output_len, 0);
     output[..element_width].copy_from_slice(header);
     match element_width {
-        1 => {
-            let mut previous = header[0];
-            for (index, &delta) in stored.iter().enumerate() {
-                previous = previous.wrapping_add(delta);
-                output[index + 1] = previous;
-            }
-        }
         2 => {
             let mut previous = u16::from_le_bytes([header[0], header[1]]);
             for (out, delta) in output[2..]
