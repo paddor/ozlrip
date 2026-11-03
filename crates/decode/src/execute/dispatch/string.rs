@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
 use super::csv::append_u16_dispatched_to_serial;
-use super::source::{DispatchStringSource, append_dispatched_string_to_serial};
+use super::source::{DispatchStringSource, SerialOutput, append_dispatched_string_to_serial};
 use crate::execute::elements::{checked_sum_u32, numeric_element_count, require_numeric_width};
 use crate::execute::header::require_empty_header;
 use crate::execute::output::{alloc_output, check_output_len};
@@ -196,17 +196,30 @@ pub(in crate::execute) fn decode_dispatch_string_node_to_serial_output(
     output.try_reserve_exact(total_bytes).map_err(|_| {
         Error::new(ErrorKind::AllocationFailed).with_detail("dispatch output allocation failed")
     })?;
+    let mut serial = SerialOutput::new(output);
+    append_indices_to_serial(
+        indices.bytes,
+        indices.element_width,
+        &mut sources,
+        &mut serial,
+    )?;
+    ensure_sources_consumed(&sources)
+}
 
-    match indices.element_width {
+fn append_indices_to_serial(
+    indices: &[u8],
+    index_width: usize,
+    sources: &mut [DispatchStringSource<'_>],
+    output: &mut SerialOutput<'_>,
+) -> Result<()> {
+    match index_width {
         1 => {
-            for &source in indices.bytes {
-                append_dispatched_string_to_serial(usize::from(source), &mut sources, output)?;
+            for &source in indices {
+                append_dispatched_string_to_serial(usize::from(source), sources, output)?;
             }
+            Ok(())
         }
-        2 => {
-            append_u16_dispatched_to_serial(indices.bytes, &mut sources, output)?;
-        }
+        2 => append_u16_dispatched_to_serial(indices, sources, output),
         _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
     }
-    ensure_sources_consumed(&sources)
 }

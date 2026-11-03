@@ -5,7 +5,9 @@
 - Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the
   `paranoid` feature stays and has no effect today. The unchecked CSV
   `dispatch_string` row writers are gone, and one checked writer serves
-  every shape.
+  every shape. Against the unsafe build on the same machine, portable
+  decoding is 11-15% slower on CSV frames, 4-10% slower on SAO frames, and
+  9% faster on `lorem-serial-sample`; other cases are within 5%.
 - Update `zrip-decode` to 0.8.13, `zrip-core` to 0.11.1, and
   `lz4rip-decode` to 0.11.0, which forbid unsafe code too.
 - A `convert_struct_to_num_le` node with a header names itself in its

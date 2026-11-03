@@ -1,12 +1,10 @@
 //! CSV-shaped `dispatch_string` indices: a loop that copies whole rows of
 //! the 5-source pattern at a time.
 
-use alloc::vec::Vec;
-
 use ozlrip_core::Result;
 
 use super::source::{
-    DispatchStringSource, append_dispatched_single_byte_string_source_to_serial,
+    DispatchStringSource, SerialOutput, append_dispatched_single_byte_string_source_to_serial,
     append_dispatched_string_source_to_serial, append_dispatched_string_to_serial,
 };
 
@@ -14,7 +12,7 @@ use super::source::{
 pub(super) fn append_u16_dispatched_to_serial(
     indices: &[u8],
     sources: &mut [DispatchStringSource<'_>],
-    output: &mut Vec<u8>,
+    output: &mut SerialOutput<'_>,
 ) -> Result<()> {
     if sources.len() == 5 {
         return append_dispatched_string_2byte_csv_pattern(indices, sources, output);
@@ -32,7 +30,7 @@ pub(super) fn append_u16_dispatched_to_serial(
 fn append_dispatched_string_2byte_csv_pattern(
     indices: &[u8],
     sources: &mut [DispatchStringSource<'_>],
-    output: &mut Vec<u8>,
+    output: &mut SerialOutput<'_>,
 ) -> Result<()> {
     const CSV_PATTERN: [u8; 16] = [0, 0, 4, 0, 1, 0, 4, 0, 2, 0, 4, 0, 3, 0, 4, 0];
 
