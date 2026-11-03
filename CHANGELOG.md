@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0]
+
 - Decode fixed-width `tokenize` outputs into pooled buffers. A fresh
   buffer per decode page-faulted on its first write to every page:
   `sao-fixed-28m` decodes 36% faster in a portable build, and
@@ -9,9 +11,6 @@
 - Pooled buffers keep their bytes, so delta, transpose, bitpack and
   fixed-width tokenize outputs skip zero-filling bytes they overwrite.
   `le-u64-timeseries-32m` decodes 5% faster in a portable build.
-
-## [0.6.0]
-
 - Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the
   `paranoid` feature stays and has no effect today. The unchecked CSV
   `dispatch_string` row writers are gone, and one checked writer serves
