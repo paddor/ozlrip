@@ -287,6 +287,7 @@ fn decode_lz_sequences(
     output: &mut Vec<u8>,
     output_base: usize,
 ) -> Result<()> {
+    debug_assert_eq!(output.len(), output_base);
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
     for sequence in sequences {
@@ -302,14 +303,16 @@ fn decode_lz_sequences(
         let out_literal_end = out_pos
             .checked_add(literal_len)
             .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let literal_src = literals.get(lit_pos..literal_end).ok_or_else(|| {
-            Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
-        })?;
+        if literal_end > literals.len() {
+            return Err(
+                Error::new(ErrorKind::Malformed).with_detail("lz literal stream is too short")
+            );
+        }
         if out_literal_end > output_limit {
             return Err(Error::new(ErrorKind::Malformed)
                 .with_detail("lz literal length exceeds output size"));
         }
-        output.extend_from_slice(literal_src);
+        copy_lz_literals(output, literals, lit_pos, literal_len);
         lit_pos = literal_end;
         out_pos = out_literal_end;
 
@@ -329,11 +332,53 @@ fn decode_lz_sequences(
                 Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
             );
         }
-        append_lz_match(output, out_pos, match_offset, match_len);
+        copy_lz_match(output, out_pos, match_offset, match_len);
         out_pos = out_match_end;
     }
 
-    append_last_lz_literals(output, literals, lit_pos, out_pos, output_limit)
+    copy_last_lz_literals(output, literals, lit_pos, out_pos, output_limit)
+}
+
+/// Bytes one fixed-size copy moves. A literal run or match of at most this
+/// many bytes appends a whole chunk and truncates back to its end, when the
+/// chunk fits in spare capacity. The constant size inlines the copy, and
+/// appending writes each output byte once, with no zero fill.
+const COPY_CHUNK: usize = 16;
+
+/// Appends the `len` literals from `lit_pos`, which must be in bounds.
+#[expect(clippy::inline_always, reason = "runs once per LZ sequence")]
+#[inline(always)]
+fn copy_lz_literals(output: &mut Vec<u8>, literals: &[u8], lit_pos: usize, len: usize) {
+    let end = output.len() + len;
+    if len <= COPY_CHUNK
+        && output.capacity() - output.len() >= COPY_CHUNK
+        && let Some(chunk) = literals
+            .get(lit_pos..)
+            .and_then(<[u8]>::first_chunk::<COPY_CHUNK>)
+    {
+        output.extend_from_slice(chunk);
+        output.truncate(end);
+    } else {
+        output.extend_from_slice(&literals[lit_pos..lit_pos + len]);
+    }
+}
+
+/// Appends the `len` byte match `offset` bytes before `out_pos`, the end of
+/// `output`.
+#[expect(clippy::inline_always, reason = "runs once per LZ sequence")]
+#[inline(always)]
+fn copy_lz_match(output: &mut Vec<u8>, out_pos: usize, offset: usize, len: usize) {
+    if len <= COPY_CHUNK
+        && offset >= COPY_CHUNK
+        && output.capacity() - out_pos >= COPY_CHUNK
+        // The chunk ends at or before `out_pos`, so it reads decoded bytes.
+        && let Some(&chunk) = output[out_pos - offset..].first_chunk::<COPY_CHUNK>()
+    {
+        output.extend_from_slice(&chunk);
+        output.truncate(out_pos + len);
+    } else {
+        append_lz_match(output, out_pos, offset, len);
+    }
 }
 
 /// Appends the literals after the last sequence, which must end the output
@@ -343,7 +388,7 @@ fn decode_lz_sequences(
     reason = "runs once after the hot sequence loop it was split from"
 )]
 #[inline(always)]
-fn append_last_lz_literals(
+fn copy_last_lz_literals(
     output: &mut Vec<u8>,
     literals: &[u8],
     lit_pos: usize,
@@ -392,6 +437,8 @@ pub(super) fn append_lz_match(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::{append_lz_match, decode_lz_u8_u16_u16_to_output};
 
     #[test]
@@ -459,5 +506,56 @@ mod tests {
         append_lz_match(&mut output, 2, 2, 5);
 
         assert_eq!(output, b"abababa");
+    }
+    #[test]
+    fn matches_a_byte_at_a_time_reference() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % bound as u64).unwrap()
+        };
+        for _ in 0..300 {
+            let (mut literals, mut offsets, mut literal_lengths, mut match_lengths) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut expected = Vec::new();
+            let sequences = next(24);
+            for _ in 0..sequences {
+                let literal_len =
+                    [next(4), next(20), next(70)][next(3)] + usize::from(expected.is_empty());
+                let start = literals.len();
+                literals.extend((0..literal_len).map(|_| u8::try_from(next(256)).unwrap()));
+                expected.extend_from_slice(&literals[start..]);
+                let offset = 1 + next(expected.len().min(255));
+                let match_len = [next(4), next(20), next(70)][next(3)];
+                for _ in 0..match_len {
+                    expected.push(expected[expected.len() - offset]);
+                }
+                offsets.push(u8::try_from(offset).unwrap());
+                literal_lengths
+                    .extend_from_slice(&u16::try_from(literal_len).unwrap().to_le_bytes());
+                match_lengths.extend_from_slice(&u16::try_from(match_len).unwrap().to_le_bytes());
+            }
+            let start = literals.len();
+            literals.extend((0..next(30)).map(|_| u8::try_from(next(256)).unwrap()));
+            expected.extend_from_slice(&literals[start..]);
+            let mut output = b"pre".to_vec();
+
+            decode_lz_u8_u16_u16_to_output(
+                &literals,
+                &offsets,
+                &literal_lengths,
+                &match_lengths,
+                sequences,
+                expected.len(),
+                &mut output,
+                3,
+            )
+            .unwrap();
+
+            assert_eq!(output[..3], *b"pre");
+            assert_eq!(output[3..], expected);
+        }
     }
 }
