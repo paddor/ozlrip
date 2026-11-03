@@ -258,7 +258,7 @@ fn decodes_empty_fastlz_deprecated_node() {
     )
     .unwrap();
 
-    assert!(output.is_empty());
+    assert_eq!(output, b"");
 }
 
 #[test]
@@ -458,7 +458,7 @@ fn decodes_empty_rolz_deprecated_node() {
     )
     .unwrap();
 
-    assert!(output.is_empty());
+    assert_eq!(output, b"");
 }
 
 #[test]

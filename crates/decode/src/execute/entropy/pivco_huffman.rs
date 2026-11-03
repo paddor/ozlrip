@@ -856,7 +856,7 @@ mod tests {
     fn decodes_empty_payload() {
         let output = decode(&[], &[], &header(0, None)).unwrap();
 
-        assert!(output.is_empty());
+        assert_eq!(output, b"");
     }
 
     #[test]

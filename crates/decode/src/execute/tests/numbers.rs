@@ -480,7 +480,7 @@ fn decodes_delta_streams_before_v13() {
 
     assert_eq!(output.element_width, 2);
     assert_eq!(output.bytes, [0x02, 0x01, 0x02, 0x02, 0x01, 0x02]);
-    assert!(delta(&[], 2, &[], 12).unwrap().bytes.is_empty());
+    assert_eq!(delta(&[], 2, &[], 12).unwrap().bytes, b"");
 }
 
 #[test]

@@ -28,7 +28,7 @@ pub(super) fn write_transpose_split_output(
 )]
 #[inline(always)]
 fn write_lanes(inputs: &[StreamInput<'_>], output_len: usize, output: &mut Vec<u8>) {
-    debug_assert!(output.is_empty());
+    debug_assert_eq!(output.as_slice(), []);
     match inputs {
         [lane0, lane1] => {
             write_2(lane0.bytes, lane1.bytes, output);

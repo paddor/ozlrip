@@ -146,5 +146,5 @@ fn rejects_typed_frames() {
     let (result, chunks) = chunks_of(&mut Decoder::new(), &frame);
 
     assert_eq!(result.unwrap_err().kind(), ErrorKind::Unsupported);
-    assert!(chunks.is_empty());
+    assert_eq!(chunks, Vec::<Vec<u8>>::new());
 }

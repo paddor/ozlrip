@@ -10,7 +10,7 @@ pub(super) fn decode_delta_elements(
     output_len: usize,
     output: &mut Vec<u8>,
 ) {
-    debug_assert!(output.is_empty());
+    debug_assert_eq!(output.as_slice(), []);
     debug_assert!(output.capacity() >= output_len);
     match element_width {
         1 => decode_delta_1(stored, header[0], output),

@@ -392,7 +392,7 @@ fn decodes_empty_splitn_num_header_width() {
     let output = decode_splitn_typed_node(&[], 0, &[4], Limits::default()).unwrap();
 
     assert_eq!(output.element_width, 4);
-    assert!(output.bytes.is_empty());
+    assert_eq!(output.bytes, b"");
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn split_by_struct_splitn_tail_rejects_mismatched_input_widths() {
     let err = decode_plan(&input, &plan, &mut output, Limits::default()).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::InvalidType, "{err}");
-    assert!(output.is_empty());
+    assert_eq!(output, b"");
 }
 
 #[test]

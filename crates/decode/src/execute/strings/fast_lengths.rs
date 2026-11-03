@@ -12,7 +12,7 @@ pub(super) fn decode_u8_lengths(
     output: &mut Vec<u32>,
     total: &mut usize,
 ) -> Result<()> {
-    debug_assert!(output.is_empty());
+    debug_assert_eq!(output.as_slice(), []);
     #[cfg(not(feature = "paranoid"))]
     {
         output.reserve(sizes.len());
