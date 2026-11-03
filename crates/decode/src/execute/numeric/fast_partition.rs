@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
@@ -14,24 +12,10 @@ pub(super) fn decode_u32_node(
     bits: &[u8],
     output_len: usize,
 ) -> Result<OwnedStream> {
-    #[cfg(not(feature = "paranoid"))]
-    {
-        decode_u32_node_fast(buckets, offset_bits, bases, bits, output_len)
+    if buckets.len().checked_mul(4) != Some(output_len) {
+        return Err(Error::new(ErrorKind::InvalidGraph)
+            .with_detail("partition output size does not match its buckets"));
     }
-    #[cfg(feature = "paranoid")]
-    {
-        decode_u32_node_safe(buckets, offset_bits, bases, bits, output_len)
-    }
-}
-
-#[cfg(feature = "paranoid")]
-fn decode_u32_node_safe(
-    buckets: &[u8],
-    offset_bits: &[u8],
-    bases: &[u64],
-    bits: &[u8],
-    output_len: usize,
-) -> Result<OwnedStream> {
     let mut reader = ForwardBitReader::new(offset_bits);
     let mut output = Vec::new();
     output.try_reserve_exact(output_len).map_err(|_| {
@@ -46,8 +30,7 @@ fn decode_u32_node_safe(
         bit_table[bucket] = bit_width;
     }
 
-    let mut out_pos = 0usize;
-    for &bucket in buckets {
+    for (out, &bucket) in output.as_chunks_mut::<4>().0.iter_mut().zip(buckets) {
         let bucket = usize::from(bucket);
         let bit_width = bit_table[bucket];
         if bit_width == u8::MAX {
@@ -64,8 +47,7 @@ fn decode_u32_node_safe(
             Error::new(ErrorKind::Malformed)
                 .with_detail("partition value exceeds output element width")
         })?;
-        output[out_pos..out_pos + 4].copy_from_slice(&value.to_le_bytes());
-        out_pos += 4;
+        *out = value.to_le_bytes();
     }
 
     Ok(OwnedStream {
@@ -74,89 +56,4 @@ fn decode_u32_node_safe(
         string_lengths: None,
         recyclable: false,
     })
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_u32_node_fast(
-    buckets: &[u8],
-    offset_bits: &[u8],
-    bases: &[u64],
-    bits: &[u8],
-    output_len: usize,
-) -> Result<OwnedStream> {
-    // The writes below fill 4 bytes per bucket into spare capacity.
-    if buckets.len().checked_mul(4) != Some(output_len) {
-        return Err(Error::new(ErrorKind::InvalidGraph)
-            .with_detail("partition output size does not match its buckets"));
-    }
-    let mut reader = ForwardBitReader::new(offset_bits);
-    let mut output = Vec::new();
-    output.try_reserve_exact(output_len).map_err(|_| {
-        Error::new(ErrorKind::AllocationFailed).with_detail("partition allocation failed")
-    })?;
-
-    let mut base_table = [0u64; 256];
-    let mut bit_table = [u8::MAX; 256];
-    for (bucket, (&base, &bit_width)) in bases.iter().zip(bits).enumerate() {
-        base_table[bucket] = base;
-        bit_table[bucket] = bit_width;
-    }
-
-    let mut out_pos = 0usize;
-    for &bucket in buckets {
-        let bucket = usize::from(bucket);
-        let bit_width = bit_table[bucket];
-        if bit_width == u8::MAX {
-            return Err(
-                Error::new(ErrorKind::Malformed).with_detail("partition bucket is out of range")
-            );
-        }
-        let base = base_table[bucket];
-        let offset = reader.read_u64(usize::from(bit_width))?;
-        let value = base
-            .checked_add(offset)
-            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-        let value = u32::try_from(value).map_err(|_| {
-            Error::new(ErrorKind::Malformed)
-                .with_detail("partition value exceeds output element width")
-        })?;
-        // SAFETY: `out_pos` is 4 times the bucket index, so it ends at most
-        // at `output_len = 4 * buckets.len()`, within capacity, and the
-        // length stays 0 until the loop ends.
-        unsafe {
-            write_u32_le_spare(&mut output, out_pos, value);
-        }
-        out_pos += 4;
-    }
-
-    debug_assert_eq!(out_pos, output_len);
-    // SAFETY: the loop wrote every 4-byte value in `0..output_len`.
-    unsafe {
-        output.set_len(output_len);
-    }
-    Ok(OwnedStream {
-        bytes: output,
-        element_width: 4,
-        string_lengths: None,
-        recyclable: false,
-    })
-}
-
-/// Writes `value` little-endian at `offset` in `output`'s spare capacity.
-///
-/// # Safety
-///
-/// `offset + 4` must be at most `output.capacity()`, and `offset` at least
-/// `output.len()`.
-#[cfg(not(feature = "paranoid"))]
-unsafe fn write_u32_le_spare(output: &mut Vec<u8>, offset: usize, value: u32) {
-    debug_assert!(offset + 4 <= output.capacity());
-    debug_assert!(output.len() <= offset);
-    // SAFETY: the caller guarantees the 4 bytes lie in spare capacity.
-    unsafe {
-        core::ptr::write_unaligned(
-            output.as_mut_ptr().add(offset).cast::<[u8; 4]>(),
-            value.to_le_bytes(),
-        );
-    }
 }

@@ -2,9 +2,6 @@
 //! interleave several sources in the order an index or tag stream gives.
 
 mod csv;
-#[cfg(test)]
-mod csv_tests;
-mod fast_csv;
 mod fast_dispatch;
 mod n_by_tag;
 mod source;

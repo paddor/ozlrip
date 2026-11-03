@@ -29,11 +29,11 @@
 //! - `alloc` (default): required.
 //! - `zstd` (default): zstd nodes, decoded by `zrip`.
 //! - `lz4` (default): lz4 nodes, decoded by `lz4rip`.
-//! - `paranoid`: forbids unsafe code in this crate and its codecs and uses
-//!   safe code paths throughout.
+//! - `paranoid`: keeps any future `unsafe` out; no effect today. Every
+//!   crate is `#![forbid(unsafe_code)]`.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 

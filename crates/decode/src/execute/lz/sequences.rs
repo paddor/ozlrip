@@ -5,8 +5,6 @@ use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-#[cfg(not(feature = "paranoid"))]
-use super::fast_lz;
 use crate::execute::elements::{
     numeric_element_count, read_usize_numeric_element, read_var_u64, validate_numeric_stream_width,
 };
@@ -150,51 +148,6 @@ fn decode_lz_node_to_output_validated(
     )
 }
 
-/// The u8 offset, u16 length layout: the unchecked fast path, or its
-/// checked twin under `paranoid`.
-#[expect(
-    clippy::inline_always,
-    reason = "a thin cfg switch; the callee keeps its own inlining"
-)]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the LZ streams stay split, as the node hands them over"
-)]
-#[inline(always)]
-fn decode_lz_u8_u16_u16_to_output(
-    literals: &[u8],
-    offsets: &[u8],
-    literal_lengths: &[u8],
-    match_lengths: &[u8],
-    sequence_count: usize,
-    output_len: usize,
-    output: &mut Vec<u8>,
-    output_base: usize,
-) -> Result<()> {
-    #[cfg(not(feature = "paranoid"))]
-    return fast_lz::decode_u8_u16_u16_to_output(
-        literals,
-        offsets,
-        literal_lengths,
-        match_lengths,
-        sequence_count,
-        output_len,
-        output,
-        output_base,
-    );
-    #[cfg(feature = "paranoid")]
-    return decode_lz_u8_u16_u16_to_output_safe(
-        literals,
-        offsets,
-        literal_lengths,
-        match_lengths,
-        sequence_count,
-        output_len,
-        output,
-        output_base,
-    );
-}
-
 #[inline(never)]
 #[expect(
     clippy::too_many_arguments,
@@ -229,17 +182,17 @@ fn decode_lz_node_to_output_generic(
     decode_lz_sequences(sequences, literals.bytes, output_limit, output, output_base)
 }
 
-#[cfg(feature = "paranoid")]
+/// The u8 offset, u16 length layout.
 #[expect(
     clippy::inline_always,
-    reason = "paranoid LZ fallback keeps the safe copy loop visible to callers"
+    reason = "keeps the copy loop visible to callers"
 )]
 #[expect(
     clippy::too_many_arguments,
     reason = "arguments are split stream slices from the validated LZ node shape"
 )]
 #[inline(always)]
-fn decode_lz_u8_u16_u16_to_output_safe(
+fn decode_lz_u8_u16_u16_to_output(
     literals: &[u8],
     offsets: &[u8],
     literal_lengths: &[u8],
@@ -334,13 +287,6 @@ fn decode_lz_sequences(
     output: &mut Vec<u8>,
     output_base: usize,
 ) -> Result<()> {
-    // Matches are copied into spare capacity up to `output_limit`.
-    #[cfg(not(feature = "paranoid"))]
-    if output.len() != output_base || output.capacity() < output_limit {
-        return Err(
-            Error::new(ErrorKind::InvalidGraph).with_detail("lz output spare capacity is invalid")
-        );
-    }
     let mut out_pos = output_base;
     let mut lit_pos = 0usize;
     for sequence in sequences {
@@ -383,19 +329,6 @@ fn decode_lz_sequences(
                 Error::new(ErrorKind::Malformed).with_detail("lz match length exceeds output size")
             );
         }
-        #[cfg(not(feature = "paranoid"))]
-        if match_len <= match_offset {
-            // SAFETY: `output` holds `out_pos` bytes and has capacity
-            // `output_limit`, checked before the loop. The source starts
-            // `match_offset <= out_pos - output_base` bytes back and ends at or
-            // before `out_pos`, and `out_match_end <= output_limit`.
-            unsafe {
-                fast_lz::append_nonoverlapping_match(output, out_pos - match_offset, match_len);
-            }
-        } else {
-            append_lz_match(output, out_pos, match_offset, match_len);
-        }
-        #[cfg(feature = "paranoid")]
         append_lz_match(output, out_pos, match_offset, match_len);
         out_pos = out_match_end;
     }
@@ -454,5 +387,77 @@ pub(super) fn append_lz_match(
         let len = copied.min(match_len - copied);
         output.extend_from_within(out_pos..out_pos + len);
         copied += len;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_lz_match, decode_lz_u8_u16_u16_to_output};
+
+    #[test]
+    fn decodes_u8_u16_u16_lz_after_existing_output() {
+        let literals = b"abcxyZ";
+        let offsets = [3, 2];
+        let literal_lengths = [3, 0, 2, 0];
+        let match_lengths = [3, 0, 4, 0];
+        let mut output = b"pre".to_vec();
+        output.reserve_exact(13);
+
+        decode_lz_u8_u16_u16_to_output(
+            literals,
+            &offsets,
+            &literal_lengths,
+            &match_lengths,
+            2,
+            13,
+            &mut output,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"preabcabcxyxyxyZ");
+    }
+
+    #[test]
+    fn rejects_truncated_literals_before_mutating_output() {
+        let literals = b"a";
+        let offsets = [1];
+        let literal_lengths = [2, 0];
+        let match_lengths = [0, 0];
+        let mut output = b"pre".to_vec();
+        output.reserve_exact(8);
+
+        let err = decode_lz_u8_u16_u16_to_output(
+            literals,
+            &offsets,
+            &literal_lengths,
+            &match_lengths,
+            1,
+            2,
+            &mut output,
+            3,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ozlrip_core::ErrorKind::Malformed);
+        assert_eq!(output, b"pre");
+    }
+
+    #[test]
+    fn appends_nonoverlapping_match() {
+        let mut output = b"abcdef".to_vec();
+
+        append_lz_match(&mut output, 6, 4, 3);
+
+        assert_eq!(output, b"abcdefcde");
+    }
+
+    #[test]
+    fn appends_overlapping_match() {
+        let mut output = b"ab".to_vec();
+
+        append_lz_match(&mut output, 2, 2, 5);
+
+        assert_eq!(output, b"abababa");
     }
 }

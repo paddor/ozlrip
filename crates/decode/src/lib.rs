@@ -3,7 +3,7 @@
 //! Use the `ozlrip` crate; it re-exports everything here.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 

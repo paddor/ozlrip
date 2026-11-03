@@ -3,6 +3,7 @@
 //! [`FrameBuilder`] writes chunked frames (format v21 and later) and
 //! single-chunk frames in formats v8 to v20. Frames that need upstream's
 //! encoder come from `tools/openzl-shim`. Not published.
+#![forbid(unsafe_code)]
 
 /// OpenZL frame magic for format version 0; add the version.
 pub const MAGIC_BASE: u32 = 0xd7b1_a5c0;

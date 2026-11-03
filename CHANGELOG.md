@@ -2,12 +2,15 @@
 
 ## [Unreleased]
 
+- Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the
+  `paranoid` feature stays and has no effect today. The unchecked CSV
+  `dispatch_string` row writers are gone, and one checked writer serves
+  every shape.
 - A `convert_struct_to_num_le` node with a header names itself in its
   `Unsupported` error detail. It named `convert_num_to_struct_le`.
-- Breaking: remove `Limits::paranoid()`. The `paranoid` feature forbids
-  unsafe code and does not change limits; a preset with the same name
-  suggested otherwise. Start from `Limits::strict()` and lower the fields
-  you need.
+- Breaking: remove `Limits::paranoid()`. The `paranoid` feature does not
+  change limits; a preset with the same name suggested otherwise. Start
+  from `Limits::strict()` and lower the fields you need.
 - Add `Limits::expansion_ratio_exempt_bytes`: decoded outputs up to this
   size skip `max_expansion_ratio` (1 MiB by default). Very
   compressible data compresses past the default ratio of 256, so frames

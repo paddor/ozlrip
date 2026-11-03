@@ -1,10 +1,7 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 use alloc::vec::Vec;
 
 use crate::execute::streams::StreamInput;
 
-#[cfg(not(feature = "paranoid"))]
 pub(super) fn write_transpose_split_output(
     inputs: &[StreamInput<'_>],
     output_len: usize,
@@ -21,63 +18,23 @@ pub(super) fn write_transpose_split_output(
     write_lanes(inputs, output_len, output);
 }
 
-#[cfg(not(feature = "paranoid"))]
 #[expect(
     clippy::inline_always,
     reason = "inlining into the dispatched closure applies its target features"
 )]
 #[inline(always)]
 fn write_lanes(inputs: &[StreamInput<'_>], output_len: usize, output: &mut Vec<u8>) {
-    debug_assert_eq!(output.as_slice(), []);
     match inputs {
         [lane0, lane1] => {
             write_2(lane0.bytes, lane1.bytes, output);
+            return;
         }
         [lane0, lane1, lane2, lane3] => {
             write_4(lane0.bytes, lane1.bytes, lane2.bytes, lane3.bytes, output);
+            return;
         }
         [lane0, lane1, lane2, lane3, lane4, lane5, lane6, lane7] => {
             write_8(
-                lane0.bytes,
-                lane1.bytes,
-                lane2.bytes,
-                lane3.bytes,
-                lane4.bytes,
-                lane5.bytes,
-                lane6.bytes,
-                lane7.bytes,
-                output,
-            );
-        }
-        _ => write_transpose_split_output_safe(inputs, output_len, output),
-    }
-}
-
-#[cfg(feature = "paranoid")]
-pub(super) fn write_transpose_split_output(
-    inputs: &[StreamInput<'_>],
-    output_len: usize,
-    output: &mut Vec<u8>,
-) {
-    write_transpose_split_output_safe(inputs, output_len, output);
-}
-
-fn write_transpose_split_output_safe(
-    inputs: &[StreamInput<'_>],
-    output_len: usize,
-    output: &mut Vec<u8>,
-) {
-    match inputs {
-        [lane0, lane1] => {
-            write_2_safe(lane0.bytes, lane1.bytes, output);
-            return;
-        }
-        [lane0, lane1, lane2, lane3] => {
-            write_4_safe(lane0.bytes, lane1.bytes, lane2.bytes, lane3.bytes, output);
-            return;
-        }
-        [lane0, lane1, lane2, lane3, lane4, lane5, lane6, lane7] => {
-            write_8_safe(
                 lane0.bytes,
                 lane1.bytes,
                 lane2.bytes,
@@ -102,7 +59,12 @@ fn write_transpose_split_output_safe(
     }
 }
 
-fn write_2_safe(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
+fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
     debug_assert_eq!(lane1.len(), len);
     output.resize(len * 2, 0);
@@ -112,7 +74,12 @@ fn write_2_safe(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
     }
 }
 
-fn write_4_safe(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
+fn write_4(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
     let len = lane0.len();
     debug_assert_eq!(lane1.len(), len);
     debug_assert_eq!(lane2.len(), len);
@@ -127,7 +94,12 @@ fn write_4_safe(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: 
 }
 
 #[expect(clippy::too_many_arguments, reason = "fixed-width lane writer")]
-fn write_8_safe(
+#[expect(
+    clippy::inline_always,
+    reason = "inlining into the dispatched closure applies its target features"
+)]
+#[inline(always)]
+fn write_8(
     lane0: &[u8],
     lane1: &[u8],
     lane2: &[u8],
@@ -156,134 +128,5 @@ fn write_8_safe(
         out[5] = lane5[index];
         out[6] = lane6[index];
         out[7] = lane7[index];
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::inline_always,
-    reason = "inlining into the dispatched closure applies its target features"
-)]
-#[inline(always)]
-fn write_2(lane0: &[u8], lane1: &[u8], output: &mut Vec<u8>) {
-    let len = lane0.len();
-    assert!(lane1.len() == len, "transpose lanes differ in length");
-    let total = len.checked_mul(2).expect("transpose output size overflows");
-    output.clear();
-    output.reserve(total);
-    let dst = output.as_mut_ptr();
-    let src0 = lane0.as_ptr();
-    let src1 = lane1.as_ptr();
-    for index in 0..len {
-        // SAFETY: every lane holds `len` bytes, and element `index` ends at
-        // `(index + 1) * 2 <= total`, within the room `reserve` made.
-        unsafe {
-            let out = dst.add(index * 2);
-            out.write(src0.add(index).read());
-            out.add(1).write(src1.add(index).read());
-        }
-    }
-    // SAFETY: the loop initialized all `total` bytes.
-    unsafe {
-        output.set_len(total);
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::inline_always,
-    reason = "inlining into the dispatched closure applies its target features"
-)]
-#[inline(always)]
-fn write_4(lane0: &[u8], lane1: &[u8], lane2: &[u8], lane3: &[u8], output: &mut Vec<u8>) {
-    let len = lane0.len();
-    assert!(
-        lane1.len() == len && lane2.len() == len && lane3.len() == len,
-        "transpose lanes differ in length"
-    );
-    let total = len.checked_mul(4).expect("transpose output size overflows");
-    output.clear();
-    output.reserve(total);
-    let dst = output.as_mut_ptr();
-    let src0 = lane0.as_ptr();
-    let src1 = lane1.as_ptr();
-    let src2 = lane2.as_ptr();
-    let src3 = lane3.as_ptr();
-    for index in 0..len {
-        // SAFETY: every lane holds `len` bytes, and element `index` ends at
-        // `(index + 1) * 4 <= total`, within the room `reserve` made.
-        unsafe {
-            let out = dst.add(index * 4);
-            out.write(src0.add(index).read());
-            out.add(1).write(src1.add(index).read());
-            out.add(2).write(src2.add(index).read());
-            out.add(3).write(src3.add(index).read());
-        }
-    }
-    // SAFETY: the loop initialized all `total` bytes.
-    unsafe {
-        output.set_len(total);
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(clippy::too_many_arguments, reason = "fixed-width lane writer")]
-#[expect(
-    clippy::inline_always,
-    reason = "inlining into the dispatched closure applies its target features"
-)]
-#[inline(always)]
-fn write_8(
-    lane0: &[u8],
-    lane1: &[u8],
-    lane2: &[u8],
-    lane3: &[u8],
-    lane4: &[u8],
-    lane5: &[u8],
-    lane6: &[u8],
-    lane7: &[u8],
-    output: &mut Vec<u8>,
-) {
-    let len = lane0.len();
-    assert!(
-        lane1.len() == len
-            && lane2.len() == len
-            && lane3.len() == len
-            && lane4.len() == len
-            && lane5.len() == len
-            && lane6.len() == len
-            && lane7.len() == len,
-        "transpose lanes differ in length"
-    );
-    let total = len.checked_mul(8).expect("transpose output size overflows");
-    output.clear();
-    output.reserve(total);
-    let dst = output.as_mut_ptr();
-    let src0 = lane0.as_ptr();
-    let src1 = lane1.as_ptr();
-    let src2 = lane2.as_ptr();
-    let src3 = lane3.as_ptr();
-    let src4 = lane4.as_ptr();
-    let src5 = lane5.as_ptr();
-    let src6 = lane6.as_ptr();
-    let src7 = lane7.as_ptr();
-    for index in 0..len {
-        // SAFETY: every lane holds `len` bytes, and element `index` ends at
-        // `(index + 1) * 8 <= total`, within the room `reserve` made.
-        unsafe {
-            let out = dst.add(index * 8);
-            out.write(src0.add(index).read());
-            out.add(1).write(src1.add(index).read());
-            out.add(2).write(src2.add(index).read());
-            out.add(3).write(src3.add(index).read());
-            out.add(4).write(src4.add(index).read());
-            out.add(5).write(src5.add(index).read());
-            out.add(6).write(src6.add(index).read());
-            out.add(7).write(src7.add(index).read());
-        }
-    }
-    // SAFETY: the loop initialized all `total` bytes.
-    unsafe {
-        output.set_len(total);
     }
 }

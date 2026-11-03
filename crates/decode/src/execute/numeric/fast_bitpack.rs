@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 use alloc::vec::Vec;
 
 use ozlrip_core::{Error, ErrorKind, Result};
@@ -25,18 +23,10 @@ pub(super) fn unpack_lsb_bits(
         return Ok(());
     }
 
-    #[cfg(not(feature = "paranoid"))]
-    {
-        unpack_lsb_bits_fast(stored, bits, element_width, elements, output)
-    }
-    #[cfg(feature = "paranoid")]
-    {
-        unpack_lsb_bits_safe(stored, bits, element_width, elements, output)
-    }
+    unpack_lsb_bits_packed(stored, bits, element_width, elements, output)
 }
 
-#[cfg(feature = "paranoid")]
-fn unpack_lsb_bits_safe(
+fn unpack_lsb_bits_packed(
     stored: &[u8],
     bits: usize,
     element_width: usize,
@@ -44,7 +34,7 @@ fn unpack_lsb_bits_safe(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     if element_width == 2 && bits < 16 {
-        return unpack_lsb_bits_u16_window_safe(stored, bits, elements, output);
+        return unpack_lsb_bits_u16_window(stored, bits, elements, output);
     }
 
     let start = output.len();
@@ -54,17 +44,16 @@ fn unpack_lsb_bits_safe(
     output.resize(start + output_len, 0);
     let out = &mut output[start..start + output_len];
     if bits <= 56 {
-        return unpack_lsb_bits_u64_safe(stored, bits, element_width, out);
+        return unpack_lsb_bits_u64(stored, bits, element_width, out);
     }
-    unpack_lsb_bits_u128_safe(stored, bits, element_width, out)
+    unpack_lsb_bits_u128(stored, bits, element_width, out)
 }
 
-#[cfg(feature = "paranoid")]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the mask keeps values below 2^16"
 )]
-fn unpack_lsb_bits_u16_window_safe(
+fn unpack_lsb_bits_u16_window(
     stored: &[u8],
     bits: usize,
     elements: usize,
@@ -115,208 +104,7 @@ fn unpack_lsb_bits_u16_window_safe(
     Ok(())
 }
 
-#[cfg(not(feature = "paranoid"))]
-fn unpack_lsb_bits_fast(
-    stored: &[u8],
-    bits: usize,
-    element_width: usize,
-    elements: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    if element_width == 2 && bits < 16 {
-        return unpack_lsb_bits_u16_window_fast(stored, bits, elements, output);
-    }
-    if bits <= 56 {
-        return unpack_lsb_bits_u64_fast(stored, bits, element_width, elements, output);
-    }
-    unpack_lsb_bits_u128_fast(stored, bits, element_width, elements, output)
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the mask keeps values below 2^16"
-)]
-fn unpack_lsb_bits_u16_window_fast(
-    stored: &[u8],
-    bits: usize,
-    elements: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let required_bits = elements
-        .checked_mul(bits)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let required_bytes = required_bits.div_ceil(8);
-    if stored.len() < required_bytes {
-        return Err(Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated"));
-    }
-
-    let mask = (1u32 << bits) - 1;
-    let start_len = output.len();
-    let output_len = elements
-        .checked_mul(2)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    output.reserve(output_len);
-    // SAFETY: `start_len` is the length, within the allocation.
-    let mut out = unsafe { output.as_mut_ptr().add(start_len) };
-    for element in 0..elements {
-        let bit_index = element * bits;
-        let byte_index = bit_index / 8;
-        let shift = bit_index & 7;
-        // `byte_index < required_bytes <= stored.len()`.
-        let value = if stored.len() - byte_index >= 4 {
-            // SAFETY: at least 4 bytes remain from `byte_index`.
-            let word = unsafe {
-                stored
-                    .as_ptr()
-                    .add(byte_index)
-                    .cast::<u32>()
-                    .read_unaligned()
-            };
-            u32::from_le(word) >> shift
-        } else {
-            let mut word = 0u32;
-            for (offset, &byte) in stored[byte_index..].iter().enumerate() {
-                word |= u32::from(byte) << (offset * 8);
-            }
-            word >> shift
-        } & mask;
-        // SAFETY: `reserve` made room for `output_len = 2 * elements` bytes
-        // after `start_len`, and `out` advances 2 bytes per element.
-        unsafe {
-            out.cast::<u16>().write_unaligned((value as u16).to_le());
-            out = out.add(2);
-        }
-    }
-    // SAFETY: the loop initialized the `output_len` bytes after `start_len`.
-    unsafe {
-        output.set_len(start_len + output_len);
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn unpack_lsb_bits_u64_fast(
-    stored: &[u8],
-    bits: usize,
-    element_width: usize,
-    elements: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let mask = (1u64 << bits) - 1;
-    let start_len = output.len();
-    let output_len = elements
-        .checked_mul(element_width)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut byte_index = 0usize;
-    let mut bit_buffer = 0u64;
-    let mut available_bits = 0usize;
-
-    output.reserve(output_len);
-    // SAFETY: `start_len` is the length, within the allocation.
-    let mut out = unsafe { output.as_mut_ptr().add(start_len) };
-    for _ in 0..elements {
-        while available_bits < bits {
-            let byte = *stored.get(byte_index).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-            })?;
-            bit_buffer |= u64::from(byte) << available_bits;
-            available_bits += 8;
-            byte_index += 1;
-        }
-        // SAFETY: `reserve` made room for `output_len = elements *
-        // element_width` bytes after `start_len`, and `out` advances by
-        // `element_width` per element.
-        unsafe {
-            write_value(&mut out, bit_buffer & mask, element_width);
-        }
-        bit_buffer >>= bits;
-        available_bits -= bits;
-    }
-    // SAFETY: the loop initialized the `output_len` bytes after `start_len`.
-    unsafe {
-        output.set_len(start_len + output_len);
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the mask keeps values within 64 bits"
-)]
-fn unpack_lsb_bits_u128_fast(
-    stored: &[u8],
-    bits: usize,
-    element_width: usize,
-    elements: usize,
-    output: &mut Vec<u8>,
-) -> Result<()> {
-    let mask = (1u128 << bits) - 1;
-    let start_len = output.len();
-    let output_len = elements
-        .checked_mul(element_width)
-        .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow))?;
-    let mut byte_index = 0usize;
-    let mut bit_buffer = 0u128;
-    let mut available_bits = 0usize;
-
-    output.reserve(output_len);
-    // SAFETY: `start_len` is the length, within the allocation.
-    let mut out = unsafe { output.as_mut_ptr().add(start_len) };
-    for _ in 0..elements {
-        while available_bits < bits {
-            let byte = *stored.get(byte_index).ok_or_else(|| {
-                Error::new(ErrorKind::Malformed).with_detail("bitpack input is truncated")
-            })?;
-            bit_buffer |= u128::from(byte) << available_bits;
-            available_bits += 8;
-            byte_index += 1;
-        }
-        // SAFETY: `reserve` made room for `output_len = elements *
-        // element_width` bytes after `start_len`, and `out` advances by
-        // `element_width` per element.
-        unsafe {
-            write_value(&mut out, (bit_buffer & mask) as u64, element_width);
-        }
-        bit_buffer >>= bits;
-        available_bits -= bits;
-    }
-    // SAFETY: the loop initialized the `output_len` bytes after `start_len`.
-    unsafe {
-        output.set_len(start_len + output_len);
-    }
-    Ok(())
-}
-
-/// Writes `value` as a little-endian element of `element_width` bytes at
-/// `*out` and advances `*out` past it.
-///
-/// # Safety
-///
-/// `*out` must be valid for `element_width` bytes of writes.
-#[cfg(not(feature = "paranoid"))]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "values were masked to the element width"
-)]
-unsafe fn write_value(out: &mut *mut u8, value: u64, element_width: usize) {
-    // SAFETY: the caller guarantees `element_width` writable bytes, so the
-    // advanced pointer stays within or one past the same allocation.
-    unsafe {
-        match element_width {
-            1 => (*out).write(value as u8),
-            2 => (*out).cast::<u16>().write_unaligned((value as u16).to_le()),
-            4 => (*out).cast::<u32>().write_unaligned((value as u32).to_le()),
-            8 => (*out).cast::<u64>().write_unaligned(value.to_le()),
-            _ => unreachable!("validated bitpack element width"),
-        }
-        *out = out.add(element_width);
-    }
-}
-
-#[cfg(feature = "paranoid")]
-fn unpack_lsb_bits_u64_safe(
+fn unpack_lsb_bits_u64(
     stored: &[u8],
     bits: usize,
     element_width: usize,
@@ -337,19 +125,18 @@ fn unpack_lsb_bits_u64_safe(
             byte_index += 1;
         }
         let value = bit_buffer & mask;
-        write_value_safe(out, value, element_width);
+        write_value(out, value, element_width);
         bit_buffer >>= bits;
         available_bits -= bits;
     }
     Ok(())
 }
 
-#[cfg(feature = "paranoid")]
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the mask keeps values within 64 bits"
 )]
-fn unpack_lsb_bits_u128_safe(
+fn unpack_lsb_bits_u128(
     stored: &[u8],
     bits: usize,
     element_width: usize,
@@ -370,20 +157,19 @@ fn unpack_lsb_bits_u128_safe(
             byte_index += 1;
         }
         let value = bit_buffer & mask;
-        write_value_safe(out, value as u64, element_width);
+        write_value(out, value as u64, element_width);
         bit_buffer >>= bits;
         available_bits -= bits;
     }
     Ok(())
 }
 
-#[cfg(feature = "paranoid")]
 #[expect(
     clippy::inline_always,
-    reason = "paranoid bitpack fallback writes one tiny scalar per decoded value"
+    reason = "bitpack writes one tiny scalar per decoded value"
 )]
 #[inline(always)]
-fn write_value_safe(out: &mut [u8], value: u64, element_width: usize) {
+fn write_value(out: &mut [u8], value: u64, element_width: usize) {
     let bytes = value.to_le_bytes();
     match element_width {
         1 => out[0] = bytes[0],

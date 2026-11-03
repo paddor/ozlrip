@@ -66,8 +66,8 @@ constructor or `Default` and set fields, and give `match` a wildcard arm.
   them, frames that use the nodes return `Unsupported`.
 - `no_std`: build with `--no-default-features --features alloc`, plus
   `zstd` and `lz4` as needed. `std` adds SIMD dispatch in the codecs.
-- `paranoid`: forbids unsafe code in `ozlrip` and in the `zrip` and `lz4rip`
-  code it calls, and takes the safe paths. It does not change the limits.
+- `paranoid`: no effect today. Every crate is `#![forbid(unsafe_code)]`, and
+  so are the `zrip` and `lz4rip` decoders it calls.
 - Outputs: `decode`, `decode_into`, and `Decoder::decode_chunks` take frames
   with one serial output and return `Unsupported` for others.
   `decode_outputs` takes any frame and returns each output with its type.
@@ -87,7 +87,7 @@ constructor or `Default` and set fields, and give `match` a wildcard arm.
   zigzag, bitpack, bitunpack, range-pack, flatpack, sparse num, partition,
   quantize
 - [x] Text/reconstruction transforms: tokenizer, parse-int, LZ, field-LZ
-- [x] `paranoid` safe-code baseline
+- [x] No `unsafe`: every crate is `#![forbid(unsafe_code)]`
 - [x] OpenZL format v27, including PivCo-Huffman
 - [x] PivCo-Huffman payload decode, safe scalar path, and std-gated SIMD merge
 - [x] Fat-bundle dictionary materialization for zstd

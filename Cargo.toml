@@ -30,6 +30,8 @@ std = ["alloc", "ozlrip-core/std", "ozlrip-decode/std"]
 alloc = ["ozlrip-core/alloc", "ozlrip-decode/alloc"]
 zstd = ["ozlrip-decode/zstd"]
 lz4 = ["ozlrip-decode/lz4"]
+# No effect today: every build is safe Rust. Kept so existing feature lists
+# build, and to keep any future `unsafe` out of builds that enable it.
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
 
 [dependencies]
@@ -52,7 +54,6 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 doc_markdown = "allow"
-undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 lto = "thin"

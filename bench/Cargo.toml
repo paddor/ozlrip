@@ -10,7 +10,6 @@ build = "build.rs"
 [features]
 default = ["ozlrip/default"]
 no-checksum = ["ozlrip/default"]
-paranoid = ["ozlrip/default", "ozlrip/paranoid"]
 
 [dependencies]
 openzl-shim = { path = "../tools/openzl-shim" }

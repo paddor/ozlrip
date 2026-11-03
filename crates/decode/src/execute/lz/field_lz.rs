@@ -3,12 +3,9 @@
 
 use alloc::vec::Vec;
 
-#[cfg(feature = "paranoid")]
-use crate::arith::{checked_add, checked_mul};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
-#[cfg(not(feature = "paranoid"))]
-use super::fast_field_lz;
+use crate::arith::{checked_add, checked_mul};
 use crate::execute::elements::{read_var_u64, require_numeric_width};
 use crate::execute::output::check_output_len;
 use crate::execute::runtime::DecodeScratch;
@@ -101,41 +98,25 @@ pub(in crate::execute) fn decode_field_lz_node_to_output(
             })?;
     }
 
-    #[cfg(not(feature = "paranoid"))]
-    fast_field_lz::decode_to_output(
-        literals.bytes,
-        tokens.bytes,
+    let mut sequences = FieldLzSequences::new(
         offsets.bytes,
         extra_literal_lengths.bytes,
         extra_match_lengths.bytes,
         element_width,
-        output_capacity,
+    );
+    decode_field_lz_tokens(
+        literals.bytes,
+        tokens.bytes,
+        &mut sequences,
+        output_limit,
         output,
         output_base,
     )?;
-    #[cfg(feature = "paranoid")]
-    {
-        let mut sequences = FieldLzSequences::new(
-            offsets.bytes,
-            extra_literal_lengths.bytes,
-            extra_match_lengths.bytes,
-            element_width,
-        );
-        decode_field_lz_safe(
-            literals.bytes,
-            tokens.bytes,
-            &mut sequences,
-            output_limit,
-            output,
-            output_base,
-        )?;
-    }
     Ok(element_width)
 }
 
 /// Decodes field-LZ tokens with checked appends.
-#[cfg(feature = "paranoid")]
-fn decode_field_lz_safe(
+fn decode_field_lz_tokens(
     literals: &[u8],
     tokens: &[u8],
     sequences: &mut FieldLzSequences<'_>,
@@ -168,7 +149,6 @@ fn decode_field_lz_safe(
 
 /// Turns field-LZ tokens into byte offsets and lengths, reading the offset
 /// and extra length streams and keeping the three repeat offsets.
-#[cfg(feature = "paranoid")]
 struct FieldLzSequences<'a> {
     reps: [usize; 3],
     offsets: core::slice::Iter<'a, [u8; 4]>,
@@ -178,7 +158,6 @@ struct FieldLzSequences<'a> {
     min_match: usize,
 }
 
-#[cfg(feature = "paranoid")]
 impl<'a> FieldLzSequences<'a> {
     fn new(
         offsets: &'a [u8],
@@ -261,7 +240,6 @@ impl<'a> FieldLzSequences<'a> {
     }
 }
 
-#[cfg(feature = "paranoid")]
 fn next_u32(values: &mut core::slice::Iter<'_, [u8; 4]>) -> Result<usize> {
     let bytes = values.next().ok_or_else(|| {
         Error::new(ErrorKind::Malformed).with_detail("numeric stream is exhausted")
@@ -269,7 +247,6 @@ fn next_u32(values: &mut core::slice::Iter<'_, [u8; 4]>) -> Result<usize> {
     Ok(u32::from_le_bytes(*bytes) as usize)
 }
 
-#[cfg(feature = "paranoid")]
 #[expect(
     clippy::inline_always,
     reason = "profiled field-LZ token loop pays measurable append call overhead"
@@ -292,7 +269,6 @@ fn append_field_lz_literals(
     Ok(())
 }
 
-#[cfg(feature = "paranoid")]
 #[expect(
     clippy::inline_always,
     reason = "profiled field-LZ token loop pays measurable match append call overhead"
@@ -340,4 +316,128 @@ fn append_field_lz_match(
         copied += len;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use ozlrip_core::Result;
+
+    use super::{FieldLzSequences, decode_field_lz_tokens};
+
+    #[expect(clippy::too_many_arguments, reason = "mirrors the field_lz streams")]
+    fn decode_to_output(
+        literals: &[u8],
+        tokens: &[u8],
+        offsets: &[u8],
+        extra_literal_lengths: &[u8],
+        extra_match_lengths: &[u8],
+        element_width: usize,
+        output_capacity: usize,
+        output: &mut Vec<u8>,
+        output_base: usize,
+    ) -> Result<()> {
+        let mut sequences = FieldLzSequences::new(
+            offsets,
+            extra_literal_lengths,
+            extra_match_lengths,
+            element_width,
+        );
+        decode_field_lz_tokens(
+            literals,
+            tokens,
+            &mut sequences,
+            output_base + output_capacity,
+            output,
+            output_base,
+        )
+    }
+
+    #[test]
+    fn decodes_overlapping_explicit_offset_match() {
+        let mut output = Vec::with_capacity(16);
+        let token = 3 | (4 << 2) | (4 << 6);
+
+        decode_to_output(
+            b"abcdWXYZ",
+            &u16::to_le_bytes(token),
+            &u32::to_le_bytes(4),
+            &[],
+            &[],
+            1,
+            16,
+            &mut output,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"abcdabcdabcdWXYZ");
+    }
+
+    #[test]
+    fn decodes_long_overlapping_repeat() {
+        let mut output = Vec::with_capacity(1024);
+        let token = 3 | (15 << 2) | (15 << 6);
+
+        decode_to_output(
+            b"0123456789abcdef!",
+            &u16::to_le_bytes(token),
+            &u32::to_le_bytes(16),
+            &u32::to_le_bytes(1),
+            &u32::to_le_bytes(476),
+            1,
+            512,
+            &mut output,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(&output[..16], b"0123456789abcdef");
+        assert_eq!(output[16..511], b"0123456789abcdef".repeat(31)[..495]);
+        assert_eq!(output[511], b'!');
+    }
+
+    #[test]
+    fn decodes_with_nonzero_output_base() {
+        let mut output = Vec::from(&b"pre"[..]);
+        output.reserve_exact(8);
+        let token = 3 | (3 << 2);
+
+        decode_to_output(
+            b"abcz",
+            &u16::to_le_bytes(token),
+            &u32::to_le_bytes(3),
+            &[],
+            &[],
+            1,
+            8,
+            &mut output,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(output, b"preabcabcaz");
+    }
+
+    #[test]
+    fn rejects_extra_numeric_values() {
+        let mut output = Vec::with_capacity(8);
+        let token = 3 | (4 << 2);
+
+        let err = decode_to_output(
+            b"abcd",
+            &u16::to_le_bytes(token),
+            &[4, 0, 0, 0, 7, 0, 0, 0],
+            &[],
+            &[],
+            1,
+            8,
+            &mut output,
+            0,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ozlrip_core::ErrorKind::Malformed);
+    }
 }

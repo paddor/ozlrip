@@ -1,8 +1,6 @@
 //! LZ-family nodes: `lz`, `field_lz`, and the deprecated `fastlz` and
 //! `rolz`.
 
-mod fast_field_lz;
-mod fast_lz;
 mod fastlz;
 mod field_lz;
 mod legacy_literals;

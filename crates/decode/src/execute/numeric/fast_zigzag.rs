@@ -1,16 +1,6 @@
-#![cfg_attr(feature = "paranoid", forbid(unsafe_code))]
-
 use alloc::vec::Vec;
 
 pub(super) fn decode_numeric(input: &[u8], element_width: usize, output: &mut Vec<u8>) {
-    #[cfg(not(feature = "paranoid"))]
-    if decode_numeric_fast(input, element_width, output) {
-        return;
-    }
-    decode_numeric_safe(input, element_width, output);
-}
-
-fn decode_numeric_safe(input: &[u8], element_width: usize, output: &mut Vec<u8>) {
     match element_width {
         1 => {
             for &encoded in input {
@@ -41,83 +31,4 @@ fn decode_numeric_safe(input: &[u8], element_width: usize, output: &mut Vec<u8>)
         }
         _ => unreachable!("validate_numeric_stream_width accepted only supported widths"),
     }
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_numeric_fast(input: &[u8], element_width: usize, output: &mut Vec<u8>) -> bool {
-    match element_width {
-        2 => decode_u16_fast(input, output),
-        4 => decode_u32_fast(input, output),
-        8 => decode_u64_fast(input, output),
-        _ => false,
-    }
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_u16_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(2) {
-        return false;
-    }
-    output.reserve(input.len());
-    let start = output.len();
-    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
-    // the input is whole 2-byte chunks, so every write stays in that room.
-    unsafe {
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.as_chunks::<2>().0.iter().enumerate() {
-            let value = u16::from_le_bytes(*encoded);
-            let mask = 0u16.wrapping_sub(value & 1);
-            dst.add(index * 2)
-                .cast::<u16>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_u32_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(4) {
-        return false;
-    }
-    output.reserve(input.len());
-    let start = output.len();
-    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
-    // the input is whole 4-byte chunks, so every write stays in that room.
-    unsafe {
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.as_chunks::<4>().0.iter().enumerate() {
-            let value = u32::from_le_bytes(*encoded);
-            let mask = 0u32.wrapping_sub(value & 1);
-            dst.add(index * 4)
-                .cast::<u32>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
-}
-
-#[cfg(not(feature = "paranoid"))]
-fn decode_u64_fast(input: &[u8], output: &mut Vec<u8>) -> bool {
-    if !input.len().is_multiple_of(8) {
-        return false;
-    }
-    output.reserve(input.len());
-    let start = output.len();
-    // SAFETY: `reserve` left room for `input.len()` bytes after `start`, and
-    // the input is whole 8-byte chunks, so every write stays in that room.
-    unsafe {
-        let dst = output.as_mut_ptr().add(start);
-        for (index, encoded) in input.as_chunks::<8>().0.iter().enumerate() {
-            let value = u64::from_le_bytes(*encoded);
-            let mask = 0u64.wrapping_sub(value & 1);
-            dst.add(index * 8)
-                .cast::<u64>()
-                .write_unaligned(((value >> 1) ^ mask).to_le());
-        }
-        output.set_len(start + input.len());
-    }
-    true
 }

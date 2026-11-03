@@ -188,28 +188,6 @@ pub(in crate::execute) fn decode_dispatch_string_node_to_serial_output(
     limits: Limits,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    decode_dispatch_string_to_serial(
-        inputs,
-        variable_inputs,
-        header,
-        format_version,
-        limits,
-        output,
-        true,
-    )
-}
-
-/// `allow_fast: false` decodes CSV shapes through the generic loop, so tests
-/// can compare it with the fast paths.
-pub(super) fn decode_dispatch_string_to_serial(
-    inputs: &[StreamInput<'_>],
-    variable_inputs: u32,
-    header: &[u8],
-    format_version: u32,
-    limits: Limits,
-    output: &mut Vec<u8>,
-    allow_fast: bool,
-) -> Result<()> {
     require_empty_header(header, "dispatch_string headers are unsupported")?;
     let (indices, string_inputs, index_count) =
         dispatch_shape(inputs, variable_inputs, format_version)?;
@@ -226,9 +204,7 @@ pub(super) fn decode_dispatch_string_to_serial(
             }
         }
         2 => {
-            if append_u16_dispatched_to_serial(indices.bytes, &mut sources, output, allow_fast)? {
-                return Ok(());
-            }
+            append_u16_dispatched_to_serial(indices.bytes, &mut sources, output)?;
         }
         _ => unreachable!("require_numeric_width accepted only the expected dispatch width"),
     }

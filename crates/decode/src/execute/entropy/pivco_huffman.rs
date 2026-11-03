@@ -1,7 +1,7 @@
 use alloc::{vec, vec::Vec};
 use core::cmp;
 
-#[cfg(all(feature = "std", not(feature = "paranoid")))]
+#[cfg(feature = "std")]
 use fearless_simd::{Level, Simd, mask8x16, prelude::*, u8x16};
 use ozlrip_core::{Error, ErrorKind, Limits, Result};
 
@@ -547,7 +547,7 @@ fn merge_results(
 }
 
 fn merge_constant_constant(bitmap: &[u8], count: usize, left: u8, right: u8, output: &mut Vec<u8>) {
-    #[cfg(all(feature = "std", not(feature = "paranoid")))]
+    #[cfg(feature = "std")]
     if count >= 16 {
         merge_constant_constant_simd(bitmap, count, left, right, output);
         return;
@@ -556,7 +556,7 @@ fn merge_constant_constant(bitmap: &[u8], count: usize, left: u8, right: u8, out
     merge_constant_constant_scalar(bitmap, count, left, right, output);
 }
 
-#[cfg(all(feature = "std", not(feature = "paranoid")))]
+#[cfg(feature = "std")]
 fn merge_constant_constant_simd(
     bitmap: &[u8],
     count: usize,
@@ -570,7 +570,7 @@ fn merge_constant_constant_simd(
     );
 }
 
-#[cfg(all(feature = "std", not(feature = "paranoid")))]
+#[cfg(feature = "std")]
 #[expect(
     clippy::inline_always,
     reason = "fearless_simd dispatch needs inlining for target-feature codegen"

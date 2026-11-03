@@ -39,8 +39,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --workspace --all-targets --no-default-features --features alloc -- -D warnings
-      - run: cargo clippy --workspace --all-targets --features paranoid -- -D warnings
-      - run: cargo test --workspace --all-targets --features paranoid
       - name: No duplicate dependencies
         run: |
           dups=$(cargo tree -d -e normal --workspace --target all 2>/dev/null)
@@ -54,7 +52,6 @@ jobs:
         with:
           targets: x86_64-unknown-none
       - run: cargo build --no-default-features --features alloc,zstd,lz4 --target x86_64-unknown-none
-      - run: cargo build --no-default-features --features alloc,zstd,lz4,paranoid --target x86_64-unknown-none
 
   i686:
     runs-on: ubuntu-latest
@@ -131,13 +128,3 @@ jobs:
           cargo clippy --manifest-path interop/Cargo.toml --all-targets -- -D warnings
           cargo clippy --manifest-path bench/Cargo.toml --all-targets -- -D warnings
 
-  miri:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-      - run: cargo miri test -p ozlrip-decode --no-default-features --features alloc
-      - name: Miri on a big-endian target
-        run: cargo miri test -p ozlrip-decode --no-default-features --features alloc --target s390x-unknown-linux-gnu
