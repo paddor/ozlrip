@@ -5,7 +5,7 @@ resolver = "3"
 
 [package]
 name = "ozlrip"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Memory-safe Rust decoder-first implementation of OpenZL"
@@ -35,8 +35,8 @@ lz4 = ["ozlrip-decode/lz4"]
 paranoid = ["ozlrip-core/paranoid", "ozlrip-decode/paranoid"]
 
 [dependencies]
-ozlrip-core = { version = "0.5.0", path = "crates/core", default-features = false }
-ozlrip-decode = { version = "0.5.0", path = "crates/decode", default-features = false }
+ozlrip-core = { version = "0.6.0", path = "crates/core", default-features = false }
+ozlrip-decode = { version = "0.6.0", path = "crates/decode", default-features = false }
 
 [dev-dependencies]
 ozlrip-test-support = { path = "crates/test-support" }

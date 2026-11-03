@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0]
+
 - Remove all unsafe code. Every crate is `#![forbid(unsafe_code)]`; the
   `paranoid` feature stays and has no effect today. The unchecked CSV
   `dispatch_string` row writers are gone, and one checked writer serves
